@@ -1,0 +1,17 @@
+[package]
+name = "fluxkit"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Multi-crate no_std motor-control library workspace entry point"
+repository = ""
+
+[features]
+default = []
+approx-trig = ["fluxkit_math/approx-trig"]
+fixed-point = ["fluxkit_math/fixed-point"]
+defmt = ["fluxkit_math/defmt"]
+serde = ["fluxkit_math/serde"]
+
+[dependencies]
+fluxkit_math = { path = "../fluxkit_math" }

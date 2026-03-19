@@ -1,0 +1,19 @@
+[package]
+name = "fluxkit_math"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Deterministic no_std math primitives for BLDC/PMSM field-oriented control"
+repository = ""
+
+[features]
+default = []
+approx-trig = []
+fixed-point = []
+defmt = ["dep:defmt"]
+serde = ["dep:serde"]
+
+[dependencies]
+defmt = { version = "0.3", optional = true }
+libm = { version = "0.2", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }

@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/fluxkit", "crates/fluxkit_math"]
+default-members = ["crates/fluxkit"]
+resolver = "2"
