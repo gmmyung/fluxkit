@@ -8,7 +8,7 @@ use fluxkit_math::{
 use crate::{
     config::CurrentLoopConfig,
     control::current::CurrentReference,
-    fault::FaultKind,
+    error::Error,
     io::{FastLoopInput, FastLoopOutput},
     mode::ControlMode,
     params::{InverterParams, MotorParams},
@@ -18,25 +18,69 @@ use crate::{
     validation::{validate_controller_config, validate_fast_loop_input},
 };
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// Pure control-engine state for a single motor.
+///
+/// ```mermaid
+/// flowchart LR
+///     A[Phase currents abc] --> B[Input validation]
+///     V[Bus voltage] --> B
+///     R[Rotor estimate] --> B
+///     T[dt_seconds] --> B
+///     B --> C[Clarke transform]
+///     C --> D[Park transform]
+///     D --> E[Measure id iq]
+///     I[id_ref iq_ref] --> F[Current error]
+///     E --> F
+///     F --> G[d-axis PI]
+///     F --> H[q-axis PI]
+///     G --> J[vd]
+///     H --> K[vq]
+///     J --> L[Vector limit in dq]
+///     K --> L
+///     L --> M[Inverse Park]
+///     M --> N[Configured modulator]
+///     N --> O[Duty clamp]
+///     O --> P[Phase duty output]
+///     L --> Q[Status snapshot]
+///     E --> Q
+/// ```
 #[derive(Clone, Debug)]
-pub struct MotorController {
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MotorController<M = Svpwm> {
     motor: MotorParams,
     inverter: InverterParams,
     config: CurrentLoopConfig,
+    modulator: M,
     state: MotorState,
     mode: ControlMode,
     id_target: Amps,
     iq_target: Amps,
     d_pi: PiController,
     q_pi: PiController,
-    active_fault: Option<FaultKind>,
+    active_error: Option<Error>,
     status: MotorStatus,
 }
 
-impl MotorController {
+impl MotorController<Svpwm> {
     /// Creates a new motor controller with explicit params and tuning.
     pub fn new(motor: MotorParams, inverter: InverterParams, config: CurrentLoopConfig) -> Self {
+        Self::new_with_modulator(motor, inverter, config, Svpwm)
+    }
+}
+
+impl<M> MotorController<M>
+where
+    M: Modulator,
+{
+    /// Creates a new motor controller with an explicit modulation strategy.
+    pub fn new_with_modulator(
+        motor: MotorParams,
+        inverter: InverterParams,
+        config: CurrentLoopConfig,
+        modulator: M,
+    ) -> Self {
         let static_voltage_limit = config
             .max_voltage_mag
             .get()
@@ -53,6 +97,7 @@ impl MotorController {
             motor,
             inverter,
             config,
+            modulator,
             state: MotorState::Disabled,
             mode: ControlMode::Disabled,
             id_target: Amps::new(id_target),
@@ -69,26 +114,31 @@ impl MotorController {
                 out_min: -static_voltage_limit,
                 out_max: static_voltage_limit,
             }),
-            active_fault: None,
+            active_error: None,
             status: MotorStatus {
                 state: MotorState::Disabled,
                 mode: ControlMode::Disabled,
-                active_fault: None,
+                active_error: None,
                 last_bus_voltage: Volts::ZERO,
                 last_measured_idq: zero_current_dq(),
                 last_commanded_vdq: zero_voltage_dq(),
                 last_saturated: false,
-                last_rotor_source: None,
             },
         };
 
         if !validate_controller_config(&controller.motor, &controller.inverter, &controller.config)
         {
-            controller.latch_fault(FaultKind::ConfigurationInvalid);
+            controller.latch_error(Error::ConfigurationInvalid);
         }
 
         controller.refresh_status();
         controller
+    }
+
+    /// Returns the configured modulation strategy.
+    #[inline]
+    pub const fn modulator(&self) -> &M {
+        &self.modulator
     }
 
     /// Returns the static motor parameters.
@@ -127,9 +177,9 @@ impl MotorController {
         self.id_target = Amps::new(clamp(id.get(), -limit, limit));
     }
 
-    /// Enables the controller if no fault is latched.
+    /// Enables the controller if no error is latched.
     pub fn enable(&mut self) {
-        if self.active_fault.is_none() && self.state == MotorState::Disabled {
+        if self.active_error.is_none() && self.state == MotorState::Disabled {
             self.state = MotorState::Ready;
         }
         self.refresh_status();
@@ -143,10 +193,10 @@ impl MotorController {
         self.refresh_status();
     }
 
-    /// Clears a latched fault when the static configuration is valid.
-    pub fn clear_fault(&mut self) {
+    /// Clears a latched error when the static configuration is valid.
+    pub fn clear_error(&mut self) {
         if validate_controller_config(&self.motor, &self.inverter, &self.config) {
-            self.active_fault = None;
+            self.active_error = None;
             self.d_pi.reset();
             self.q_pi.reset();
             self.state = MotorState::Disabled;
@@ -155,20 +205,29 @@ impl MotorController {
     }
 
     /// Executes the synchronous high-rate current loop.
+    ///
+    /// The current-loop implementation is:
+    ///
+    /// 1. Validate `abc` current, bus voltage, rotor angle, and `dt`.
+    /// 2. Transform measured currents into the rotating `dq` frame.
+    /// 3. Compute `d`/`q` current error from the configured references.
+    /// 4. Run one PI controller per axis.
+    /// 5. Circularly limit the commanded `vd/vq` vector.
+    /// 6. Modulate the limited voltage with the configured modulator.
+    /// 7. Return bounded duty plus telemetry and error state.
     pub fn fast_tick(&mut self, input: FastLoopInput) -> FastLoopOutput {
         self.status.last_bus_voltage = input.bus_voltage;
-        self.status.last_rotor_source = Some(input.rotor.source);
 
-        if let Some(fault) = self.active_fault {
+        if let Some(error) = self.active_error {
             self.state = MotorState::Faulted;
             self.refresh_status();
-            return self.neutral_output(fault);
+            return self.neutral_output(error);
         }
 
-        if let Err(fault) = validate_fast_loop_input(&input, &self.inverter) {
-            self.latch_fault(fault);
+        if let Err(error) = validate_fast_loop_input(&input, &self.inverter) {
+            self.latch_error(error);
             self.refresh_status();
-            return self.neutral_output(fault);
+            return self.neutral_output(error);
         }
 
         let electrical_angle = input.rotor.electrical_angle.wrapped_pm_pi().get();
@@ -179,9 +238,9 @@ impl MotorController {
         self.status.last_measured_idq = measured_idq;
 
         if !dq_is_finite(measured_idq_f32.d, measured_idq_f32.q) {
-            self.latch_fault(FaultKind::NonFiniteComputation);
+            self.latch_error(Error::NonFiniteComputation);
             self.refresh_status();
-            return self.neutral_output(FaultKind::NonFiniteComputation);
+            return self.neutral_output(Error::NonFiniteComputation);
         }
 
         if self.state == MotorState::Disabled || self.mode == ControlMode::Disabled {
@@ -191,7 +250,7 @@ impl MotorController {
                 measured_idq,
                 commanded_vdq: zero_voltage_dq(),
                 saturated: false,
-                fault: None,
+                error: None,
             };
         }
 
@@ -202,7 +261,7 @@ impl MotorController {
                 measured_idq,
                 commanded_vdq: zero_voltage_dq(),
                 saturated: false,
-                fault: None,
+                error: None,
             };
         }
 
@@ -221,16 +280,18 @@ impl MotorController {
             .update(current_ref.iq.get() - measured_idq_f32.q, input.dt_seconds);
 
         if !dq_is_finite(vd, vq) {
-            self.latch_fault(FaultKind::NonFiniteComputation);
+            self.latch_error(Error::NonFiniteComputation);
             self.refresh_status();
-            return self.neutral_output(FaultKind::NonFiniteComputation);
+            return self.neutral_output(Error::NonFiniteComputation);
         }
 
         let requested_vdq = fluxkit_math::frame::Dq::new(vd, vq);
         let limited_vdq = limit_norm_dq(requested_vdq, voltage_limit);
         let controller_saturated = limited_vdq != requested_vdq;
         let voltage_alpha_beta = inverse_park(limited_vdq, electrical_angle);
-        let modulation = Svpwm.modulate(voltage_alpha_beta, input.bus_voltage);
+        let modulation = self
+            .modulator
+            .modulate(voltage_alpha_beta, input.bus_voltage);
 
         let phase_duty = self.clamp_phase_duty(modulation.duty);
         let commanded_vdq = limited_vdq.map(Volts::new);
@@ -238,9 +299,9 @@ impl MotorController {
         self.status.last_saturated = controller_saturated || modulation.saturated;
 
         if !duty_is_finite(phase_duty) {
-            self.latch_fault(FaultKind::NonFiniteComputation);
+            self.latch_error(Error::NonFiniteComputation);
             self.refresh_status();
-            return self.neutral_output(FaultKind::NonFiniteComputation);
+            return self.neutral_output(Error::NonFiniteComputation);
         }
 
         if matches!(self.state, MotorState::Ready | MotorState::Disabled) {
@@ -254,7 +315,7 @@ impl MotorController {
             measured_idq,
             commanded_vdq,
             saturated: self.status.last_saturated,
-            fault: None,
+            error: None,
         }
     }
 
@@ -300,27 +361,27 @@ impl MotorController {
         })
     }
 
-    fn latch_fault(&mut self, fault: FaultKind) {
-        self.active_fault = Some(fault);
+    fn latch_error(&mut self, error: Error) {
+        self.active_error = Some(error);
         self.state = MotorState::Faulted;
         self.d_pi.reset();
         self.q_pi.reset();
     }
 
-    fn neutral_output(&self, fault: FaultKind) -> FastLoopOutput {
+    fn neutral_output(&self, error: Error) -> FastLoopOutput {
         FastLoopOutput {
             phase_duty: neutral_phase_duty(),
             measured_idq: self.status.last_measured_idq,
             commanded_vdq: zero_voltage_dq(),
             saturated: false,
-            fault: Some(fault),
+            error: Some(error),
         }
     }
 
     fn refresh_status(&mut self) {
         self.status.state = self.state;
         self.status.mode = self.mode;
-        self.status.active_fault = self.active_fault;
+        self.status.active_error = self.active_error;
     }
 }
 
@@ -344,14 +405,14 @@ mod tests {
     use super::MotorController;
     use crate::{
         config::CurrentLoopConfig,
-        fault::FaultKind,
-        io::{AngleSource, FastLoopInput, RotorEstimate},
+        error::Error,
+        io::{FastLoopInput, RotorEstimate},
         mode::ControlMode,
         params::{InverterParams, MotorParams},
         state::MotorState,
     };
     use fluxkit_math::{
-        ElectricalAngle,
+        ElectricalAngle, SinePwm,
         frame::{Abc, Dq},
         units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts},
     };
@@ -391,8 +452,6 @@ mod tests {
             id_ref_default: Amps::ZERO,
             max_id_target: Amps::new(10.0),
             max_iq_target: Amps::new(10.0),
-            medium_loop_decimation: Some(10),
-            slow_loop_decimation: Some(100),
         }
     }
 
@@ -403,7 +462,6 @@ mod tests {
             rotor: RotorEstimate {
                 electrical_angle: ElectricalAngle::new(0.0),
                 mechanical_velocity: RadPerSec::ZERO,
-                source: AngleSource::Encoder,
             },
             dt_seconds: 1.0 / 20_000.0,
         }
@@ -423,7 +481,7 @@ mod tests {
         assert_eq!(output.measured_idq, Dq::new(Amps::ZERO, Amps::ZERO));
         assert_eq!(output.commanded_vdq, Dq::new(Volts::ZERO, Volts::ZERO));
         assert!(!output.saturated);
-        assert_eq!(output.fault, None);
+        assert_eq!(output.error, None);
         assert_eq!(controller.status().state, MotorState::Running);
     }
 
@@ -437,12 +495,12 @@ mod tests {
         input.bus_voltage = Volts::new(0.0);
         let output = controller.fast_tick(input);
 
-        assert_eq!(output.fault, Some(FaultKind::InvalidBusVoltage));
+        assert_eq!(output.error, Some(Error::InvalidBusVoltage));
         assert_eq!(output.phase_duty.a.get(), 0.5);
         assert_eq!(controller.status().state, MotorState::Faulted);
         assert_eq!(
-            controller.status().active_fault,
-            Some(FaultKind::InvalidBusVoltage)
+            controller.status().active_error,
+            Some(Error::InvalidBusVoltage)
         );
     }
 
@@ -456,7 +514,7 @@ mod tests {
         input.rotor.electrical_angle = ElectricalAngle::new(f32::NAN);
         let output = controller.fast_tick(input);
 
-        assert_eq!(output.fault, Some(FaultKind::InvalidRotorAngle));
+        assert_eq!(output.error, Some(Error::InvalidRotorAngle));
         assert_eq!(controller.status().state, MotorState::Faulted);
     }
 
@@ -470,7 +528,7 @@ mod tests {
         let output = controller.fast_tick(test_input());
 
         assert!(output.commanded_vdq.q.get() > 0.0);
-        assert_eq!(output.fault, None);
+        assert_eq!(output.error, None);
     }
 
     #[test]
@@ -533,10 +591,34 @@ mod tests {
         controller.fast_tick(bad_input);
         assert_eq!(controller.status().state, MotorState::Faulted);
 
-        controller.clear_fault();
+        controller.clear_error();
         assert_eq!(controller.status().state, MotorState::Disabled);
 
         controller.disable();
         assert_eq!(controller.status().state, MotorState::Disabled);
+    }
+
+    #[test]
+    fn controller_can_use_alternate_modulator() {
+        let mut controller = MotorController::new_with_modulator(
+            test_motor(),
+            test_inverter(),
+            test_config(),
+            SinePwm,
+        );
+        controller.set_mode(ControlMode::Current);
+        controller.set_iq_target(Amps::new(3.0));
+        controller.enable();
+
+        let output = controller.fast_tick(test_input());
+
+        assert_eq!(output.error, None);
+        for duty in [
+            output.phase_duty.a,
+            output.phase_duty.b,
+            output.phase_duty.c,
+        ] {
+            assert!((0.0..=1.0).contains(&duty.get()));
+        }
     }
 }

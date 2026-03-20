@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "aquamarine"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f50776554130342de4836ba542aa85a4ddb361690d7e8df13774d7284c3d5c2"
+dependencies = [
+ "include_dir",
+ "itertools",
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -50,6 +64,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
 name = "fluxkit"
 version = "0.1.0"
 dependencies = [
@@ -62,14 +82,19 @@ dependencies = [
 name = "fluxkit-core"
 version = "0.1.0"
 dependencies = [
+ "aquamarine",
+ "defmt 0.3.100",
  "fluxkit_math",
+ "serde",
 ]
 
 [[package]]
 name = "fluxkit-hal"
 version = "0.1.0"
 dependencies = [
+ "defmt 0.3.100",
  "fluxkit_math",
+ "serde",
 ]
 
 [[package]]
@@ -79,6 +104,34 @@ dependencies = [
  "defmt 0.3.100",
  "libm",
  "serde",
+]
+
+[[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
 ]
 
 [[package]]

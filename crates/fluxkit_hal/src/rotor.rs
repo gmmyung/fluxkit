@@ -2,33 +2,22 @@
 
 use fluxkit_math::{ElectricalAngle, units::RadPerSec};
 
-/// Hardware or estimator source behind a rotor reading.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RotorSensorKind {
-    /// Encoder-backed reading.
-    Encoder,
-    /// Hall-sensor-backed reading.
-    Hall,
-    /// Sensorless estimate.
-    Sensorless,
-}
-
-/// Rotor reading returned by a sensor or estimator.
+/// Rotor reading returned by the absolute encoder path.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RotorReading {
-    /// Electrical rotor angle.
+    /// Electrical rotor angle from the absolute encoder.
     pub electrical_angle: ElectricalAngle,
-    /// Estimated mechanical rotor speed.
+    /// Mechanical rotor speed derived from the encoder path.
     pub mechanical_velocity: RadPerSec,
-    /// Source kind for the reading.
-    pub kind: RotorSensorKind,
 }
 
-/// Narrow synchronous trait for rotor sensing.
+/// Narrow synchronous trait for absolute-encoder rotor sensing.
 pub trait RotorSensor {
     /// Platform-specific error type.
-    type Error;
+    type Error: core::error::Error;
 
-    /// Returns the current rotor estimate.
+    /// Returns the current encoder-backed rotor estimate.
     fn read_rotor(&mut self) -> Result<RotorReading, Self::Error>;
 }

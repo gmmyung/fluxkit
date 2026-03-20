@@ -2,6 +2,8 @@
 
 /// Gate-driver-specific fault classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GateDriverFault {
     /// Gate-driver undervoltage lockout.
     UnderVoltage,
@@ -18,7 +20,7 @@ pub enum GateDriverFault {
 /// Narrow synchronous trait for gate-driver supervision.
 pub trait GateDriver {
     /// Platform-specific error type.
-    type Error;
+    type Error: core::error::Error;
 
     /// Enables the gate driver.
     fn enable_gate(&mut self) -> Result<(), Self::Error>;

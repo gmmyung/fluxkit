@@ -1,6 +1,6 @@
 use fluxkit_core::{
-    AngleSource, ControlMode, CurrentLoopConfig, FastLoopInput, InverterParams, MotorController,
-    MotorParams, RotorEstimate,
+    ControlMode, CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorParams,
+    RotorEstimate,
 };
 use fluxkit_math::{
     ElectricalAngle,
@@ -38,8 +38,6 @@ fn main() {
         id_ref_default: Amps::ZERO,
         max_id_target: Amps::new(10.0),
         max_iq_target: Amps::new(10.0),
-        medium_loop_decimation: Some(10),
-        slow_loop_decimation: Some(100),
     };
 
     let mut controller = MotorController::new(motor, inverter, config);
@@ -70,7 +68,6 @@ fn main() {
             rotor: RotorEstimate {
                 electrical_angle: ElectricalAngle::new(angle),
                 mechanical_velocity: RadPerSec::new(electrical_speed / motor.pole_pairs as f32),
-                source: AngleSource::OpenLoopEstimator,
             },
             dt_seconds: dt,
         });

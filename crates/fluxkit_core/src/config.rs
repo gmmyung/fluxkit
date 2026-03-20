@@ -2,8 +2,10 @@
 
 use fluxkit_math::units::{Amps, Volts};
 
-/// Runtime tuning for the current loop and basic scheduling hooks.
+/// Runtime tuning for the current loop.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CurrentLoopConfig {
     /// Proportional gain for the `d`-axis PI controller.
     pub kp_d: f32,
@@ -21,8 +23,4 @@ pub struct CurrentLoopConfig {
     pub max_id_target: Amps,
     /// Symmetric `q`-axis current-command limit.
     pub max_iq_target: Amps,
-    /// Reserved medium-loop decimation factor.
-    pub medium_loop_decimation: Option<u16>,
-    /// Reserved slow-loop decimation factor.
-    pub slow_loop_decimation: Option<u16>,
 }

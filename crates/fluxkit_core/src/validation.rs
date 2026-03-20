@@ -4,7 +4,7 @@ use fluxkit_math::frame::Abc;
 
 use crate::{
     config::CurrentLoopConfig,
-    fault::FaultKind,
+    error::Error,
     io::FastLoopInput,
     params::{InverterParams, MotorParams},
 };
@@ -35,22 +35,20 @@ pub fn validate_controller_config(
         && finite_positive(config.max_voltage_mag.get())
         && finite_non_negative(config.max_id_target.get())
         && finite_non_negative(config.max_iq_target.get())
-        && config.medium_loop_decimation.is_none_or(|value| value > 0)
-        && config.slow_loop_decimation.is_none_or(|value| value > 0)
 }
 
 /// Validates one fast-loop input frame.
 pub fn validate_fast_loop_input(
     input: &FastLoopInput,
     inverter: &InverterParams,
-) -> Result<(), FaultKind> {
+) -> Result<(), Error> {
     if !abc_is_finite(input.phase_currents.map(|x| x.get())) {
-        return Err(FaultKind::InvalidPhaseCurrent);
+        return Err(Error::InvalidPhaseCurrent);
     }
 
     let angle = input.rotor.electrical_angle.get();
     if !angle.is_finite() {
-        return Err(FaultKind::InvalidRotorAngle);
+        return Err(Error::InvalidRotorAngle);
     }
 
     let bus_voltage = input.bus_voltage.get();
@@ -58,16 +56,16 @@ pub fn validate_fast_loop_input(
         || bus_voltage < inverter.min_bus_voltage.get()
         || bus_voltage > inverter.max_bus_voltage.get()
     {
-        return Err(FaultKind::InvalidBusVoltage);
+        return Err(Error::InvalidBusVoltage);
     }
 
     if !input.dt_seconds.is_finite() || input.dt_seconds <= 0.0 {
-        return Err(FaultKind::TimingOverrun);
+        return Err(Error::TimingOverrun);
     }
 
     let expected_dt = 1.0 / inverter.pwm_frequency_hz.get();
     if input.dt_seconds > expected_dt * 2.0 {
-        return Err(FaultKind::TimingOverrun);
+        return Err(Error::TimingOverrun);
     }
 
     Ok(())

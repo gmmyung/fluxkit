@@ -10,15 +10,14 @@
 
 pub use fluxkit_core as core;
 pub use fluxkit_core::{
-    AngleSource, ControlMode, CurrentLoopConfig, FastLoopInput, FastLoopOutput, FaultKind,
-    InverterParams, MotorCommand, MotorController, MotorParams, MotorState, MotorStatus,
-    RotorEstimate,
+    ControlMode, CurrentLoopConfig, Error, FastLoopInput, FastLoopOutput, InverterParams,
+    MotorCommand, MotorController, MotorParams, MotorState, MotorStatus, RotorEstimate,
 };
 pub use fluxkit_hal as hal;
 pub use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, FaultInput, GateDriver,
     GateDriverFault, MonotonicMicros, PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
-    RotorSensorKind, TemperatureSensor, centered_phase_duty,
+    TemperatureSensor, centered_phase_duty,
 };
 pub use fluxkit_math as math;
 pub use fluxkit_math::*;

@@ -8,10 +8,8 @@ repository = ""
 
 [features]
 default = []
-approx-trig = ["fluxkit_math/approx-trig"]
-fixed-point = ["fluxkit_math/fixed-point"]
-defmt = ["fluxkit_math/defmt"]
-serde = ["fluxkit_math/serde"]
+defmt = ["fluxkit_core/defmt", "fluxkit_hal/defmt", "fluxkit_math/defmt"]
+serde = ["fluxkit_core/serde", "fluxkit_hal/serde", "fluxkit_math/serde"]
 
 [dependencies]
 fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core" }

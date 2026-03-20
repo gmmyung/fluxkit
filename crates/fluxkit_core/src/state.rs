@@ -2,6 +2,8 @@
 
 /// Coarse runtime state of the motor controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MotorState {
     /// Pre-initialization placeholder retained for future boot sequencing.
     Uninitialized,

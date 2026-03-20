@@ -6,5 +6,13 @@ license = "MIT OR Apache-2.0"
 description = "Deterministic no_std motor-control core for Fluxkit"
 repository = ""
 
+[features]
+default = []
+defmt = ["dep:defmt", "fluxkit_math/defmt"]
+serde = ["dep:serde", "fluxkit_math/serde"]
+
 [dependencies]
+aquamarine = "0.6"
+defmt = { version = "0.3", optional = true }
 fluxkit_math = { path = "../fluxkit_math" }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }

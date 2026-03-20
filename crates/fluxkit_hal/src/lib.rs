@@ -30,10 +30,11 @@ pub use util::*;
 
 #[cfg(test)]
 mod tests {
+    use core::convert::Infallible;
+
     use crate::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, MonotonicMicros,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, RotorSensorKind,
-        centered_phase_duty,
+        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
         ElectricalAngle,
@@ -57,7 +58,7 @@ mod tests {
     }
 
     impl PhasePwm for FakePwm {
-        type Error = ();
+        type Error = Infallible;
 
         fn enable(&mut self) -> Result<(), Self::Error> {
             self.enabled = true;
@@ -79,7 +80,7 @@ mod tests {
     struct FakeCurrentSensor;
 
     impl CurrentSampler for FakeCurrentSensor {
-        type Error = ();
+        type Error = Infallible;
 
         fn sample_phase_currents(&mut self) -> Result<PhaseCurrentSample, Self::Error> {
             Ok(PhaseCurrentSample {
@@ -93,7 +94,7 @@ mod tests {
     struct FakeBusSensor;
 
     impl BusVoltageSensor for FakeBusSensor {
-        type Error = ();
+        type Error = Infallible;
 
         fn sample_bus_voltage(&mut self) -> Result<Volts, Self::Error> {
             Ok(Volts::new(24.0))
@@ -104,13 +105,12 @@ mod tests {
     struct FakeRotor;
 
     impl RotorSensor for FakeRotor {
-        type Error = ();
+        type Error = Infallible;
 
         fn read_rotor(&mut self) -> Result<RotorReading, Self::Error> {
             Ok(RotorReading {
                 electrical_angle: ElectricalAngle::new(1.0),
                 mechanical_velocity: RadPerSec::new(10.0),
-                kind: RotorSensorKind::Encoder,
             })
         }
     }
@@ -148,7 +148,7 @@ mod tests {
 
         assert_eq!(current_sample.validity, CurrentSampleValidity::Valid);
         assert_eq!(bus_voltage, Volts::new(24.0));
-        assert_eq!(rotor_reading.kind, RotorSensorKind::Encoder);
+        assert_eq!(rotor_reading.electrical_angle, ElectricalAngle::new(1.0));
         assert_eq!(clock.now_micros(), 123_456);
     }
 }

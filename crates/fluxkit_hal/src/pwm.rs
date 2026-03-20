@@ -7,7 +7,7 @@ use crate::util::centered_phase_duty;
 /// Narrow contract for a three-phase PWM output stage.
 pub trait PhasePwm {
     /// Platform-specific error type.
-    type Error;
+    type Error: core::error::Error;
 
     /// Enables the phase outputs.
     fn enable(&mut self) -> Result<(), Self::Error>;
