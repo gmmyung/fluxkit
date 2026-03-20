@@ -53,6 +53,22 @@ dependencies = [
 name = "fluxkit"
 version = "0.1.0"
 dependencies = [
+ "fluxkit-core",
+ "fluxkit-hal",
+ "fluxkit_math",
+]
+
+[[package]]
+name = "fluxkit-core"
+version = "0.1.0"
+dependencies = [
+ "fluxkit_math",
+]
+
+[[package]]
+name = "fluxkit-hal"
+version = "0.1.0"
+dependencies = [
  "fluxkit_math",
 ]
 

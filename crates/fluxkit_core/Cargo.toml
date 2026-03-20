@@ -1,0 +1,10 @@
+[package]
+name = "fluxkit-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Deterministic no_std motor-control core for Fluxkit"
+repository = ""
+
+[dependencies]
+fluxkit_math = { path = "../fluxkit_math" }

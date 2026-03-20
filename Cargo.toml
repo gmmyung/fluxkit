@@ -1,4 +1,14 @@
 [workspace]
-members = ["crates/fluxkit", "crates/fluxkit_math"]
-default-members = ["crates/fluxkit"]
+members = [
+    "crates/fluxkit",
+    "crates/fluxkit_core",
+    "crates/fluxkit_hal",
+    "crates/fluxkit_math",
+]
+default-members = [
+    "crates/fluxkit",
+    "crates/fluxkit_core",
+    "crates/fluxkit_hal",
+    "crates/fluxkit_math",
+]
 resolver = "2"

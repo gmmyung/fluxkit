@@ -14,4 +14,6 @@ defmt = ["fluxkit_math/defmt"]
 serde = ["fluxkit_math/serde"]
 
 [dependencies]
+fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core" }
+fluxkit_hal = { path = "../fluxkit_hal", package = "fluxkit-hal" }
 fluxkit_math = { path = "../fluxkit_math" }
