@@ -206,6 +206,7 @@ where
             bus_voltage,
             rotor: RotorEstimate {
                 electrical_angle: rotor.electrical_angle,
+                mechanical_angle: rotor.mechanical_angle,
                 mechanical_velocity: rotor.mechanical_velocity,
             },
             dt_seconds,
@@ -217,6 +218,18 @@ where
             .map_err(MotorSystemError::Pwm)?;
 
         Ok(output)
+    }
+
+    /// Runs the medium-rate controller hook.
+    #[inline]
+    pub fn medium_tick(&mut self, dt_seconds: f32) {
+        self.controller.medium_tick(dt_seconds);
+    }
+
+    /// Runs the slow-rate controller hook.
+    #[inline]
+    pub fn slow_tick(&mut self, dt_seconds: f32) {
+        self.controller.slow_tick(dt_seconds);
     }
 }
 
@@ -230,7 +243,7 @@ mod tests {
         RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
-        ElectricalAngle,
+        ElectricalAngle, MechanicalAngle,
         frame::Abc,
         units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts},
     };
@@ -341,10 +354,16 @@ mod tests {
             ki_d: 25.0,
             kp_q: 0.3,
             ki_q: 30.0,
+            velocity_kp: 0.5,
+            velocity_ki: 10.0,
+            position_kp: 4.0,
+            position_ki: 0.0,
             max_voltage_mag: Volts::new(12.0),
             id_ref_default: Amps::ZERO,
             max_id_target: Amps::new(5.0),
             max_iq_target: Amps::new(10.0),
+            max_velocity_target: RadPerSec::new(50.0),
+            enable_current_feedforward: true,
         }
     }
 
@@ -365,6 +384,7 @@ mod tests {
             rotor: FakeRotor {
                 reading: RotorReading {
                     electrical_angle: ElectricalAngle::new(0.0),
+                    mechanical_angle: MechanicalAngle::new(0.0),
                     mechanical_velocity: RadPerSec::new(0.0),
                 },
             },

@@ -111,8 +111,11 @@ Important boundaries:
 Implemented today:
 
 - absolute-encoder rotor path
-- `Disabled` and `Current` control modes
+- `Disabled`, `Current`, `Torque`, `Velocity`, `Position`, and `OpenLoopVoltage` modes
 - synchronous current-loop `fast_tick()`
+- medium-rate supervisory loop in `medium_tick()`
+- position and velocity loops both run in the same `medium_tick()` when `Position` mode is active
+- model-based current-loop feedforward
 - configurable modulation through `MotorController<M>`
 - generic `MotorSystem` wrapper in `fluxkit`
 
@@ -120,6 +123,21 @@ Not implemented:
 
 - startup state machines
 - calibration state machines
-- velocity / position loops
 - sensorless support
 - Embassy integration
+
+## Loop model
+
+`MotorController` uses an explicit multi-rate API:
+
+- `fast_tick()`
+  - current control
+  - current feedforward
+  - voltage limiting
+  - modulation
+- `medium_tick()`
+  - torque-to-current mapping
+  - velocity PI
+  - position PI followed by velocity PI in `Position` mode
+- `slow_tick()`
+  - currently reserved only

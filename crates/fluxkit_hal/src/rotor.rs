@@ -1,6 +1,6 @@
 //! Rotor-sensing traits.
 
-use fluxkit_math::{ElectricalAngle, units::RadPerSec};
+use fluxkit_math::{ElectricalAngle, MechanicalAngle, units::RadPerSec};
 
 /// Rotor reading returned by the absolute encoder path.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -9,6 +9,8 @@ use fluxkit_math::{ElectricalAngle, units::RadPerSec};
 pub struct RotorReading {
     /// Electrical rotor angle from the absolute encoder.
     pub electrical_angle: ElectricalAngle,
+    /// Mechanical rotor angle from the absolute encoder.
+    pub mechanical_angle: MechanicalAngle,
     /// Mechanical rotor speed derived from the encoder path.
     pub mechanical_velocity: RadPerSec,
 }

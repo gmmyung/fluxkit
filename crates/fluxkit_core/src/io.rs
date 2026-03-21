@@ -1,7 +1,7 @@
 //! Fast-loop input and output contracts.
 
 use fluxkit_math::{
-    ElectricalAngle,
+    ElectricalAngle, MechanicalAngle,
     frame::{Abc, Dq},
     modulation::PhaseDuty,
     units::{Amps, RadPerSec, Volts},
@@ -16,7 +16,13 @@ use crate::error::Error;
 pub struct RotorEstimate {
     /// Electrical rotor angle from the absolute encoder.
     pub electrical_angle: ElectricalAngle,
+    /// Mechanical rotor angle from the absolute encoder.
+    ///
+    /// This is required by `Position` mode.
+    pub mechanical_angle: MechanicalAngle,
     /// Mechanical rotor velocity estimate derived from the encoder path.
+    ///
+    /// This is used by current-loop feedforward and the velocity loop.
     pub mechanical_velocity: RadPerSec,
 }
 

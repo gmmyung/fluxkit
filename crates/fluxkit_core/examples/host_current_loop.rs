@@ -3,10 +3,10 @@ use fluxkit_core::{
     RotorEstimate,
 };
 use fluxkit_math::{
-    ElectricalAngle,
+    ElectricalAngle, MechanicalAngle,
     frame::Dq,
     inverse_clarke, inverse_park,
-    units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts},
+    units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts, Webers},
 };
 
 fn main() {
@@ -15,10 +15,10 @@ fn main() {
         phase_resistance_ohm: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
-        flux_linkage_weber: None,
+        flux_linkage_weber: Some(Webers::new(0.005)),
         max_phase_current: Amps::new(20.0),
         max_mech_speed: Some(RadPerSec::new(500.0)),
-        torque_constant_nm_per_amp: None,
+        torque_constant_nm_per_amp: Some(0.5),
     };
     let inverter = InverterParams {
         pwm_frequency_hz: Hertz::new(20_000.0),
@@ -34,10 +34,16 @@ fn main() {
         ki_d: 25.0,
         kp_q: 1.5,
         ki_q: 25.0,
+        velocity_kp: 0.5,
+        velocity_ki: 10.0,
+        position_kp: 4.0,
+        position_ki: 0.0,
         max_voltage_mag: Volts::new(12.0),
         id_ref_default: Amps::ZERO,
         max_id_target: Amps::new(10.0),
         max_iq_target: Amps::new(10.0),
+        max_velocity_target: RadPerSec::new(500.0),
+        enable_current_feedforward: true,
     };
 
     let mut controller = MotorController::new(motor, inverter, config);
@@ -67,6 +73,7 @@ fn main() {
             bus_voltage: Volts::new(24.0),
             rotor: RotorEstimate {
                 electrical_angle: ElectricalAngle::new(angle),
+                mechanical_angle: MechanicalAngle::new(angle / motor.pole_pairs as f32),
                 mechanical_velocity: RadPerSec::new(electrical_speed / motor.pole_pairs as f32),
             },
             dt_seconds: dt,

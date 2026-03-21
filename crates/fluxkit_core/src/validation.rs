@@ -19,7 +19,19 @@ pub fn validate_controller_config(
         && finite_positive(motor.phase_resistance_ohm.get())
         && finite_positive(motor.d_inductance_h.get())
         && finite_positive(motor.q_inductance_h.get())
+        && motor
+            .flux_linkage_weber
+            .map(|flux| finite_non_negative(flux.get()))
+            .unwrap_or(true)
         && finite_positive(motor.max_phase_current.get())
+        && motor
+            .max_mech_speed
+            .map(|speed| finite_positive(speed.get()))
+            .unwrap_or(true)
+        && motor
+            .torque_constant_nm_per_amp
+            .map(finite_positive)
+            .unwrap_or(true)
         && finite_positive(inverter.pwm_frequency_hz.get())
         && finite_in_range(inverter.min_duty.get(), 0.0, 1.0)
         && finite_in_range(inverter.max_duty.get(), 0.0, 1.0)
@@ -32,9 +44,14 @@ pub fn validate_controller_config(
         && config.ki_d.is_finite()
         && config.kp_q.is_finite()
         && config.ki_q.is_finite()
+        && config.velocity_kp.is_finite()
+        && config.velocity_ki.is_finite()
+        && config.position_kp.is_finite()
+        && config.position_ki.is_finite()
         && finite_positive(config.max_voltage_mag.get())
         && finite_non_negative(config.max_id_target.get())
         && finite_non_negative(config.max_iq_target.get())
+        && finite_non_negative(config.max_velocity_target.get())
 }
 
 /// Validates one fast-loop input frame.
@@ -47,7 +64,10 @@ pub fn validate_fast_loop_input(
     }
 
     let angle = input.rotor.electrical_angle.get();
-    if !angle.is_finite() {
+    if !angle.is_finite()
+        || !input.rotor.mechanical_angle.get().is_finite()
+        || !input.rotor.mechanical_velocity.get().is_finite()
+    {
         return Err(Error::InvalidRotorAngle);
     }
 

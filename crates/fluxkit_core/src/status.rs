@@ -1,8 +1,9 @@
 //! Compact status snapshots for telemetry and inspection.
 
 use fluxkit_math::{
+    MechanicalAngle,
     frame::Dq,
-    units::{Amps, Volts},
+    units::{Amps, RadPerSec, Volts},
 };
 
 use crate::{error::Error, mode::ControlMode, state::MotorState};
@@ -24,6 +25,10 @@ pub struct MotorStatus {
     pub last_measured_idq: Dq<Amps>,
     /// Most recent limited `d/q` voltage command.
     pub last_commanded_vdq: Dq<Volts>,
+    /// Most recent measured mechanical rotor angle.
+    pub last_mechanical_angle: MechanicalAngle,
+    /// Most recent measured mechanical rotor velocity.
+    pub last_mechanical_velocity: RadPerSec,
     /// Most recent saturation flag.
     pub last_saturated: bool,
 }

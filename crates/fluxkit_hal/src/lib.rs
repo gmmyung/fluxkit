@@ -37,7 +37,7 @@ mod tests {
         PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
-        ElectricalAngle,
+        ElectricalAngle, MechanicalAngle,
         frame::Abc,
         units::{Amps, Duty, RadPerSec, Volts},
     };
@@ -110,6 +110,7 @@ mod tests {
         fn read_rotor(&mut self) -> Result<RotorReading, Self::Error> {
             Ok(RotorReading {
                 electrical_angle: ElectricalAngle::new(1.0),
+                mechanical_angle: MechanicalAngle::new(1.0 / 7.0),
                 mechanical_velocity: RadPerSec::new(10.0),
             })
         }
