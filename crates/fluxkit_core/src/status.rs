@@ -25,8 +25,10 @@ pub struct MotorStatus {
     pub last_measured_idq: Dq<Amps>,
     /// Most recent limited `d/q` voltage command.
     pub last_commanded_vdq: Dq<Volts>,
-    /// Most recent measured mechanical rotor angle.
+    /// Most recent wrapped mechanical rotor angle from the absolute encoder.
     pub last_mechanical_angle: MechanicalAngle,
+    /// Most recent unwrapped mechanical rotor angle accumulated across encoder wraps.
+    pub last_unwrapped_mechanical_angle: MechanicalAngle,
     /// Most recent measured mechanical rotor velocity.
     pub last_mechanical_velocity: RadPerSec,
     /// Most recent saturation flag.

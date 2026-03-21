@@ -40,7 +40,7 @@ use crate::{
 /// flowchart LR
 ///     subgraph S[medium_tick supervisory path]
 ///         PT[Position target] --> PP[Position PI]
-///         RA[Mechanical angle] --> PP
+///         RA[Unwrapped mechanical angle] --> PP
 ///         PP --> VT[Velocity target]
 ///         TT[Torque target] --> TM[Torque to iq mapping]
 ///         VT --> VP[Velocity PI]
@@ -99,6 +99,7 @@ pub struct MotorController<M = Svpwm> {
     position_pi: PiController,
     active_error: Option<Error>,
     last_rotor: Option<RotorEstimate>,
+    last_wrapped_mechanical_angle: Option<MechanicalAngle>,
     last_current_ref: Option<fluxkit_math::frame::Dq<Amps>>,
     status: MotorStatus,
 }
@@ -174,6 +175,7 @@ where
             }),
             active_error: None,
             last_rotor: None,
+            last_wrapped_mechanical_angle: None,
             last_current_ref: None,
             status: MotorStatus {
                 state: MotorState::Disabled,
@@ -183,6 +185,7 @@ where
                 last_measured_idq: zero_current_dq(),
                 last_commanded_vdq: zero_voltage_dq(),
                 last_mechanical_angle: MechanicalAngle::new(0.0),
+                last_unwrapped_mechanical_angle: MechanicalAngle::new(0.0),
                 last_mechanical_velocity: RadPerSec::ZERO,
                 last_saturated: false,
             },
@@ -261,9 +264,11 @@ where
         self.velocity_target = RadPerSec::new(clamp(velocity.get(), -limit, limit));
     }
 
-    /// Updates the wrapped mechanical position target used by `Position` mode.
+    /// Updates the mechanical position target used by `Position` mode.
+    ///
+    /// This target is not wrapped, so it can represent multi-turn positioning.
     pub fn set_position_target(&mut self, position: MechanicalAngle) {
-        self.position_target = position.wrapped_pm_pi();
+        self.position_target = position;
     }
 
     /// Updates the direct open-loop voltage target used by `OpenLoopVoltage` mode.
@@ -315,6 +320,8 @@ where
     pub fn fast_tick(&mut self, input: FastLoopInput) -> FastLoopOutput {
         self.status.last_bus_voltage = input.bus_voltage;
         self.status.last_mechanical_angle = input.rotor.mechanical_angle;
+        self.status.last_unwrapped_mechanical_angle =
+            self.unwrap_mechanical_angle(input.rotor.mechanical_angle);
         self.status.last_mechanical_velocity = input.rotor.mechanical_velocity;
 
         if let Some(error) = self.active_error {
@@ -410,10 +417,8 @@ where
                 if let Some(rotor) = self.last_rotor {
                     if self.mode == ControlMode::Position {
                         let velocity_command = self.position_pi.update(
-                            shortest_angle_delta(
-                                rotor.mechanical_angle.wrapped_pm_pi().get(),
-                                self.position_target.get(),
-                            ),
+                            self.position_target.get()
+                                - self.status.last_unwrapped_mechanical_angle.get(),
                             dt_seconds,
                         );
                         self.set_velocity_target(RadPerSec::new(velocity_command));
@@ -608,6 +613,19 @@ where
             (current_ref.id.get() - last_ref.d.get()) / dt_seconds,
             (current_ref.iq.get() - last_ref.q.get()) / dt_seconds,
         )
+    }
+
+    fn unwrap_mechanical_angle(&mut self, wrapped_angle: MechanicalAngle) -> MechanicalAngle {
+        let unwrapped = match self.last_wrapped_mechanical_angle {
+            Some(previous_wrapped) => {
+                let delta = shortest_angle_delta(previous_wrapped.get(), wrapped_angle.get());
+                MechanicalAngle::new(self.status.last_unwrapped_mechanical_angle.get() + delta)
+            }
+            None => wrapped_angle,
+        };
+
+        self.last_wrapped_mechanical_angle = Some(wrapped_angle);
+        unwrapped
     }
 
     fn clamp_phase_duty(
@@ -942,6 +960,26 @@ mod tests {
 
         assert!(controller.velocity_target.get() > 0.0);
         assert!(controller.iq_target.get() > 0.0);
+    }
+
+    #[test]
+    fn wrapped_encoder_angle_is_unwrapped_for_multi_turn_positioning() {
+        let mut controller = MotorController::new(test_motor(), test_inverter(), test_config());
+        controller.set_mode(ControlMode::Position);
+        controller.enable();
+
+        let mut input = test_input();
+        input.rotor.mechanical_angle = MechanicalAngle::new(6.0);
+        input.rotor.electrical_angle = ElectricalAngle::new(6.0 * test_motor().pole_pairs as f32);
+        controller.fast_tick(input);
+
+        let mut wrapped_input = test_input();
+        wrapped_input.rotor.mechanical_angle = MechanicalAngle::new(0.2);
+        wrapped_input.rotor.electrical_angle =
+            ElectricalAngle::new(0.2 * test_motor().pole_pairs as f32);
+        controller.fast_tick(wrapped_input);
+
+        assert!(controller.status().last_unwrapped_mechanical_angle.get() > 6.2);
     }
 
     #[test]

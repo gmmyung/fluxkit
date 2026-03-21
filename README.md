@@ -111,6 +111,7 @@ Important boundaries:
 Implemented today:
 
 - absolute-encoder rotor path
+- internal multi-turn mechanical position unwrapping for position mode
 - `Disabled`, `Current`, `Torque`, `Velocity`, `Position`, and `OpenLoopVoltage` modes
 - synchronous current-loop `fast_tick()`
 - medium-rate supervisory loop in `medium_tick()`
