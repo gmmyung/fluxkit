@@ -8,10 +8,12 @@
 //! [`fluxkit_math`], and are re-exported here so downstream users can depend on
 //! `fluxkit` as the umbrella crate.
 
+pub mod system;
+
 pub use fluxkit_core as core;
 pub use fluxkit_core::{
     ControlMode, CurrentLoopConfig, Error, FastLoopInput, FastLoopOutput, InverterParams,
-    MotorCommand, MotorController, MotorParams, MotorState, MotorStatus, RotorEstimate,
+    MotorController, MotorParams, MotorState, MotorStatus, RotorEstimate,
 };
 pub use fluxkit_hal as hal;
 pub use fluxkit_hal::{
@@ -21,3 +23,4 @@ pub use fluxkit_hal::{
 };
 pub use fluxkit_math as math;
 pub use fluxkit_math::*;
+pub use system::{MotorHardware, MotorSystem, MotorSystemError};

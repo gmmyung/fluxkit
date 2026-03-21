@@ -1,6 +1,3 @@
-//! Control-domain helper types and future loop placeholders.
+//! Control-domain helper types.
 
 pub mod current;
-pub mod position;
-pub mod torque;
-pub mod velocity;

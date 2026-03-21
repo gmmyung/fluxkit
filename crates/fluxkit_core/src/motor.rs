@@ -254,17 +254,6 @@ where
             };
         }
 
-        if !matches!(self.mode, ControlMode::Current | ControlMode::Torque) {
-            self.refresh_status();
-            return FastLoopOutput {
-                phase_duty: neutral_phase_duty(),
-                measured_idq,
-                commanded_vdq: zero_voltage_dq(),
-                saturated: false,
-                error: None,
-            };
-        }
-
         let current_ref = CurrentReference {
             id: self.id_target,
             iq: self.iq_target,
@@ -318,12 +307,6 @@ where
             error: None,
         }
     }
-
-    /// Reserved medium-rate hook for future supervisory control.
-    pub fn medium_tick(&mut self, _dt_seconds: f32) {}
-
-    /// Reserved slow-rate hook for future state transitions and calibration.
-    pub fn slow_tick(&mut self, _dt_seconds: f32) {}
 
     /// Returns the latest compact status snapshot.
     #[inline]
