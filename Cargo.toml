@@ -4,11 +4,13 @@ members = [
     "crates/fluxkit_core",
     "crates/fluxkit_hal",
     "crates/fluxkit_math",
+    "crates/fluxkit_pmsm_sim",
 ]
 default-members = [
     "crates/fluxkit",
     "crates/fluxkit_core",
     "crates/fluxkit_hal",
     "crates/fluxkit_math",
+    "crates/fluxkit_pmsm_sim",
 ]
 resolver = "2"

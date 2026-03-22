@@ -12,6 +12,7 @@ pub mod bus;
 pub mod current;
 pub mod fault;
 pub mod gate;
+pub mod output;
 pub mod pwm;
 pub mod rotor;
 pub mod temperature;
@@ -22,6 +23,7 @@ pub use bus::*;
 pub use current::*;
 pub use fault::*;
 pub use gate::*;
+pub use output::*;
 pub use pwm::*;
 pub use rotor::*;
 pub use temperature::*;
@@ -33,8 +35,8 @@ mod tests {
     use core::convert::Infallible;
 
     use crate::{
-        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, MonotonicMicros,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
+        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, MonotonicMicros, OutputReading,
+        OutputSensor, PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
         ElectricalAngle, MechanicalAngle,
@@ -117,6 +119,20 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct FakeOutput;
+
+    impl OutputSensor for FakeOutput {
+        type Error = Infallible;
+
+        fn read_output(&mut self) -> Result<OutputReading, Self::Error> {
+            Ok(OutputReading {
+                mechanical_angle: MechanicalAngle::new(0.2),
+                mechanical_velocity: RadPerSec::new(2.0),
+            })
+        }
+    }
+
+    #[derive(Debug)]
     struct FakeClock;
 
     impl MonotonicMicros for FakeClock {
@@ -141,15 +157,18 @@ mod tests {
         let mut currents = FakeCurrentSensor;
         let mut bus = FakeBusSensor;
         let mut rotor = FakeRotor;
+        let mut output = FakeOutput;
         let clock = FakeClock;
 
         let current_sample = currents.sample_phase_currents().unwrap();
         let bus_voltage = bus.sample_bus_voltage().unwrap();
         let rotor_reading = rotor.read_rotor().unwrap();
+        let output_reading = output.read_output().unwrap();
 
         assert_eq!(current_sample.validity, CurrentSampleValidity::Valid);
         assert_eq!(bus_voltage, Volts::new(24.0));
         assert_eq!(rotor_reading.electrical_angle, ElectricalAngle::new(1.0));
+        assert_eq!(output_reading.mechanical_angle, MechanicalAngle::new(0.2));
         assert_eq!(clock.now_micros(), 123_456);
     }
 }

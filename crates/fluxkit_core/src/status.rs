@@ -6,7 +6,9 @@ use fluxkit_math::{
     units::{Amps, RadPerSec, Volts},
 };
 
-use crate::{error::Error, mode::ControlMode, state::MotorState};
+use crate::{
+    actuator::ActuatorCompensationTelemetry, error::Error, mode::ControlMode, state::MotorState,
+};
 
 /// Cheap-to-copy controller status snapshot.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,12 +27,20 @@ pub struct MotorStatus {
     pub last_measured_idq: Dq<Amps>,
     /// Most recent limited `d/q` voltage command.
     pub last_commanded_vdq: Dq<Volts>,
-    /// Most recent wrapped mechanical rotor angle from the absolute encoder.
-    pub last_mechanical_angle: MechanicalAngle,
+    /// Most recent wrapped mechanical rotor angle from the motor encoder.
+    pub last_rotor_mechanical_angle: MechanicalAngle,
     /// Most recent unwrapped mechanical rotor angle accumulated across encoder wraps.
-    pub last_unwrapped_mechanical_angle: MechanicalAngle,
+    pub last_unwrapped_rotor_mechanical_angle: MechanicalAngle,
     /// Most recent measured mechanical rotor velocity.
-    pub last_mechanical_velocity: RadPerSec,
+    pub last_rotor_mechanical_velocity: RadPerSec,
+    /// Most recent wrapped output-axis angle from the actuator encoder.
+    pub last_output_mechanical_angle: MechanicalAngle,
+    /// Most recent unwrapped output-axis angle accumulated across encoder wraps.
+    pub last_unwrapped_output_mechanical_angle: MechanicalAngle,
+    /// Most recent measured output-axis mechanical velocity.
+    pub last_output_mechanical_velocity: RadPerSec,
+    /// Most recent actuator compensation breakdown.
+    pub last_actuator_compensation: ActuatorCompensationTelemetry,
     /// Most recent saturation flag.
     pub last_saturated: bool,
 }

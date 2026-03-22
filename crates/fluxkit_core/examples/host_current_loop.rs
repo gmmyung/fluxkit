@@ -1,6 +1,6 @@
 use fluxkit_core::{
-    ControlMode, CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorParams,
-    RotorEstimate,
+    ActuatorEstimate, ActuatorParams, ControlMode, CurrentLoopConfig, FastLoopInput,
+    InverterParams, MotorController, MotorParams, RotorEstimate,
 };
 use fluxkit_math::{
     ElectricalAngle, MechanicalAngle,
@@ -18,7 +18,6 @@ fn main() {
         flux_linkage_weber: Some(Webers::new(0.005)),
         max_phase_current: Amps::new(20.0),
         max_mech_speed: Some(RadPerSec::new(500.0)),
-        torque_constant_nm_per_amp: Some(0.5),
     };
     let inverter = InverterParams {
         pwm_frequency_hz: Hertz::new(20_000.0),
@@ -43,10 +42,17 @@ fn main() {
         max_id_target: Amps::new(10.0),
         max_iq_target: Amps::new(10.0),
         max_velocity_target: RadPerSec::new(500.0),
+        max_current_ref_derivative_amps_per_sec: 10_000.0,
         enable_current_feedforward: true,
     };
+    let actuator = ActuatorParams {
+        gear_ratio: 5.0,
+        max_output_velocity: Some(RadPerSec::new(100.0)),
+        max_output_torque: Some(fluxkit_math::units::NewtonMeters::new(20.0)),
+        compensation: fluxkit_core::ActuatorCompensationConfig::disabled(),
+    };
 
-    let mut controller = MotorController::new(motor, inverter, config);
+    let mut controller = MotorController::new(motor, inverter, actuator, config);
     controller.set_mode(ControlMode::Current);
     controller.enable();
 
@@ -75,6 +81,10 @@ fn main() {
                 electrical_angle: ElectricalAngle::new(angle),
                 mechanical_angle: MechanicalAngle::new(angle / motor.pole_pairs as f32),
                 mechanical_velocity: RadPerSec::new(electrical_speed / motor.pole_pairs as f32),
+            },
+            actuator: ActuatorEstimate {
+                output_angle: MechanicalAngle::new(angle / motor.pole_pairs as f32 / 5.0),
+                output_velocity: RadPerSec::new(electrical_speed / motor.pole_pairs as f32 / 5.0),
             },
             dt_seconds: dt,
         });

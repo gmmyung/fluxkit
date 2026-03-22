@@ -2,13 +2,17 @@
 
 use core::fmt;
 
-use fluxkit_core::{FastLoopInput, FastLoopOutput, MotorController, RotorEstimate};
-use fluxkit_hal::{BusVoltageSensor, CurrentSampleValidity, CurrentSampler, PhasePwm, RotorSensor};
+use fluxkit_core::{
+    ActuatorEstimate, FastLoopInput, FastLoopOutput, MotorController, RotorEstimate, TickSchedule,
+};
+use fluxkit_hal::{
+    BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputSensor, PhasePwm, RotorSensor,
+};
 use fluxkit_math::{Modulator, Svpwm};
 
 /// Concrete hardware handles required to run one motor-control loop.
 #[derive(Debug)]
-pub struct MotorHardware<PWM, CURRENT, BUS, ROTOR> {
+pub struct MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
     /// Three-phase PWM output stage.
     pub pwm: PWM,
     /// Phase-current acquisition path.
@@ -17,11 +21,13 @@ pub struct MotorHardware<PWM, CURRENT, BUS, ROTOR> {
     pub bus: BUS,
     /// Absolute-encoder rotor sensing path.
     pub rotor: ROTOR,
+    /// Output-axis sensing path.
+    pub output: OUTPUT,
 }
 
 /// HAL and integration failures that can occur outside the pure controller.
 #[derive(Debug)]
-pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE> {
+pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE> {
     /// PWM output operation failed.
     Pwm(PwmE),
     /// Phase-current acquisition failed.
@@ -30,16 +36,20 @@ pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE> {
     Bus(BusE),
     /// Rotor-sensor acquisition failed.
     Rotor(RotorE),
+    /// Output-sensor acquisition failed.
+    Output(OutputE),
     /// The current sample was explicitly marked invalid for control use.
     InvalidCurrentSample,
 }
 
-impl<PwmE, CurrentE, BusE, RotorE> fmt::Display for MotorSystemError<PwmE, CurrentE, BusE, RotorE>
+impl<PwmE, CurrentE, BusE, RotorE, OutputE> fmt::Display
+    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE>
 where
     PwmE: fmt::Display,
     CurrentE: fmt::Display,
     BusE: fmt::Display,
     RotorE: fmt::Display,
+    OutputE: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -47,18 +57,20 @@ where
             Self::Current(error) => write!(f, "current-sensor error: {error}"),
             Self::Bus(error) => write!(f, "bus-voltage error: {error}"),
             Self::Rotor(error) => write!(f, "rotor-sensor error: {error}"),
+            Self::Output(error) => write!(f, "output-sensor error: {error}"),
             Self::InvalidCurrentSample => f.write_str("invalid current sample"),
         }
     }
 }
 
-impl<PwmE, CurrentE, BusE, RotorE> core::error::Error
-    for MotorSystemError<PwmE, CurrentE, BusE, RotorE>
+impl<PwmE, CurrentE, BusE, RotorE, OutputE> core::error::Error
+    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE>
 where
     PwmE: core::error::Error + 'static,
     CurrentE: core::error::Error + 'static,
     BusE: core::error::Error + 'static,
     RotorE: core::error::Error + 'static,
+    OutputE: core::error::Error + 'static,
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -66,6 +78,7 @@ where
             Self::Current(error) => Some(error),
             Self::Bus(error) => Some(error),
             Self::Rotor(error) => Some(error),
+            Self::Output(error) => Some(error),
             Self::InvalidCurrentSample => None,
         }
     }
@@ -73,15 +86,15 @@ where
 
 /// Encapsulated synchronous motor stack: hardware plus pure controller.
 #[derive(Debug)]
-pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, MOD = Svpwm> {
-    hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR>,
+pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD = Svpwm> {
+    hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
     controller: MotorController<MOD>,
 }
 
-impl<PWM, CURRENT, BUS, ROTOR> MotorSystem<PWM, CURRENT, BUS, ROTOR, Svpwm> {
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT> MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, Svpwm> {
     /// Creates a new motor system using the default SVPWM modulator.
     pub fn new(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR>,
+        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
         controller: MotorController<Svpwm>,
     ) -> Self {
         Self {
@@ -91,17 +104,18 @@ impl<PWM, CURRENT, BUS, ROTOR> MotorSystem<PWM, CURRENT, BUS, ROTOR, Svpwm> {
     }
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, MOD> MotorSystem<PWM, CURRENT, BUS, ROTOR, MOD>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD> MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
     BUS: BusVoltageSensor,
     ROTOR: RotorSensor,
+    OUTPUT: OutputSensor,
     MOD: Modulator,
 {
     /// Creates a new motor system with an explicit controller modulator.
     pub fn new_with_controller(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR>,
+        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
         controller: MotorController<MOD>,
     ) -> Self {
         Self {
@@ -112,13 +126,13 @@ where
 
     /// Returns shared access to the owned hardware handles.
     #[inline]
-    pub const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR> {
+    pub const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
         &self.hardware
     }
 
     /// Returns mutable access to the owned hardware handles.
     #[inline]
-    pub fn hardware_mut(&mut self) -> &mut MotorHardware<PWM, CURRENT, BUS, ROTOR> {
+    pub fn hardware_mut(&mut self) -> &mut MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
         &mut self.hardware
     }
 
@@ -139,7 +153,7 @@ where
     pub fn into_parts(
         self,
     ) -> (
-        MotorHardware<PWM, CURRENT, BUS, ROTOR>,
+        MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
         MotorController<MOD>,
     ) {
         (self.hardware, self.controller)
@@ -148,7 +162,10 @@ where
     /// Enables the underlying PWM and then enables the controller.
     pub fn enable(
         &mut self,
-    ) -> Result<(), MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>> {
+    ) -> Result<
+        (),
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
         self.hardware.pwm.enable().map_err(MotorSystemError::Pwm)?;
         self.controller.enable();
         Ok(())
@@ -157,7 +174,10 @@ where
     /// Forces a neutral output, disables the controller, then disables the PWM.
     pub fn disable(
         &mut self,
-    ) -> Result<(), MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>> {
+    ) -> Result<
+        (),
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
         self.controller.disable();
         self.hardware
             .pwm
@@ -167,13 +187,19 @@ where
         Ok(())
     }
 
-    /// Samples hardware, runs the current loop, and applies the resulting duty.
-    pub fn fast_tick(
+    /// Samples hardware, runs one scheduled controller cycle, and applies duty.
+    ///
+    /// This is the preferred entrypoint for multi-rate runtime integration:
+    /// call it from the fast-loop owner, and express lower-rate work through
+    /// `schedule` instead of calling separate controller hooks from other
+    /// interrupts.
+    pub fn tick(
         &mut self,
         dt_seconds: f32,
+        schedule: TickSchedule,
     ) -> Result<
         FastLoopOutput,
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
         let current = self
             .hardware
@@ -200,17 +226,29 @@ where
             .rotor
             .read_rotor()
             .map_err(MotorSystemError::Rotor)?;
+        let output_axis = self
+            .hardware
+            .output
+            .read_output()
+            .map_err(MotorSystemError::Output)?;
 
-        let output = self.controller.fast_tick(FastLoopInput {
-            phase_currents: current.currents,
-            bus_voltage,
-            rotor: RotorEstimate {
-                electrical_angle: rotor.electrical_angle,
-                mechanical_angle: rotor.mechanical_angle,
-                mechanical_velocity: rotor.mechanical_velocity,
+        let output = self.controller.tick(
+            FastLoopInput {
+                phase_currents: current.currents,
+                bus_voltage,
+                rotor: RotorEstimate {
+                    electrical_angle: rotor.electrical_angle,
+                    mechanical_angle: rotor.mechanical_angle,
+                    mechanical_velocity: rotor.mechanical_velocity,
+                },
+                actuator: ActuatorEstimate {
+                    output_angle: output_axis.mechanical_angle,
+                    output_velocity: output_axis.mechanical_velocity,
+                },
+                dt_seconds,
             },
-            dt_seconds,
-        });
+            schedule,
+        );
 
         self.hardware
             .pwm
@@ -220,16 +258,19 @@ where
         Ok(output)
     }
 
-    /// Runs the medium-rate controller hook.
+    /// Samples hardware, runs only the fast controller loop, and applies duty.
+    ///
+    /// This is a convenience wrapper around [`Self::tick`] with
+    /// [`TickSchedule::none`].
     #[inline]
-    pub fn medium_tick(&mut self, dt_seconds: f32) {
-        self.controller.medium_tick(dt_seconds);
-    }
-
-    /// Runs the slow-rate controller hook.
-    #[inline]
-    pub fn slow_tick(&mut self, dt_seconds: f32) {
-        self.controller.slow_tick(dt_seconds);
+    pub fn fast_tick(
+        &mut self,
+        dt_seconds: f32,
+    ) -> Result<
+        FastLoopOutput,
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
+        self.tick(dt_seconds, TickSchedule::none())
     }
 }
 
@@ -237,15 +278,18 @@ where
 mod tests {
     use core::convert::Infallible;
 
-    use fluxkit_core::{ControlMode, CurrentLoopConfig, InverterParams, MotorParams, MotorState};
+    use fluxkit_core::{
+        ActuatorParams, ControlMode, CurrentLoopConfig, InverterParams, MotorParams, MotorState,
+        TickSchedule,
+    };
     use fluxkit_hal::{
-        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, PhaseCurrentSample, PhasePwm,
-        RotorReading, RotorSensor, centered_phase_duty,
+        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
+        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
         ElectricalAngle, MechanicalAngle,
         frame::Abc,
-        units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts},
+        units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts},
     };
 
     use super::{MotorHardware, MotorSystem, MotorSystemError};
@@ -323,16 +367,28 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FakeOutput {
+        reading: OutputReading,
+    }
+
+    impl OutputSensor for FakeOutput {
+        type Error = Infallible;
+
+        fn read_output(&mut self) -> Result<OutputReading, Self::Error> {
+            Ok(self.reading)
+        }
+    }
+
     fn motor_params() -> MotorParams {
         MotorParams {
             pole_pairs: 7,
             phase_resistance_ohm: Ohms::new(0.08),
             d_inductance_h: Henries::new(0.00012),
             q_inductance_h: Henries::new(0.00012),
-            flux_linkage_weber: None,
+            flux_linkage_weber: Some(fluxkit_math::units::Webers::new(0.05)),
             max_phase_current: Amps::new(20.0),
             max_mech_speed: None,
-            torque_constant_nm_per_amp: None,
         }
     }
 
@@ -345,6 +401,15 @@ mod tests {
             min_bus_voltage: Volts::new(6.0),
             max_bus_voltage: Volts::new(60.0),
             max_voltage_command: Volts::new(24.0),
+        }
+    }
+
+    fn actuator_params() -> ActuatorParams {
+        ActuatorParams {
+            gear_ratio: 5.0,
+            max_output_velocity: Some(RadPerSec::new(10.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+            compensation: fluxkit_core::ActuatorCompensationConfig::disabled(),
         }
     }
 
@@ -363,13 +428,14 @@ mod tests {
             max_id_target: Amps::new(5.0),
             max_iq_target: Amps::new(10.0),
             max_velocity_target: RadPerSec::new(50.0),
+            max_current_ref_derivative_amps_per_sec: 10_000.0,
             enable_current_feedforward: true,
         }
     }
 
     fn hardware(
         validity: CurrentSampleValidity,
-    ) -> MotorHardware<FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor> {
+    ) -> MotorHardware<FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor, FakeOutput> {
         MotorHardware {
             pwm: FakePwm::default(),
             current: FakeCurrentSensor {
@@ -388,6 +454,12 @@ mod tests {
                     mechanical_velocity: RadPerSec::new(0.0),
                 },
             },
+            output: FakeOutput {
+                reading: OutputReading {
+                    mechanical_angle: MechanicalAngle::new(0.0),
+                    mechanical_velocity: RadPerSec::new(0.0),
+                },
+            },
         }
     }
 
@@ -396,6 +468,7 @@ mod tests {
         let controller = fluxkit_core::MotorController::new(
             motor_params(),
             inverter_params(),
+            actuator_params(),
             current_loop_config(),
         );
         let mut system = MotorSystem::new(hardware(CurrentSampleValidity::Valid), controller);
@@ -419,6 +492,7 @@ mod tests {
         let controller = fluxkit_core::MotorController::new(
             motor_params(),
             inverter_params(),
+            actuator_params(),
             current_loop_config(),
         );
         let mut system = MotorSystem::new(hardware(CurrentSampleValidity::Invalid), controller);
@@ -428,5 +502,39 @@ mod tests {
 
         assert!(matches!(error, MotorSystemError::InvalidCurrentSample));
         assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
+    }
+
+    #[test]
+    fn scheduled_tick_runs_supervisory_work_after_fast_cycle() {
+        let controller = fluxkit_core::MotorController::new(
+            motor_params(),
+            inverter_params(),
+            actuator_params(),
+            current_loop_config(),
+        );
+        let mut system = MotorSystem::new(hardware(CurrentSampleValidity::Valid), controller);
+
+        system.enable().unwrap();
+        system.controller_mut().set_mode(ControlMode::Position);
+        system
+            .controller_mut()
+            .set_position_target(MechanicalAngle::new(1.0));
+
+        let first = system
+            .tick(0.000_05, TickSchedule::with_medium(0.001))
+            .unwrap();
+        let second = system.fast_tick(0.000_05).unwrap();
+
+        assert_eq!(first.phase_duty, centered_phase_duty());
+        assert_ne!(second.phase_duty, centered_phase_duty());
+        assert!(
+            system
+                .controller()
+                .status()
+                .last_output_mechanical_angle
+                .get()
+                .abs()
+                < 1.0e-6
+        );
     }
 }

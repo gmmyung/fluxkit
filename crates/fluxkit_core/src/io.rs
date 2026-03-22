@@ -7,6 +7,7 @@ use fluxkit_math::{
     units::{Amps, RadPerSec, Volts},
 };
 
+use crate::actuator::ActuatorEstimate;
 use crate::error::Error;
 
 /// Rotor angle and speed estimate supplied by platform code.
@@ -37,6 +38,8 @@ pub struct FastLoopInput {
     pub bus_voltage: Volts,
     /// Rotor estimate used for the Park transforms.
     pub rotor: RotorEstimate,
+    /// Output-axis estimate used by actuator-side supervisory loops.
+    pub actuator: ActuatorEstimate,
     /// Time since the previous fast-loop invocation.
     pub dt_seconds: f32,
 }

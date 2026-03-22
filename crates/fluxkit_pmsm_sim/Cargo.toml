@@ -1,22 +1,21 @@
 [package]
-name = "fluxkit_math"
+name = "fluxkit-pmsm-sim"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Deterministic no_std math primitives for BLDC/PMSM field-oriented control"
+description = "Ideal PMSM plant emulator for Fluxkit integration tests"
 repository = ""
 
 [features]
 default = []
-approx-trig = []
-fixed-point = []
-defmt = ["dep:defmt"]
-serde = ["dep:serde"]
+defmt = ["dep:defmt", "fluxkit_math/defmt"]
+serde = ["dep:serde", "fluxkit_math/serde"]
 
 [dependencies]
 defmt = { version = "0.3", optional = true }
-libm = { version = "0.2", default-features = false }
+fluxkit_math = { path = "../fluxkit_math" }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 
 [dev-dependencies]
+fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core" }
 plotters = "0.3.7"

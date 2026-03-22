@@ -21,8 +21,6 @@ pub struct MotorParams {
     pub max_phase_current: Amps,
     /// Optional mechanical speed limit.
     pub max_mech_speed: Option<RadPerSec>,
-    /// Optional torque constant in `Nm/A`.
-    pub torque_constant_nm_per_amp: Option<f32>,
 }
 
 /// Electrical limits and modulation constraints of the inverter.

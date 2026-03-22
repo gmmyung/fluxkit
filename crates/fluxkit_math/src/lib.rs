@@ -26,7 +26,7 @@
 //! Public APIs are concrete over `f32` in the MVP. Trigonometric functions are
 //! isolated in [`trig`] and currently use `libm`, which keeps the crate usable
 //! in `no_std` builds without tying it to a particular MCU or DSP backend.
-
+//!
 pub mod angle;
 pub mod control;
 pub mod filter;
@@ -46,7 +46,7 @@ pub use filter::lpf::LowPassFilter;
 pub use frame::{Abc, AlphaBeta, Dq};
 pub use modulation::{
     ModulationOutput, Modulator, PhaseDuty, SinePwm, Svpwm, SvpwmResult, dq_q_limit, sine_pwm,
-    spwm_linear_limit, svpwm, svpwm_linear_limit,
+    svpwm,
 };
 pub use ramp::SlewRateLimiter;
 pub use saturation::{clamp, clamp_abs, limit_norm_ab, limit_norm_dq};

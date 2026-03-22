@@ -3,6 +3,7 @@
 use fluxkit_math::frame::Abc;
 
 use crate::{
+    actuator::ActuatorParams,
     config::CurrentLoopConfig,
     error::Error,
     io::FastLoopInput,
@@ -13,6 +14,7 @@ use crate::{
 pub fn validate_controller_config(
     motor: &MotorParams,
     inverter: &InverterParams,
+    actuator: &ActuatorParams,
     config: &CurrentLoopConfig,
 ) -> bool {
     motor.pole_pairs > 0
@@ -28,10 +30,70 @@ pub fn validate_controller_config(
             .max_mech_speed
             .map(|speed| finite_positive(speed.get()))
             .unwrap_or(true)
-        && motor
-            .torque_constant_nm_per_amp
-            .map(finite_positive)
+        && finite_positive(actuator.gear_ratio)
+        && actuator
+            .max_output_velocity
+            .map(|speed| finite_positive(speed.get()))
             .unwrap_or(true)
+        && actuator
+            .max_output_torque
+            .map(|torque| finite_positive(torque.get()))
+            .unwrap_or(true)
+        && actuator.compensation.max_total_torque.get().is_finite()
+        && actuator.compensation.max_total_torque.get() >= 0.0
+        && finite_non_negative(
+            actuator
+                .compensation
+                .friction
+                .positive_breakaway_torque
+                .get(),
+        )
+        && finite_non_negative(
+            actuator
+                .compensation
+                .friction
+                .negative_breakaway_torque
+                .get(),
+        )
+        && finite_non_negative(actuator.compensation.friction.positive_coulomb_torque.get())
+        && finite_non_negative(actuator.compensation.friction.negative_coulomb_torque.get())
+        && finite_non_negative(
+            actuator
+                .compensation
+                .friction
+                .zero_velocity_blend_band
+                .get(),
+        )
+        && actuator
+            .compensation
+            .friction
+            .positive_viscous_coefficient
+            .is_finite()
+        && actuator.compensation.friction.positive_viscous_coefficient >= 0.0
+        && actuator
+            .compensation
+            .friction
+            .negative_viscous_coefficient
+            .is_finite()
+        && actuator.compensation.friction.negative_viscous_coefficient >= 0.0
+        && actuator
+            .compensation
+            .inertia
+            .reflected_inertia_kg_m2
+            .is_finite()
+        && actuator.compensation.inertia.reflected_inertia_kg_m2 >= 0.0
+        && actuator
+            .compensation
+            .inertia
+            .max_acceleration_rad_per_sec2
+            .is_finite()
+        && actuator.compensation.inertia.max_acceleration_rad_per_sec2 >= 0.0
+        && actuator
+            .compensation
+            .load
+            .constant_bias_torque
+            .get()
+            .is_finite()
         && finite_positive(inverter.pwm_frequency_hz.get())
         && finite_in_range(inverter.min_duty.get(), 0.0, 1.0)
         && finite_in_range(inverter.max_duty.get(), 0.0, 1.0)
@@ -52,6 +114,7 @@ pub fn validate_controller_config(
         && finite_non_negative(config.max_id_target.get())
         && finite_non_negative(config.max_iq_target.get())
         && finite_non_negative(config.max_velocity_target.get())
+        && finite_non_negative(config.max_current_ref_derivative_amps_per_sec)
 }
 
 /// Validates one fast-loop input frame.
@@ -67,6 +130,8 @@ pub fn validate_fast_loop_input(
     if !angle.is_finite()
         || !input.rotor.mechanical_angle.get().is_finite()
         || !input.rotor.mechanical_velocity.get().is_finite()
+        || !input.actuator.output_angle.get().is_finite()
+        || !input.actuator.output_velocity.get().is_finite()
     {
         return Err(Error::InvalidRotorAngle);
     }

@@ -12,14 +12,16 @@ pub mod system;
 
 pub use fluxkit_core as core;
 pub use fluxkit_core::{
-    ControlMode, CurrentLoopConfig, Error, FastLoopInput, FastLoopOutput, InverterParams,
-    MotorController, MotorParams, MotorState, MotorStatus, RotorEstimate,
+    ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorParams,
+    ControlMode, CurrentLoopConfig, Error, FastLoopInput, FastLoopOutput, FrictionCompensation,
+    InertiaCompensation, InverterParams, LoadCompensation, MotorController, MotorParams,
+    MotorState, MotorStatus, RotorEstimate, TickSchedule,
 };
 pub use fluxkit_hal as hal;
 pub use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, FaultInput, GateDriver,
-    GateDriverFault, MonotonicMicros, PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
-    TemperatureSensor, centered_phase_duty,
+    GateDriverFault, MonotonicMicros, OutputReading, OutputSensor, PhaseCurrentSample, PhasePwm,
+    RotorReading, RotorSensor, TemperatureSensor, centered_phase_duty,
 };
 pub use fluxkit_math as math;
 pub use fluxkit_math::*;

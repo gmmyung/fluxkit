@@ -45,6 +45,11 @@ pub struct CurrentLoopConfig {
     pub max_iq_target: Amps,
     /// Symmetric mechanical velocity-command limit used by the outer loops.
     pub max_velocity_target: RadPerSec,
+    /// Symmetric clamp for the current-reference derivative used by feedforward, in `A/s`.
+    ///
+    /// This limits only the `L * d(i_ref)/dt` feedforward term so that large
+    /// current-command steps do not inject an excessive one-tick voltage kick.
+    pub max_current_ref_derivative_amps_per_sec: f32,
     /// Enables model-based current-loop feedforward when `true`.
     ///
     /// The feedforward term uses motor resistance, inductances, pole pairs,
