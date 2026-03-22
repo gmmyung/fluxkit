@@ -16,6 +16,7 @@ const MEDIUM_DECIMATION: usize = 10;
 const MEDIUM_DT_SECONDS: f32 = FAST_DT_SECONDS * MEDIUM_DECIMATION as f32;
 const GEAR_RATIO: f32 = 2.0;
 const TARGET_STEP_INDEX: usize = 100;
+const POSITION_TARGET_RADIANS: f32 = 2.0;
 
 fn motor_params() -> MotorParams {
     MotorParams {
@@ -168,6 +169,14 @@ fn run_fast_step(
         .unwrap();
 }
 
+fn assert_abs_diff_le(actual: f32, expected: f32, max_abs_diff: f32, what: &str) {
+    let abs_diff = (actual - expected).abs();
+    assert!(
+        abs_diff <= max_abs_diff,
+        "{what} was {actual}, expected {expected} +/- {max_abs_diff} (abs diff {abs_diff})",
+    );
+}
+
 #[test]
 fn current_mode_drives_positive_q_current_into_the_plant() {
     let bus_voltage = Volts::new(24.0);
@@ -189,8 +198,13 @@ fn current_mode_drives_positive_q_current_into_the_plant() {
 
     let status = controller.status();
     assert!(status.active_error.is_none());
-    assert!(status.last_measured_idq.q.get() > 1.5);
-    assert!(plant.state().mechanical_velocity.get() > 0.0);
+    assert_abs_diff_le(status.last_measured_idq.q.get(), 3.0, 0.05, "measured q current");
+    assert_abs_diff_le(status.last_measured_idq.d.get(), 0.0, 0.05, "measured d current");
+    assert!(
+        plant.state().mechanical_velocity.get() > 100.0,
+        "mechanical velocity did not build strongly enough: {}",
+        plant.state().mechanical_velocity.get()
+    );
 }
 
 #[test]
@@ -205,7 +219,7 @@ fn position_mode_tracks_output_axis_feedback() {
     let mut plant = PmsmModel::new_zeroed(plant_params()).unwrap();
 
     controller.set_mode(ControlMode::Position);
-    controller.set_position_target(MechanicalAngle::new(1.5 * core::f32::consts::TAU));
+    controller.set_position_target(MechanicalAngle::new(POSITION_TARGET_RADIANS));
     controller.enable();
 
     for step in 0..200_000 {
@@ -228,12 +242,18 @@ fn position_mode_tracks_output_axis_feedback() {
 
     let status = controller.status();
     assert!(status.active_error.is_none());
-    assert!(
-        status.last_unwrapped_output_mechanical_angle.get() > 2.0,
-        "output-axis position did not advance meaningfully: {}",
-        status.last_unwrapped_output_mechanical_angle.get()
+    assert_abs_diff_le(
+        status.last_unwrapped_output_mechanical_angle.get(),
+        POSITION_TARGET_RADIANS,
+        0.01,
+        "unwrapped output mechanical angle",
     );
-    assert!(status.last_output_mechanical_velocity.get().is_finite());
+    assert_abs_diff_le(
+        status.last_output_mechanical_velocity.get(),
+        0.0,
+        0.01,
+        "output mechanical velocity",
+    );
 }
 
 #[test]
@@ -307,10 +327,11 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
         uncompensated_plant.state().mechanical_velocity.get() / GEAR_RATIO;
     let compensated_output_velocity =
         compensated_plant.state().mechanical_velocity.get() / GEAR_RATIO;
+    let velocity_delta = compensated_output_velocity - uncompensated_output_velocity;
 
     assert!(
-        compensated_output_velocity > uncompensated_output_velocity + 0.02,
-        "compensated output velocity {compensated_output_velocity} did not exceed uncompensated {uncompensated_output_velocity}",
+        velocity_delta > 0.04,
+        "compensated output velocity improvement {velocity_delta} was too small (compensated {compensated_output_velocity}, uncompensated {uncompensated_output_velocity})",
     );
     assert!(
         compensated
@@ -318,6 +339,6 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
             .last_actuator_compensation
             .friction_torque
             .get()
-            > 0.0
+            > 0.03
     );
 }
