@@ -16,7 +16,8 @@ echo "Generating documentation plots into $plots_dir"
 
 XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_current -- "$plots_dir/closed_loop_current.svg"
 XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_position -- "$plots_dir/closed_loop_position.svg"
-XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_actuator_compensation -- "$plots_dir/closed_loop_actuator_compensation.svg"
+XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_torque_command -- "$plots_dir/closed_loop_torque_command.svg"
+XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_velocity_command -- "$plots_dir/closed_loop_velocity_command.svg"
 XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit_math --example plot_modulation -- "$plots_dir"
 
 echo "Done."

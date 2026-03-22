@@ -1,6 +1,6 @@
 //! Main motor controller implementation.
 
-use fluxkit_math::angle::shortest_angle_delta;
+use fluxkit_math::angle::{mechanical_to_electrical, shortest_angle_delta};
 use fluxkit_math::{
     MechanicalAngle, Modulator, PiConfig, PiController, Svpwm, clamp, clarke, inverse_park,
     limit_norm_dq, park,
@@ -109,7 +109,6 @@ pub struct MotorController<M = Svpwm> {
     last_wrapped_mechanical_angle: Option<MechanicalAngle>,
     last_wrapped_output_angle: Option<MechanicalAngle>,
     last_current_ref: Option<fluxkit_math::frame::Dq<Amps>>,
-    last_output_velocity_target: Option<RadPerSec>,
     status: MotorStatus,
 }
 
@@ -195,7 +194,6 @@ where
             last_wrapped_mechanical_angle: None,
             last_wrapped_output_angle: None,
             last_current_ref: None,
-            last_output_velocity_target: None,
             status: MotorStatus {
                 state: MotorState::Disabled,
                 mode: ControlMode::Disabled,
@@ -375,10 +373,10 @@ where
         }
 
         self.last_rotor = Some(input.rotor);
-        let electrical_angle = input.rotor.electrical_angle.wrapped_pm_pi().get();
+        let electrical_angle = self.electrical_angle_from_mechanical(input.rotor.mechanical_angle);
         let phase_currents = input.phase_currents.map(|current| current.get());
         let measured_alpha_beta = clarke(phase_currents);
-        let measured_idq_f32 = park(measured_alpha_beta, electrical_angle);
+        let measured_idq_f32 = park(measured_alpha_beta, electrical_angle.get());
         let measured_idq = measured_idq_f32.map(Amps::new);
         self.status.last_measured_idq = measured_idq;
 
@@ -408,7 +406,7 @@ where
             | ControlMode::Position => self.run_current_control(
                 measured_idq_f32,
                 measured_idq,
-                electrical_angle,
+                electrical_angle.get(),
                 input.bus_voltage,
                 input.rotor.mechanical_velocity,
                 input.dt_seconds,
@@ -416,7 +414,7 @@ where
             ),
             ControlMode::OpenLoopVoltage => self.run_open_loop_voltage(
                 measured_idq,
-                electrical_angle,
+                electrical_angle.get(),
                 input.bus_voltage,
                 voltage_limit,
             ),
@@ -479,7 +477,7 @@ where
             ControlMode::Disabled | ControlMode::Current | ControlMode::OpenLoopVoltage => {}
             ControlMode::Torque => {
                 let total_output_torque =
-                    self.total_output_torque_command(self.output_torque_target, dt_seconds);
+                    self.total_output_torque_command(self.output_torque_target);
                 if let Some(iq_target) = self.output_torque_to_iq(total_output_torque) {
                     self.set_iq_target(iq_target);
                 } else {
@@ -505,7 +503,7 @@ where
                     self.output_torque_target =
                         self.clamp_output_torque(NewtonMeters::new(output_torque));
                     let total_output_torque =
-                        self.total_output_torque_command(self.output_torque_target, dt_seconds);
+                        self.total_output_torque_command(self.output_torque_target);
 
                     if let Some(iq_target) = self.output_torque_to_iq(total_output_torque) {
                         self.set_iq_target(iq_target);
@@ -544,6 +542,16 @@ where
             .min(self.inverter.max_voltage_command.get())
             .min(modulation_limit)
             .max(0.0)
+    }
+
+    #[inline]
+    fn electrical_angle_from_mechanical(
+        &self,
+        mechanical_angle: MechanicalAngle,
+    ) -> fluxkit_math::ElectricalAngle {
+        let base = mechanical_to_electrical(mechanical_angle, self.motor.pole_pairs as u32);
+        fluxkit_math::ElectricalAngle::new(base.get() + self.motor.electrical_angle_offset.get())
+            .wrapped_pm_pi()
     }
 
     fn set_pi_output_limits(&mut self, limit: f32) {
@@ -748,12 +756,8 @@ where
         NewtonMeters::new(clamp(torque.get(), -limit, limit))
     }
 
-    fn total_output_torque_command(
-        &mut self,
-        feedback_torque: NewtonMeters,
-        dt_seconds: f32,
-    ) -> NewtonMeters {
-        let compensation = self.compute_actuator_compensation(feedback_torque, dt_seconds);
+    fn total_output_torque_command(&mut self, feedback_torque: NewtonMeters) -> NewtonMeters {
+        let compensation = self.compute_actuator_compensation(feedback_torque);
         self.status.last_actuator_compensation = compensation;
         compensation.total_output_torque_command
     }
@@ -761,22 +765,17 @@ where
     fn compute_actuator_compensation(
         &mut self,
         feedback_torque: NewtonMeters,
-        dt_seconds: f32,
     ) -> ActuatorCompensationTelemetry {
         let config = self.actuator.compensation;
         let direction_hint_velocity = self.friction_direction_hint_velocity(feedback_torque);
         let measured_velocity = self.status.last_output_mechanical_velocity.get();
-        let friction_torque =
-            self.compute_friction_compensation(direction_hint_velocity, measured_velocity, config);
-        let inertia_torque = self.compute_inertia_compensation(dt_seconds, config);
-        let load_torque = if config.load.enabled {
-            config.load.constant_bias_torque
-        } else {
-            NewtonMeters::ZERO
-        };
-
-        let compensation_unbounded =
-            friction_torque.get() + inertia_torque.get() + load_torque.get();
+        let friction = self.compute_friction_compensation(
+            feedback_torque,
+            direction_hint_velocity,
+            measured_velocity,
+            config,
+        );
+        let compensation_unbounded = friction.total.get();
         let max_compensation = config.max_total_torque.get().max(0.0);
         let total_compensation_torque = NewtonMeters::new(clamp(
             compensation_unbounded,
@@ -787,13 +786,12 @@ where
             feedback_torque.get() + total_compensation_torque.get(),
         ));
 
-        self.last_output_velocity_target = Some(self.output_velocity_target);
-
         ActuatorCompensationTelemetry {
             feedback_torque,
-            friction_torque,
-            inertia_torque,
-            load_torque,
+            breakaway_torque: friction.breakaway,
+            coulomb_torque: friction.coulomb,
+            viscous_torque: friction.viscous,
+            friction_torque: friction.total,
             total_compensation_torque,
             total_output_torque_command,
         }
@@ -832,13 +830,14 @@ where
 
     fn compute_friction_compensation(
         &self,
+        feedback_torque: NewtonMeters,
         direction_hint_velocity: f32,
         measured_velocity: f32,
         config: crate::actuator::ActuatorCompensationConfig,
-    ) -> NewtonMeters {
+    ) -> FrictionCompensationBreakdown {
         let friction = config.friction;
         if !friction.enabled {
-            return NewtonMeters::ZERO;
+            return FrictionCompensationBreakdown::zero();
         }
 
         let blend_band = friction.zero_velocity_blend_band.get().max(1.0e-6);
@@ -860,33 +859,20 @@ where
         let viscous_coefficient = positive_weight * friction.positive_viscous_coefficient
             + negative_weight * friction.negative_viscous_coefficient;
         let breakaway_weight = 1.0 - motion_weight;
-        NewtonMeters::new(
-            direction * (coulomb + breakaway_weight * breakaway)
-                + viscous_coefficient * measured_velocity,
-        )
-    }
-
-    fn compute_inertia_compensation(
-        &self,
-        dt_seconds: f32,
-        config: crate::actuator::ActuatorCompensationConfig,
-    ) -> NewtonMeters {
-        let inertia = config.inertia;
-        if !inertia.enabled || !dt_seconds.is_finite() || dt_seconds <= 0.0 {
-            return NewtonMeters::ZERO;
+        let command_along_direction = (feedback_torque.get() * direction).max(0.0);
+        let remaining_static_margin = (breakaway - command_along_direction).max(0.0);
+        let breakaway_magnitude = (breakaway_weight * breakaway).min(remaining_static_margin);
+        let breakaway_torque = NewtonMeters::new(direction * breakaway_magnitude);
+        let coulomb_torque = NewtonMeters::new(direction * coulomb);
+        let viscous_torque = NewtonMeters::new(viscous_coefficient * measured_velocity);
+        FrictionCompensationBreakdown {
+            breakaway: breakaway_torque,
+            coulomb: coulomb_torque,
+            viscous: viscous_torque,
+            total: NewtonMeters::new(
+                breakaway_torque.get() + coulomb_torque.get() + viscous_torque.get(),
+            ),
         }
-
-        let last_velocity_target = self
-            .last_output_velocity_target
-            .unwrap_or(self.output_velocity_target);
-        let raw_acceleration =
-            (self.output_velocity_target.get() - last_velocity_target.get()) / dt_seconds;
-        let limited_acceleration = clamp(
-            raw_acceleration,
-            -inertia.max_acceleration_rad_per_sec2.max(0.0),
-            inertia.max_acceleration_rad_per_sec2.max(0.0),
-        );
-        NewtonMeters::new(inertia.reflected_inertia_kg_m2 * limited_acceleration)
     }
 
     fn output_torque_to_iq(&self, output_torque: NewtonMeters) -> Option<Amps> {
@@ -921,7 +907,6 @@ where
         self.position_pi.reset();
         self.last_current_ref = None;
         self.output_torque_target = NewtonMeters::ZERO;
-        self.last_output_velocity_target = None;
         self.status.last_actuator_compensation = ActuatorCompensationTelemetry::zero();
     }
 
@@ -953,6 +938,25 @@ fn output_velocity_limit(configured: RadPerSec, actuator: ActuatorParams) -> f32
         .max_output_velocity
         .map(|limit| configured.get().min(limit.get()))
         .unwrap_or(configured.get())
+}
+
+#[derive(Clone, Copy)]
+struct FrictionCompensationBreakdown {
+    breakaway: NewtonMeters,
+    coulomb: NewtonMeters,
+    viscous: NewtonMeters,
+    total: NewtonMeters,
+}
+
+impl FrictionCompensationBreakdown {
+    const fn zero() -> Self {
+        Self {
+            breakaway: NewtonMeters::ZERO,
+            coulomb: NewtonMeters::ZERO,
+            viscous: NewtonMeters::ZERO,
+            total: NewtonMeters::ZERO,
+        }
+    }
 }
 
 #[inline]
@@ -1027,6 +1031,7 @@ mod tests {
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Some(Webers::new(0.005)),
+            electrical_angle_offset: ElectricalAngle::new(0.0),
             max_phase_current: Amps::new(20.0),
             max_mech_speed: Some(RadPerSec::new(100.0)),
         }
@@ -1044,7 +1049,6 @@ mod tests {
     fn test_inverter() -> InverterParams {
         InverterParams {
             pwm_frequency_hz: Hertz::new(20_000.0),
-            deadtime_ns: 500,
             min_duty: Duty::new(0.0),
             max_duty: Duty::new(1.0),
             min_bus_voltage: Volts::new(6.0),
@@ -1078,7 +1082,6 @@ mod tests {
             phase_currents: Abc::new(Amps::ZERO, Amps::ZERO, Amps::ZERO),
             bus_voltage: Volts::new(24.0),
             rotor: RotorEstimate {
-                electrical_angle: ElectricalAngle::new(0.0),
                 mechanical_angle: MechanicalAngle::new(0.0),
                 mechanical_velocity: RadPerSec::ZERO,
             },
@@ -1149,7 +1152,7 @@ mod tests {
         controller.enable();
 
         let mut input = test_input();
-        input.rotor.electrical_angle = ElectricalAngle::new(f32::NAN);
+        input.rotor.mechanical_angle = MechanicalAngle::new(f32::NAN);
         let output = controller.fast_tick(input);
 
         assert_eq!(output.error, Some(Error::InvalidRotorAngle));
@@ -1304,8 +1307,6 @@ mod tests {
                 negative_viscous_coefficient: 0.03,
                 zero_velocity_blend_band: RadPerSec::new(1.0),
             },
-            inertia: crate::actuator::InertiaCompensation::disabled(),
-            load: crate::actuator::LoadCompensation::disabled(),
             max_total_torque: NewtonMeters::new(0.5),
         };
 
@@ -1344,6 +1345,44 @@ mod tests {
     }
 
     #[test]
+    fn breakaway_compensation_only_fills_missing_margin() {
+        let mut actuator = test_actuator();
+        actuator.compensation = ActuatorCompensationConfig {
+            friction: FrictionCompensation {
+                enabled: true,
+                positive_breakaway_torque: NewtonMeters::new(0.2),
+                negative_breakaway_torque: NewtonMeters::new(0.2),
+                positive_coulomb_torque: NewtonMeters::new(0.05),
+                negative_coulomb_torque: NewtonMeters::new(0.05),
+                positive_viscous_coefficient: 0.0,
+                negative_viscous_coefficient: 0.0,
+                zero_velocity_blend_band: RadPerSec::new(1.0),
+            },
+            max_total_torque: NewtonMeters::new(1.0),
+        };
+
+        let mut controller =
+            MotorController::new(test_motor(), test_inverter(), actuator, test_config());
+        controller.set_mode(ControlMode::Torque);
+        controller.set_torque_target(NewtonMeters::new(0.25));
+        controller.enable();
+
+        controller.medium_tick(0.001);
+
+        let telemetry = controller.status().last_actuator_compensation;
+        assert!(
+            telemetry.breakaway_torque.get().abs() < 1.0e-6,
+            "expected breakaway term to be capped away once command exceeds breakaway, got {}",
+            telemetry.breakaway_torque.get()
+        );
+        assert!(
+            telemetry.coulomb_torque.get() > 0.0,
+            "expected coulomb term to remain active, got {}",
+            telemetry.coulomb_torque.get()
+        );
+    }
+
+    #[test]
     fn torque_mode_friction_compensation_tracks_measured_velocity_for_viscous_drag() {
         let mut actuator = test_actuator();
         actuator.compensation = ActuatorCompensationConfig {
@@ -1357,8 +1396,6 @@ mod tests {
                 negative_viscous_coefficient: 0.1,
                 zero_velocity_blend_band: RadPerSec::new(1.0),
             },
-            inertia: crate::actuator::InertiaCompensation::disabled(),
-            load: crate::actuator::LoadCompensation::disabled(),
             max_total_torque: NewtonMeters::new(1.0),
         };
 

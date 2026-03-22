@@ -1,7 +1,7 @@
 use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorEstimate, ActuatorParams, ControlMode, CurrentLoopConfig,
-    FastLoopInput, FrictionCompensation, InertiaCompensation, InverterParams, LoadCompensation,
-    MotorController, MotorParams, RotorEstimate, TickSchedule,
+    FastLoopInput, FrictionCompensation, InverterParams, MotorController, MotorParams,
+    RotorEstimate, TickSchedule,
 };
 use fluxkit_math::{
     MechanicalAngle,
@@ -15,6 +15,7 @@ const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
 const MEDIUM_DECIMATION: usize = 10;
 const MEDIUM_DT_SECONDS: f32 = FAST_DT_SECONDS * MEDIUM_DECIMATION as f32;
 const GEAR_RATIO: f32 = 2.0;
+const TARGET_STEP_INDEX: usize = 100;
 
 fn motor_params() -> MotorParams {
     MotorParams {
@@ -23,6 +24,7 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Some(Webers::new(0.005)),
+        electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         max_phase_current: Amps::new(10.0),
         max_mech_speed: Some(RadPerSec::new(150.0)),
     }
@@ -31,7 +33,6 @@ fn motor_params() -> MotorParams {
 fn inverter_params() -> InverterParams {
     InverterParams {
         pwm_frequency_hz: Hertz::new(20_000.0),
-        deadtime_ns: 500,
         min_duty: Duty::new(0.0),
         max_duty: Duty::new(1.0),
         min_bus_voltage: Volts::new(6.0),
@@ -87,25 +88,37 @@ fn plant_params() -> PmsmParams {
     }
 }
 
-fn plant_params_with_output_bias() -> PmsmParams {
+fn plant_params_with_output_inertia() -> PmsmParams {
     let mut params = plant_params();
-    params.actuator.constant_bias_torque = NewtonMeters::new(0.4);
+    params.actuator.actuator_inertia_kg_m2 = 0.005;
+    params.actuator.load_inertia_kg_m2 = 0.015;
+    params.actuator.positive_breakaway_torque = NewtonMeters::new(0.08);
+    params.actuator.negative_breakaway_torque = NewtonMeters::new(0.08);
+    params.actuator.positive_coulomb_torque = NewtonMeters::new(0.04);
+    params.actuator.negative_coulomb_torque = NewtonMeters::new(0.04);
+    params.actuator.positive_viscous_coefficient = 0.02;
+    params.actuator.negative_viscous_coefficient = 0.02;
+    params.actuator.zero_velocity_blend_band = RadPerSec::new(0.5);
     params
 }
 
-fn actuator_params_with_load_compensation() -> ActuatorParams {
+fn actuator_params_with_friction_compensation() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
         max_output_velocity: Some(RadPerSec::new(30.0)),
         max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig {
-            friction: FrictionCompensation::disabled(),
-            inertia: InertiaCompensation::disabled(),
-            load: LoadCompensation {
+            friction: FrictionCompensation {
                 enabled: true,
-                constant_bias_torque: NewtonMeters::new(0.4),
+                positive_breakaway_torque: NewtonMeters::new(0.08),
+                negative_breakaway_torque: NewtonMeters::new(0.08),
+                positive_coulomb_torque: NewtonMeters::new(0.04),
+                negative_coulomb_torque: NewtonMeters::new(0.04),
+                positive_viscous_coefficient: 0.02,
+                negative_viscous_coefficient: 0.02,
+                zero_velocity_blend_band: RadPerSec::new(0.5),
             },
-            max_total_torque: NewtonMeters::new(1.0),
+            max_total_torque: NewtonMeters::new(0.4),
         },
     }
 }
@@ -129,7 +142,6 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
         phase_currents,
         bus_voltage,
         rotor: RotorEstimate {
-            electrical_angle,
             mechanical_angle: wrapped_mechanical_angle,
             mechanical_velocity: state.mechanical_velocity,
         },
@@ -225,7 +237,7 @@ fn position_mode_tracks_output_axis_feedback() {
 }
 
 #[test]
-fn actuator_load_compensation_improves_breakaway_against_output_bias() {
+fn friction_compensation_improves_velocity_command_with_output_inertia() {
     let bus_voltage = Volts::new(24.0);
     let mut uncompensated = MotorController::new(
         motor_params(),
@@ -236,35 +248,59 @@ fn actuator_load_compensation_improves_breakaway_against_output_bias() {
     let mut compensated = MotorController::new(
         motor_params(),
         inverter_params(),
-        actuator_params_with_load_compensation(),
+        actuator_params_with_friction_compensation(),
         current_loop_config(),
     );
-    let mut uncompensated_plant = PmsmModel::new_zeroed(plant_params_with_output_bias()).unwrap();
-    let mut compensated_plant = PmsmModel::new_zeroed(plant_params_with_output_bias()).unwrap();
+    let mut uncompensated_plant =
+        PmsmModel::new_zeroed(plant_params_with_output_inertia()).unwrap();
+    let mut compensated_plant = PmsmModel::new_zeroed(plant_params_with_output_inertia()).unwrap();
 
-    uncompensated.set_mode(ControlMode::Torque);
-    uncompensated.set_torque_target(NewtonMeters::new(0.2));
+    uncompensated.set_mode(ControlMode::Velocity);
     uncompensated.enable();
-    uncompensated.medium_tick(MEDIUM_DT_SECONDS);
 
-    compensated.set_mode(ControlMode::Torque);
-    compensated.set_torque_target(NewtonMeters::new(0.2));
+    compensated.set_mode(ControlMode::Velocity);
     compensated.enable();
-    compensated.medium_tick(MEDIUM_DT_SECONDS);
 
-    for _ in 0..10_000 {
-        run_fast_step(
-            &mut uncompensated,
-            &mut uncompensated_plant,
-            bus_voltage,
-            NewtonMeters::ZERO,
-        );
-        run_fast_step(
-            &mut compensated,
-            &mut compensated_plant,
-            bus_voltage,
-            NewtonMeters::ZERO,
-        );
+    for step in 0..1_000 {
+        let target_velocity = if step < TARGET_STEP_INDEX {
+            0.0
+        } else {
+            let elapsed = (step - TARGET_STEP_INDEX) as f32 * FAST_DT_SECONDS;
+            (30.0 * elapsed).min(3.0)
+        };
+        uncompensated.set_velocity_target(RadPerSec::new(target_velocity));
+        compensated.set_velocity_target(RadPerSec::new(target_velocity));
+
+        let schedule = if step % MEDIUM_DECIMATION == 0 {
+            TickSchedule::with_medium(MEDIUM_DT_SECONDS)
+        } else {
+            TickSchedule::none()
+        };
+
+        let uncompensated_output =
+            uncompensated.tick(fast_loop_input(&uncompensated_plant, bus_voltage), schedule);
+        let compensated_output =
+            compensated.tick(fast_loop_input(&compensated_plant, bus_voltage), schedule);
+
+        assert_eq!(uncompensated_output.error, None);
+        assert_eq!(compensated_output.error, None);
+
+        uncompensated_plant
+            .step_phase_duty(
+                uncompensated_output.phase_duty,
+                bus_voltage,
+                NewtonMeters::ZERO,
+                FAST_DT_SECONDS,
+            )
+            .unwrap();
+        compensated_plant
+            .step_phase_duty(
+                compensated_output.phase_duty,
+                bus_voltage,
+                NewtonMeters::ZERO,
+                FAST_DT_SECONDS,
+            )
+            .unwrap();
     }
 
     let uncompensated_output_velocity =
@@ -273,14 +309,14 @@ fn actuator_load_compensation_improves_breakaway_against_output_bias() {
         compensated_plant.state().mechanical_velocity.get() / GEAR_RATIO;
 
     assert!(
-        compensated_output_velocity > uncompensated_output_velocity + 0.5,
+        compensated_output_velocity > uncompensated_output_velocity + 0.02,
         "compensated output velocity {compensated_output_velocity} did not exceed uncompensated {uncompensated_output_velocity}",
     );
     assert!(
         compensated
             .status()
             .last_actuator_compensation
-            .load_torque
+            .friction_torque
             .get()
             > 0.0
     );

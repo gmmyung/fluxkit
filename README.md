@@ -91,6 +91,8 @@ Run the simulator examples:
 ```bash
 XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_current
 XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_position
+XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_torque_command
+XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_velocity_command
 ```
 
 These examples now generate SVG plots in `target/plots/`.
@@ -101,9 +103,13 @@ Embedded reference plots:
 
 ![Closed-loop position response](docs/plots/closed_loop_position.svg)
 
-Actuator-compensation reference plot:
+Actuator friction-compensation reference plot:
 
-![Actuator compensation response](docs/plots/closed_loop_actuator_compensation.svg)
+![Torque command response](docs/plots/closed_loop_torque_command.svg)
+
+Velocity command reference plot:
+
+![Velocity command response](docs/plots/closed_loop_velocity_command.svg)
 
 Generate the modulation plots directly from `fluxkit_math`:
 
@@ -157,8 +163,6 @@ Implemented today:
 - actuator layer with gear ratio and output-axis constraints
 - optional bounded actuator compensation layer above the current loop
   - friction and drag
-  - inertial feedforward
-  - known constant load bias
   - hybrid friction policy:
     - command-guided breakaway near zero speed
     - measured-velocity viscous drag once moving
@@ -176,10 +180,11 @@ Implemented today:
 - ideal PMSM plant simulation with `d/q`, `alpha/beta`, phase-voltage, and duty-driven stepping
 - simulator-side actuator parasitics and output-axis snapshots for integration tests
 
-The actuator-compensation example compares uncompensated and compensated
-response against a simulated output-side bias load and plots the compensation
-torque breakdown. The reference graph is shown above with the other generated
-example outputs.
+The torque-command example compares uncompensated and compensated response for
+an output torque step applied through output-side friction and inertia. The
+velocity-command example separately shows velocity-mode tracking under the same
+attached inertia and friction model. Both reference graphs are shown above with
+the other generated example outputs.
 
 Not implemented:
 
@@ -200,7 +205,7 @@ It models:
 - rigid-shaft mechanical dynamics
 - viscous friction
 - static friction
-- output-side actuator reduction and parasitics
+- output-side actuator reduction, actuator inertia, attached load inertia, and parasitics
 - optional voltage-vector magnitude limiting
 
 Model equations:

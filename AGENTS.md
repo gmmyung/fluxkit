@@ -106,7 +106,7 @@ Implemented today:
 - ideal PMSM electrical dynamics in `d/q`
 - rigid-shaft mechanical dynamics
 - viscous and static friction
-- output-side actuator reduction and parasitic load model
+- output-side actuator reduction, actuator inertia, attached load inertia, and parasitic load model
 - optional voltage-vector magnitude clamp
 - stepping by `d/q`, `alpha/beta`, phase voltage, or PWM duty
 - `PmsmSnapshot` outputs for controller integration tests

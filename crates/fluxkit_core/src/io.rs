@@ -1,7 +1,7 @@
 //! Fast-loop input and output contracts.
 
 use fluxkit_math::{
-    ElectricalAngle, MechanicalAngle,
+    MechanicalAngle,
     frame::{Abc, Dq},
     modulation::PhaseDuty,
     units::{Amps, RadPerSec, Volts},
@@ -15,9 +15,10 @@ use crate::error::Error;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RotorEstimate {
-    /// Electrical rotor angle from the absolute encoder.
-    pub electrical_angle: ElectricalAngle,
     /// Mechanical rotor angle from the absolute encoder.
+    ///
+    /// The controller derives electrical angle internally from this value,
+    /// `MotorParams::pole_pairs`, and `MotorParams::electrical_angle_offset`.
     ///
     /// This is required by `Position` mode.
     pub mechanical_angle: MechanicalAngle,

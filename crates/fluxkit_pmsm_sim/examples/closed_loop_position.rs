@@ -75,7 +75,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 phase_currents,
                 bus_voltage,
                 rotor: RotorEstimate {
-                    electrical_angle,
                     mechanical_angle,
                     mechanical_velocity: state.mechanical_velocity,
                 },
@@ -230,6 +229,7 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Some(Webers::new(0.005)),
+        electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         max_phase_current: Amps::new(10.0),
         max_mech_speed: Some(RadPerSec::new(150.0)),
     }
@@ -238,7 +238,6 @@ fn motor_params() -> MotorParams {
 fn inverter_params() -> InverterParams {
     InverterParams {
         pwm_frequency_hz: Hertz::new(20_000.0),
-        deadtime_ns: 500,
         min_duty: Duty::new(0.0),
         max_duty: Duty::new(1.0),
         min_bus_voltage: Volts::new(6.0),

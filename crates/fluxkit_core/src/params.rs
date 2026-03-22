@@ -1,6 +1,9 @@
 //! Static motor and inverter parameter types.
 
-use fluxkit_math::units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts, Webers};
+use fluxkit_math::{
+    ElectricalAngle,
+    units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts, Webers},
+};
 
 /// Electrical and mechanical parameters of the controlled motor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -17,6 +20,9 @@ pub struct MotorParams {
     pub q_inductance_h: Henries,
     /// Optional flux-linkage estimate.
     pub flux_linkage_weber: Option<Webers>,
+    /// Electrical zero offset applied after converting mechanical angle using
+    /// `pole_pairs`.
+    pub electrical_angle_offset: ElectricalAngle,
     /// Absolute phase-current operating limit.
     pub max_phase_current: Amps,
     /// Optional mechanical speed limit.
@@ -30,8 +36,6 @@ pub struct MotorParams {
 pub struct InverterParams {
     /// PWM carrier frequency.
     pub pwm_frequency_hz: Hertz,
-    /// Deadtime inserted by the power stage.
-    pub deadtime_ns: u32,
     /// Minimum allowed normalized duty.
     pub min_duty: Duty,
     /// Maximum allowed normalized duty.

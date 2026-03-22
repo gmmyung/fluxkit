@@ -14,8 +14,8 @@ pub use fluxkit_core as core;
 pub use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorParams,
     ControlMode, CurrentLoopConfig, Error, FastLoopInput, FastLoopOutput, FrictionCompensation,
-    InertiaCompensation, InverterParams, LoadCompensation, MotorController, MotorParams,
-    MotorState, MotorStatus, RotorEstimate, TickSchedule,
+    InverterParams, MotorController, MotorParams, MotorState, MotorStatus, RotorEstimate,
+    TickSchedule,
 };
 pub use fluxkit_hal as hal;
 pub use fluxkit_hal::{

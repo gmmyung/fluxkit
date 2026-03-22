@@ -25,6 +25,7 @@ pub fn validate_controller_config(
             .flux_linkage_weber
             .map(|flux| finite_non_negative(flux.get()))
             .unwrap_or(true)
+        && motor.electrical_angle_offset.get().is_finite()
         && finite_positive(motor.max_phase_current.get())
         && motor
             .max_mech_speed
@@ -76,24 +77,6 @@ pub fn validate_controller_config(
             .negative_viscous_coefficient
             .is_finite()
         && actuator.compensation.friction.negative_viscous_coefficient >= 0.0
-        && actuator
-            .compensation
-            .inertia
-            .reflected_inertia_kg_m2
-            .is_finite()
-        && actuator.compensation.inertia.reflected_inertia_kg_m2 >= 0.0
-        && actuator
-            .compensation
-            .inertia
-            .max_acceleration_rad_per_sec2
-            .is_finite()
-        && actuator.compensation.inertia.max_acceleration_rad_per_sec2 >= 0.0
-        && actuator
-            .compensation
-            .load
-            .constant_bias_torque
-            .get()
-            .is_finite()
         && finite_positive(inverter.pwm_frequency_hz.get())
         && finite_in_range(inverter.min_duty.get(), 0.0, 1.0)
         && finite_in_range(inverter.max_duty.get(), 0.0, 1.0)
@@ -126,9 +109,7 @@ pub fn validate_fast_loop_input(
         return Err(Error::InvalidPhaseCurrent);
     }
 
-    let angle = input.rotor.electrical_angle.get();
-    if !angle.is_finite()
-        || !input.rotor.mechanical_angle.get().is_finite()
+    if !input.rotor.mechanical_angle.get().is_finite()
         || !input.rotor.mechanical_velocity.get().is_finite()
         || !input.actuator.output_angle.get().is_finite()
         || !input.actuator.output_velocity.get().is_finite()

@@ -237,7 +237,6 @@ where
                 phase_currents: current.currents,
                 bus_voltage,
                 rotor: RotorEstimate {
-                    electrical_angle: rotor.electrical_angle,
                     mechanical_angle: rotor.mechanical_angle,
                     mechanical_velocity: rotor.mechanical_velocity,
                 },
@@ -287,7 +286,7 @@ mod tests {
         PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
-        ElectricalAngle, MechanicalAngle,
+        MechanicalAngle,
         frame::Abc,
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts},
     };
@@ -387,6 +386,7 @@ mod tests {
             d_inductance_h: Henries::new(0.00012),
             q_inductance_h: Henries::new(0.00012),
             flux_linkage_weber: Some(fluxkit_math::units::Webers::new(0.05)),
+            electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
             max_phase_current: Amps::new(20.0),
             max_mech_speed: None,
         }
@@ -395,7 +395,6 @@ mod tests {
     fn inverter_params() -> InverterParams {
         InverterParams {
             pwm_frequency_hz: Hertz::new(20_000.0),
-            deadtime_ns: 250,
             min_duty: Duty::new(0.0),
             max_duty: Duty::new(1.0),
             min_bus_voltage: Volts::new(6.0),
@@ -449,7 +448,6 @@ mod tests {
             },
             rotor: FakeRotor {
                 reading: RotorReading {
-                    electrical_angle: ElectricalAngle::new(0.0),
                     mechanical_angle: MechanicalAngle::new(0.0),
                     mechanical_velocity: RadPerSec::new(0.0),
                 },

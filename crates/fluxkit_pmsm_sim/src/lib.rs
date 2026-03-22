@@ -4,13 +4,16 @@
 #![warn(missing_docs, missing_debug_implementations)]
 //! Ideal PMSM plant emulator for host-side and `no_std` simulation.
 //!
-//! The model integrates the standard `d/q` electrical equations and a simple
-//! rigid-shaft mechanical equation:
+//! The model integrates the standard `d/q` electrical equations and a rigid
+//! shaft mechanical equation with reflected output inertia:
 //!
 //! $$v_d = R i_d + L_d \frac{d i_d}{dt} - \omega_e L_q i_q$$
 //! $$v_q = R i_q + L_q \frac{d i_q}{dt} + \omega_e (L_d i_d + \psi_m)$$
 //! $$\tau_e = \frac{3}{2} p \left(\psi_m i_q + (L_d - L_q) i_d i_q \right)$$
-//! $$J \frac{d \omega_m}{dt} = \tau_e - \tau_{load} - B \omega_m - \tau_{static}$$
+//! $$J_{eq} \frac{d \omega_m}{dt} = \tau_e - \tau_{load} - B \omega_m - \tau_{static} - \tau_{actuator,ref}$$
+//!
+//! Here \(J_{eq}\) includes the motor-side rotor inertia plus any output-side
+//! actuator inertia and attached-load inertia reflected through the gear ratio.
 //!
 //! Phase-domain excitation is supported too, but at the averaged plant-input
 //! level:
@@ -277,11 +280,18 @@ impl PmsmModel {
                 state.omega_mech,
                 torque - load_torque,
             );
-        let actuator_parasitic = actuator_parasitic_torque(&params.actuator, state.omega_mech);
-        let reflected_actuator_parasitic =
-            actuator_parasitic / params.actuator.gear_ratio.max(f32::EPSILON);
-        let domega =
-            (torque - load_torque - friction - reflected_actuator_parasitic) / params.inertia_kg_m2;
+        let gear_ratio = params.actuator.gear_ratio.max(f32::EPSILON);
+        let net_output_torque_without_actuator = (torque - load_torque - friction) * gear_ratio;
+        let actuator_parasitic = actuator_parasitic_torque(
+            &params.actuator,
+            state.omega_mech,
+            net_output_torque_without_actuator,
+        );
+        let reflected_actuator_parasitic = actuator_parasitic / gear_ratio;
+        let total_motor_side_inertia =
+            params.inertia_kg_m2 + params.actuator.reflected_inertia_kg_m2();
+        let domega = (torque - load_torque - friction - reflected_actuator_parasitic)
+            / total_motor_side_inertia.max(f32::EPSILON);
 
         PlantDerivative {
             did,
@@ -360,6 +370,7 @@ impl PmsmModel {
             actuator_parasitic_torque: NewtonMeters::new(actuator_parasitic_torque(
                 &self.params.actuator,
                 self.state.mechanical_velocity.get(),
+                0.0,
             )),
         }
     }
@@ -482,11 +493,20 @@ fn static_friction(static_friction: f32, omega_mech: f32, net_torque_without_sta
     }
 }
 
-fn actuator_parasitic_torque(params: &ActuatorPlantParams, motor_omega_mech: f32) -> f32 {
+fn actuator_parasitic_torque(
+    params: &ActuatorPlantParams,
+    motor_omega_mech: f32,
+    net_output_torque_without_actuator: f32,
+) -> f32 {
     let gear_ratio = params.gear_ratio.max(f32::EPSILON);
     let output_velocity = motor_omega_mech / gear_ratio;
     let blend_band = params.zero_velocity_blend_band.get().max(1.0e-6);
-    let direction = clamp(output_velocity / blend_band, -1.0, 1.0);
+    let direction_hint = if output_velocity.abs() > 1.0e-6 {
+        output_velocity / blend_band
+    } else {
+        net_output_torque_without_actuator.signum()
+    };
+    let direction = clamp(direction_hint, -1.0, 1.0);
     let positive_weight = 0.5 * (direction + 1.0);
     let negative_weight = 1.0 - positive_weight;
     let coulomb = positive_weight * params.positive_coulomb_torque.get()
@@ -495,10 +515,28 @@ fn actuator_parasitic_torque(params: &ActuatorPlantParams, motor_omega_mech: f32
         + negative_weight * params.negative_breakaway_torque.get();
     let viscous_coefficient = positive_weight * params.positive_viscous_coefficient
         + negative_weight * params.negative_viscous_coefficient;
+
+    if output_velocity.abs() <= 1.0e-6 {
+        let static_limit = coulomb + breakaway;
+        return clamp_directional(
+            net_output_torque_without_actuator,
+            static_limit,
+            static_limit,
+        );
+    }
+
     let breakaway_weight = 1.0 - clamp(output_velocity.abs() / blend_band, 0.0, 1.0);
-    direction * (coulomb + breakaway_weight * breakaway)
-        + viscous_coefficient * output_velocity
-        + params.constant_bias_torque.get()
+    direction * (coulomb + breakaway_weight * breakaway) + viscous_coefficient * output_velocity
+}
+
+fn clamp_directional(value: f32, positive_limit: f32, negative_limit: f32) -> f32 {
+    if value > 0.0 {
+        value.min(positive_limit)
+    } else if value < 0.0 {
+        value.max(-negative_limit)
+    } else {
+        0.0
+    }
 }
 
 fn clamp_vdq(vdq: Dq<f32>, max_voltage_mag: Option<Volts>) -> Dq<f32> {
@@ -535,6 +573,8 @@ fn validate_params(params: &PmsmParams) -> bool {
         && finite_non_negative(params.viscous_friction_nm_per_rad_per_sec)
         && finite_non_negative(params.static_friction_nm.get())
         && finite_positive(params.actuator.gear_ratio)
+        && finite_non_negative(params.actuator.actuator_inertia_kg_m2)
+        && finite_non_negative(params.actuator.load_inertia_kg_m2)
         && finite_non_negative(params.actuator.positive_breakaway_torque.get())
         && finite_non_negative(params.actuator.negative_breakaway_torque.get())
         && finite_non_negative(params.actuator.positive_coulomb_torque.get())
@@ -542,7 +582,6 @@ fn validate_params(params: &PmsmParams) -> bool {
         && finite_non_negative(params.actuator.positive_viscous_coefficient)
         && finite_non_negative(params.actuator.negative_viscous_coefficient)
         && finite_non_negative(params.actuator.zero_velocity_blend_band.get())
-        && params.actuator.constant_bias_torque.get().is_finite()
         && params
             .max_voltage_mag
             .map(|voltage| finite_positive(voltage.get()))
@@ -801,5 +840,32 @@ mod tests {
             .unwrap();
 
         assert!(snapshot.state.mechanical_angle.get() > 1.0);
+    }
+
+    #[test]
+    fn actuator_breakaway_holds_standstill_until_threshold() {
+        let params = crate::ActuatorPlantParams {
+            gear_ratio: 2.0,
+            actuator_inertia_kg_m2: 0.01,
+            load_inertia_kg_m2: 0.0,
+            positive_breakaway_torque: NewtonMeters::new(0.08),
+            negative_breakaway_torque: NewtonMeters::new(0.08),
+            positive_coulomb_torque: NewtonMeters::new(0.04),
+            negative_coulomb_torque: NewtonMeters::new(0.04),
+            positive_viscous_coefficient: 0.0,
+            negative_viscous_coefficient: 0.0,
+            zero_velocity_blend_band: RadPerSec::new(0.5),
+        };
+        let held = super::actuator_parasitic_torque(&params, 0.0, 0.10);
+        let broken_away = super::actuator_parasitic_torque(&params, 0.0, 0.20);
+
+        assert!(
+            (held - 0.10).abs() < 1.0e-6,
+            "expected standstill hold, got {held}"
+        );
+        assert!(
+            (broken_away - 0.12).abs() < 1.0e-6,
+            "expected breakaway-limited torque, got {broken_away}"
+        );
     }
 }

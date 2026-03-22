@@ -2,8 +2,8 @@ use std::{env, error::Error, fs};
 
 use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorEstimate, ActuatorParams, ControlMode, CurrentLoopConfig,
-    FastLoopInput, FrictionCompensation, InertiaCompensation, InverterParams, LoadCompensation,
-    MotorController, MotorParams, RotorEstimate,
+    FastLoopInput, FrictionCompensation, InverterParams, MotorController, MotorParams,
+    RotorEstimate,
 };
 use fluxkit_math::{
     MechanicalAngle,
@@ -18,24 +18,29 @@ const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
 const MEDIUM_DECIMATION: usize = 10;
 const MEDIUM_DT_SECONDS: f32 = FAST_DT_SECONDS * MEDIUM_DECIMATION as f32;
 const GEAR_RATIO: f32 = 2.0;
-const SIMULATION_STEPS: usize = 4_000;
-const TARGET_OUTPUT_TORQUE: f32 = 0.06;
+const SIMULATION_STEPS: usize = 5_000;
+const TARGET_OUTPUT_ACCELERATION: f32 = 30.0;
+const MAX_OUTPUT_VELOCITY: f32 = 3.0;
+const TARGET_STEP_INDEX: usize = 100;
 
 #[derive(Clone, Copy)]
 struct Sample {
     time_seconds: f32,
+    no_friction_output_velocity: f32,
     uncompensated_output_velocity: f32,
     compensated_output_velocity: f32,
-    target_torque: f32,
-    compensated_total_torque: f32,
-    compensated_load_torque: f32,
-    compensated_friction_torque: f32,
+    target_output_velocity: f32,
+    feedback_torque: f32,
+    total_output_torque: f32,
+    breakaway_compensation_torque: f32,
+    coulomb_compensation_torque: f32,
+    viscous_compensation_torque: f32,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let output_path = env::args()
         .nth(1)
-        .unwrap_or_else(|| "target/plots/closed_loop_actuator_compensation.svg".to_owned());
+        .unwrap_or_else(|| "target/plots/closed_loop_velocity_command.svg".to_owned());
     if let Some(parent) = std::path::Path::new(&output_path).parent() {
         fs::create_dir_all(parent)?;
     }
@@ -53,29 +58,50 @@ fn main() -> Result<(), Box<dyn Error>> {
         actuator_params_compensated(),
         config(),
     );
+    let mut no_friction = MotorController::new(
+        motor_params(),
+        inverter_params(),
+        actuator_params_disabled(),
+        config(),
+    );
     let mut uncompensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();
     let mut compensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();
+    let mut no_friction_plant = PmsmModel::new_zeroed(plant_params_no_friction()).unwrap();
     let mut samples = Vec::with_capacity(SIMULATION_STEPS);
-
-    uncompensated.set_mode(ControlMode::Torque);
-    uncompensated.set_torque_target(NewtonMeters::new(TARGET_OUTPUT_TORQUE));
+    uncompensated.set_mode(ControlMode::Velocity);
     uncompensated.enable();
 
-    compensated.set_mode(ControlMode::Torque);
-    compensated.set_torque_target(NewtonMeters::new(TARGET_OUTPUT_TORQUE));
+    compensated.set_mode(ControlMode::Velocity);
     compensated.enable();
 
+    no_friction.set_mode(ControlMode::Velocity);
+    no_friction.enable();
+
     for step in 0..SIMULATION_STEPS {
-        if step % MEDIUM_DECIMATION == MEDIUM_DECIMATION - 1 {
+        let output_velocity_target = output_velocity_target_for_step(step);
+        uncompensated.set_velocity_target(RadPerSec::new(output_velocity_target));
+        compensated.set_velocity_target(RadPerSec::new(output_velocity_target));
+        no_friction.set_velocity_target(RadPerSec::new(output_velocity_target));
+
+        if step % MEDIUM_DECIMATION == 0 {
             uncompensated.medium_tick(MEDIUM_DT_SECONDS);
             compensated.medium_tick(MEDIUM_DT_SECONDS);
+            no_friction.medium_tick(MEDIUM_DT_SECONDS);
         }
 
+        let no_friction_output =
+            no_friction.fast_tick(fast_loop_input(&no_friction_plant, bus_voltage));
         let uncompensated_output =
             uncompensated.fast_tick(fast_loop_input(&uncompensated_plant, bus_voltage));
         let compensated_output =
             compensated.fast_tick(fast_loop_input(&compensated_plant, bus_voltage));
 
+        no_friction_plant.step_phase_duty(
+            no_friction_output.phase_duty,
+            bus_voltage,
+            NewtonMeters::ZERO,
+            FAST_DT_SECONDS,
+        )?;
         uncompensated_plant.step_phase_duty(
             uncompensated_output.phase_duty,
             bus_voltage,
@@ -92,14 +118,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         let compensation = compensated.status().last_actuator_compensation;
         samples.push(Sample {
             time_seconds: step as f32 * FAST_DT_SECONDS,
+            no_friction_output_velocity: no_friction_plant.state().mechanical_velocity.get()
+                / GEAR_RATIO,
             uncompensated_output_velocity: uncompensated_plant.state().mechanical_velocity.get()
                 / GEAR_RATIO,
             compensated_output_velocity: compensated_plant.state().mechanical_velocity.get()
                 / GEAR_RATIO,
-            target_torque: TARGET_OUTPUT_TORQUE,
-            compensated_total_torque: compensation.total_output_torque_command.get(),
-            compensated_load_torque: compensation.load_torque.get(),
-            compensated_friction_torque: compensation.friction_torque.get(),
+            target_output_velocity: output_velocity_target,
+            feedback_torque: compensation.feedback_torque.get(),
+            total_output_torque: compensation.total_output_torque_command.get(),
+            breakaway_compensation_torque: compensation.breakaway_torque.get(),
+            coulomb_compensation_torque: compensation.coulomb_torque.get(),
+            viscous_compensation_torque: compensation.viscous_torque.get(),
         });
     }
 
@@ -127,7 +157,6 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
         phase_currents,
         bus_voltage,
         rotor: RotorEstimate {
-            electrical_angle,
             mechanical_angle: wrapped_mechanical_angle,
             mechanical_velocity: state.mechanical_velocity,
         },
@@ -142,10 +171,10 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
 }
 
 fn draw_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
-    let root = SVGBackend::new(path, (640, 960)).into_drawing_area();
+    let root = SVGBackend::new(path, (960, 480)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    let areas = root.split_evenly((2, 1));
+    let areas = root.split_evenly((1, 2));
     let end_time = samples
         .last()
         .map(|sample| sample.time_seconds)
@@ -155,30 +184,30 @@ fn draw_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
             sample
                 .uncompensated_output_velocity
                 .abs()
-                .max(sample.compensated_output_velocity.abs()),
+                .max(sample.compensated_output_velocity.abs())
+                .max(sample.no_friction_output_velocity.abs())
+                .max(sample.target_output_velocity.abs()),
         )
     });
     let torque_max = samples.iter().fold(0.0_f32, |acc, sample| {
         acc.max(
             sample
-                .target_torque
+                .feedback_torque
                 .abs()
-                .max(sample.compensated_total_torque.abs())
-                .max(sample.compensated_load_torque.abs())
-                .max(sample.compensated_friction_torque.abs()),
+                .max(sample.total_output_torque.abs())
+                .max(sample.breakaway_compensation_torque.abs())
+                .max(sample.coulomb_compensation_torque.abs())
+                .max(sample.viscous_compensation_torque.abs()),
         )
     });
 
     {
         let mut chart = ChartBuilder::on(&areas[0])
-            .caption(
-                "Compensation Clears The Output Deadzone",
-                ("sans-serif", 28),
-            )
+            .caption("Velocity Command", ("sans-serif", 24))
             .margin(16)
             .x_label_area_size(40)
             .y_label_area_size(70)
-            .build_cartesian_2d(0.0_f32..end_time, -0.2_f32..(velocity_max * 1.1).max(0.8))?;
+            .build_cartesian_2d(0.0_f32..end_time, -0.2_f32..(velocity_max * 1.1).max(1.0))?;
 
         chart
             .configure_mesh()
@@ -191,10 +220,30 @@ fn draw_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
             .draw_series(LineSeries::new(
                 samples
                     .iter()
+                    .map(|sample| (sample.time_seconds, sample.target_output_velocity)),
+                &BLACK,
+            ))?
+            .label("velocity target")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLACK));
+
+        chart
+            .draw_series(LineSeries::new(
+                samples
+                    .iter()
+                    .map(|sample| (sample.time_seconds, sample.no_friction_output_velocity)),
+                &RGBColor(120, 120, 120),
+            ))?
+            .label("no-friction PI response")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RGBColor(120, 120, 120)));
+
+        chart
+            .draw_series(LineSeries::new(
+                samples
+                    .iter()
                     .map(|sample| (sample.time_seconds, sample.uncompensated_output_velocity)),
                 &RED,
             ))?
-            .label("uncompensated")
+            .label("uncompensated real")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
 
         chart
@@ -204,7 +253,7 @@ fn draw_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
                     .map(|sample| (sample.time_seconds, sample.compensated_output_velocity)),
                 &BLUE,
             ))?
-            .label("compensated")
+            .label("compensated real")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
 
         chart
@@ -216,11 +265,11 @@ fn draw_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
 
     {
         let mut chart = ChartBuilder::on(&areas[1])
-            .caption("Compensation Torque Breakdown", ("sans-serif", 24))
+            .caption("Output Torque Breakdown", ("sans-serif", 24))
             .margin(16)
             .x_label_area_size(40)
             .y_label_area_size(70)
-            .build_cartesian_2d(0.0_f32..end_time, -0.1_f32..(torque_max * 1.3).max(0.5))?;
+            .build_cartesian_2d(0.0_f32..end_time, -0.05_f32..(torque_max * 1.2).max(0.5))?;
 
         chart
             .configure_mesh()
@@ -233,41 +282,51 @@ fn draw_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
             .draw_series(LineSeries::new(
                 samples
                     .iter()
-                    .map(|sample| (sample.time_seconds, sample.target_torque)),
-                &BLACK,
-            ))?
-            .label("feedback target")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLACK));
-
-        chart
-            .draw_series(LineSeries::new(
-                samples
-                    .iter()
-                    .map(|sample| (sample.time_seconds, sample.compensated_total_torque)),
+                    .map(|sample| (sample.time_seconds, sample.feedback_torque)),
                 &RED,
             ))?
-            .label("total output torque")
+            .label("feedback torque")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
 
         chart
             .draw_series(LineSeries::new(
                 samples
                     .iter()
-                    .map(|sample| (sample.time_seconds, sample.compensated_load_torque)),
+                    .map(|sample| (sample.time_seconds, sample.breakaway_compensation_torque)),
+                &RGBColor(214, 40, 40),
+            ))?
+            .label("breakaway compensation")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RGBColor(214, 40, 40)));
+
+        chart
+            .draw_series(LineSeries::new(
+                samples
+                    .iter()
+                    .map(|sample| (sample.time_seconds, sample.coulomb_compensation_torque)),
+                &RGBColor(180, 120, 0),
+            ))?
+            .label("coulomb compensation")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RGBColor(180, 120, 0)));
+
+        chart
+            .draw_series(LineSeries::new(
+                samples
+                    .iter()
+                    .map(|sample| (sample.time_seconds, sample.viscous_compensation_torque)),
                 &RGBColor(0, 121, 140),
             ))?
-            .label("load compensation")
+            .label("viscous compensation")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RGBColor(0, 121, 140)));
 
         chart
             .draw_series(LineSeries::new(
                 samples
                     .iter()
-                    .map(|sample| (sample.time_seconds, sample.compensated_friction_torque)),
-                &RGBColor(237, 174, 73),
+                    .map(|sample| (sample.time_seconds, sample.total_output_torque)),
+                &BLACK,
             ))?
-            .label("friction compensation")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RGBColor(237, 174, 73)));
+            .label("total output torque")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLACK));
 
         chart
             .configure_series_labels()
@@ -287,6 +346,7 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Some(Webers::new(0.005)),
+        electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         max_phase_current: Amps::new(10.0),
         max_mech_speed: Some(RadPerSec::new(150.0)),
     }
@@ -295,7 +355,6 @@ fn motor_params() -> MotorParams {
 fn inverter_params() -> InverterParams {
     InverterParams {
         pwm_frequency_hz: Hertz::new(20_000.0),
-        deadtime_ns: 500,
         min_duty: Duty::new(0.0),
         max_duty: Duty::new(1.0),
         min_bus_voltage: Volts::new(6.0),
@@ -341,20 +400,15 @@ fn actuator_params_compensated() -> ActuatorParams {
         compensation: ActuatorCompensationConfig {
             friction: FrictionCompensation {
                 enabled: true,
-                positive_breakaway_torque: NewtonMeters::new(0.12),
-                negative_breakaway_torque: NewtonMeters::new(0.12),
-                positive_coulomb_torque: NewtonMeters::new(0.08),
-                negative_coulomb_torque: NewtonMeters::new(0.08),
-                positive_viscous_coefficient: 0.03,
-                negative_viscous_coefficient: 0.03,
-                zero_velocity_blend_band: RadPerSec::new(1.0),
+                positive_breakaway_torque: NewtonMeters::new(0.08),
+                negative_breakaway_torque: NewtonMeters::new(0.08),
+                positive_coulomb_torque: NewtonMeters::new(0.04),
+                negative_coulomb_torque: NewtonMeters::new(0.04),
+                positive_viscous_coefficient: 0.02,
+                negative_viscous_coefficient: 0.02,
+                zero_velocity_blend_band: RadPerSec::new(0.5),
             },
-            inertia: InertiaCompensation::disabled(),
-            load: LoadCompensation {
-                enabled: true,
-                constant_bias_torque: NewtonMeters::new(0.15),
-            },
-            max_total_torque: NewtonMeters::new(1.0),
+            max_total_torque: NewtonMeters::new(0.4),
         },
     }
 }
@@ -371,16 +425,40 @@ fn plant_params() -> PmsmParams {
         static_friction_nm: NewtonMeters::new(0.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
-            positive_breakaway_torque: NewtonMeters::new(0.12),
-            negative_breakaway_torque: NewtonMeters::new(0.12),
-            positive_coulomb_torque: NewtonMeters::new(0.08),
-            negative_coulomb_torque: NewtonMeters::new(0.08),
-            positive_viscous_coefficient: 0.03,
-            negative_viscous_coefficient: 0.03,
-            zero_velocity_blend_band: RadPerSec::new(1.0),
-            constant_bias_torque: NewtonMeters::new(0.15),
+            actuator_inertia_kg_m2: 0.005,
+            load_inertia_kg_m2: 0.015,
+            positive_breakaway_torque: NewtonMeters::new(0.08),
+            negative_breakaway_torque: NewtonMeters::new(0.08),
+            positive_coulomb_torque: NewtonMeters::new(0.04),
+            negative_coulomb_torque: NewtonMeters::new(0.04),
+            positive_viscous_coefficient: 0.02,
+            negative_viscous_coefficient: 0.02,
+            zero_velocity_blend_band: RadPerSec::new(0.5),
             ..ActuatorPlantParams::disabled()
         },
         max_voltage_mag: None,
+    }
+}
+
+fn plant_params_no_friction() -> PmsmParams {
+    let mut params = plant_params();
+    params.viscous_friction_nm_per_rad_per_sec = 0.0;
+    params.static_friction_nm = NewtonMeters::ZERO;
+    params.actuator.positive_breakaway_torque = NewtonMeters::ZERO;
+    params.actuator.negative_breakaway_torque = NewtonMeters::ZERO;
+    params.actuator.positive_coulomb_torque = NewtonMeters::ZERO;
+    params.actuator.negative_coulomb_torque = NewtonMeters::ZERO;
+    params.actuator.positive_viscous_coefficient = 0.0;
+    params.actuator.negative_viscous_coefficient = 0.0;
+    params.actuator.zero_velocity_blend_band = RadPerSec::ZERO;
+    params
+}
+
+fn output_velocity_target_for_step(step: usize) -> f32 {
+    if step < TARGET_STEP_INDEX {
+        0.0
+    } else {
+        let elapsed = (step - TARGET_STEP_INDEX) as f32 * FAST_DT_SECONDS;
+        (TARGET_OUTPUT_ACCELERATION * elapsed).min(MAX_OUTPUT_VELOCITY)
     }
 }

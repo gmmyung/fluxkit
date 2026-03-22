@@ -43,12 +43,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         config(),
     );
     let mut plant = PmsmModel::new_zeroed(plant_params())?;
-    let mut samples = Vec::with_capacity(8_000);
+    let mut samples = Vec::with_capacity(20_000);
 
     controller.set_mode(ControlMode::Current);
     controller.enable();
 
-    for step in 0..8_000 {
+    for step in 0..20_000 {
         let iq_target = if step < 1_000 { 0.0 } else { 3.0 };
         controller.set_iq_target(Amps::new(iq_target));
 
@@ -69,7 +69,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             phase_currents,
             bus_voltage,
             rotor: RotorEstimate {
-                electrical_angle,
                 mechanical_angle,
                 mechanical_velocity: state.mechanical_velocity,
             },
@@ -104,10 +103,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn draw_current_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
-    let root = SVGBackend::new(path, (640, 960)).into_drawing_area();
+    let root = SVGBackend::new(path, (1440, 360)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    let areas = root.split_evenly((3, 1));
+    let areas = root.split_evenly((1, 3));
     let end_time = samples
         .last()
         .map(|sample| sample.time_seconds)
@@ -245,6 +244,7 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Some(Webers::new(0.005)),
+        electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         max_phase_current: Amps::new(10.0),
         max_mech_speed: Some(RadPerSec::new(150.0)),
     }
@@ -253,7 +253,6 @@ fn motor_params() -> MotorParams {
 fn inverter_params() -> InverterParams {
     InverterParams {
         pwm_frequency_hz: Hertz::new(20_000.0),
-        deadtime_ns: 500,
         min_duty: Duty::new(0.0),
         max_duty: Duty::new(1.0),
         min_bus_voltage: Volts::new(6.0),
@@ -303,6 +302,8 @@ fn plant_params() -> PmsmParams {
         static_friction_nm: NewtonMeters::new(0.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
+            actuator_inertia_kg_m2: 0.005,
+            load_inertia_kg_m2: 0.015,
             ..ActuatorPlantParams::disabled()
         },
         max_voltage_mag: None,
