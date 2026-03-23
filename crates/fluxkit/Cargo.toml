@@ -15,3 +15,6 @@ serde = ["fluxkit_core/serde", "fluxkit_hal/serde", "fluxkit_math/serde"]
 fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core" }
 fluxkit_hal = { path = "../fluxkit_hal", package = "fluxkit-hal" }
 fluxkit_math = { path = "../fluxkit_math" }
+
+[dev-dependencies]
+fluxkit-pmsm-sim = { path = "../fluxkit_pmsm_sim" }

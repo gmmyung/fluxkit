@@ -16,6 +16,7 @@
 #![doc = include_str!("../../../docs/plots/closed_loop_current.svg")]
 
 pub mod actuator;
+pub mod calibration;
 pub mod config;
 pub mod control;
 pub mod error;
@@ -32,6 +33,26 @@ pub mod validation;
 pub use actuator::{
     ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorParams,
     FrictionCompensation,
+};
+pub use calibration::{
+    ActuatorBlendBandCalibrationCommand, ActuatorBlendBandCalibrationConfig,
+    ActuatorBlendBandCalibrationInput, ActuatorBlendBandCalibrationResult,
+    ActuatorBlendBandCalibrationState, ActuatorBlendBandCalibrator,
+    ActuatorBreakawayCalibrationCommand, ActuatorBreakawayCalibrationConfig,
+    ActuatorBreakawayCalibrationInput, ActuatorBreakawayCalibrationResult,
+    ActuatorBreakawayCalibrationState, ActuatorBreakawayCalibrator, ActuatorCalibration,
+    ActuatorFrictionCalibrationCommand, ActuatorFrictionCalibrationConfig,
+    ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrationResult,
+    ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator, CalibrationError,
+    FluxLinkageCalibrationConfig, FluxLinkageCalibrationInput, FluxLinkageCalibrationResult,
+    FluxLinkageCalibrationState, FluxLinkageCalibrator, MotorCalibration,
+    PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
+    PhaseInductanceCalibrationResult, PhaseInductanceCalibrationState, PhaseInductanceCalibrator,
+    PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
+    PhaseResistanceCalibrationResult, PhaseResistanceCalibrationState, PhaseResistanceCalibrator,
+    PolePairsAndOffsetCalibrationConfig, PolePairsAndOffsetCalibrationInput,
+    PolePairsAndOffsetCalibrationResult, PolePairsAndOffsetCalibrationState,
+    PolePairsAndOffsetCalibrator,
 };
 pub use config::CurrentLoopConfig;
 pub use error::Error;

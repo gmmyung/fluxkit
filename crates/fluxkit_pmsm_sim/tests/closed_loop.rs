@@ -78,11 +78,11 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
-        inertia_kg_m2: 0.0002,
-        viscous_friction_nm_per_rad_per_sec: 0.0002,
-        static_friction_nm: NewtonMeters::new(0.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
+            output_inertia_kg_m2: 0.0008,
+            positive_viscous_coefficient: 0.0002,
+            negative_viscous_coefficient: 0.0002,
             ..ActuatorPlantParams::disabled()
         },
         max_voltage_mag: None,
@@ -91,8 +91,7 @@ fn plant_params() -> PmsmParams {
 
 fn plant_params_with_output_inertia() -> PmsmParams {
     let mut params = plant_params();
-    params.actuator.actuator_inertia_kg_m2 = 0.005;
-    params.actuator.load_inertia_kg_m2 = 0.015;
+    params.actuator.output_inertia_kg_m2 = 0.0208;
     params.actuator.positive_breakaway_torque = NewtonMeters::new(0.08);
     params.actuator.negative_breakaway_torque = NewtonMeters::new(0.08);
     params.actuator.positive_coulomb_torque = NewtonMeters::new(0.04);
@@ -198,8 +197,18 @@ fn current_mode_drives_positive_q_current_into_the_plant() {
 
     let status = controller.status();
     assert!(status.active_error.is_none());
-    assert_abs_diff_le(status.last_measured_idq.q.get(), 3.0, 0.05, "measured q current");
-    assert_abs_diff_le(status.last_measured_idq.d.get(), 0.0, 0.05, "measured d current");
+    assert_abs_diff_le(
+        status.last_measured_idq.q.get(),
+        3.0,
+        0.05,
+        "measured q current",
+    );
+    assert_abs_diff_le(
+        status.last_measured_idq.d.get(),
+        0.0,
+        0.05,
+        "measured d current",
+    );
     assert!(
         plant.state().mechanical_velocity.get() > 100.0,
         "mechanical velocity did not build strongly enough: {}",

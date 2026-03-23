@@ -1,0 +1,286 @@
+//! Persistable actuator-side calibration record.
+
+use fluxkit_math::units::{NewtonMeters, RadPerSec};
+
+use crate::{
+    actuator::ActuatorParams,
+    calibration::{
+        ActuatorBlendBandCalibrationResult, ActuatorBreakawayCalibrationResult,
+        ActuatorFrictionCalibrationResult,
+    },
+};
+
+/// Persistable collection of actuator-side calibration values.
+///
+/// This record is intentionally incremental so later procedures can refine the
+/// same actuator parameter surface without overwriting unrelated fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ActuatorCalibration {
+    /// Additional startup torque near zero speed in the positive direction.
+    pub positive_breakaway_torque: Option<NewtonMeters>,
+    /// Additional startup torque near zero speed in the negative direction.
+    pub negative_breakaway_torque: Option<NewtonMeters>,
+    /// Constant friction torque while moving in the positive direction.
+    pub positive_coulomb_torque: Option<NewtonMeters>,
+    /// Constant friction torque while moving in the negative direction.
+    pub negative_coulomb_torque: Option<NewtonMeters>,
+    /// Positive-direction viscous coefficient in `Nm / (rad/s)`.
+    pub positive_viscous_coefficient: Option<f32>,
+    /// Negative-direction viscous coefficient in `Nm / (rad/s)`.
+    pub negative_viscous_coefficient: Option<f32>,
+    /// Smoothing band around zero speed for friction blending.
+    pub zero_velocity_blend_band: Option<RadPerSec>,
+}
+
+impl ActuatorCalibration {
+    /// Empty calibration record with no identified values.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self {
+            positive_breakaway_torque: None,
+            negative_breakaway_torque: None,
+            positive_coulomb_torque: None,
+            negative_coulomb_torque: None,
+            positive_viscous_coefficient: None,
+            negative_viscous_coefficient: None,
+            zero_velocity_blend_band: None,
+        }
+    }
+
+    /// Merges two calibration records, preferring values from `newer`.
+    #[inline]
+    pub const fn merge(self, newer: Self) -> Self {
+        Self {
+            positive_breakaway_torque: if newer.positive_breakaway_torque.is_some() {
+                newer.positive_breakaway_torque
+            } else {
+                self.positive_breakaway_torque
+            },
+            negative_breakaway_torque: if newer.negative_breakaway_torque.is_some() {
+                newer.negative_breakaway_torque
+            } else {
+                self.negative_breakaway_torque
+            },
+            positive_coulomb_torque: if newer.positive_coulomb_torque.is_some() {
+                newer.positive_coulomb_torque
+            } else {
+                self.positive_coulomb_torque
+            },
+            negative_coulomb_torque: if newer.negative_coulomb_torque.is_some() {
+                newer.negative_coulomb_torque
+            } else {
+                self.negative_coulomb_torque
+            },
+            positive_viscous_coefficient: if newer.positive_viscous_coefficient.is_some() {
+                newer.positive_viscous_coefficient
+            } else {
+                self.positive_viscous_coefficient
+            },
+            negative_viscous_coefficient: if newer.negative_viscous_coefficient.is_some() {
+                newer.negative_viscous_coefficient
+            } else {
+                self.negative_viscous_coefficient
+            },
+            zero_velocity_blend_band: if newer.zero_velocity_blend_band.is_some() {
+                newer.zero_velocity_blend_band
+            } else {
+                self.zero_velocity_blend_band
+            },
+        }
+    }
+
+    /// Applies any populated fields onto an existing actuator-parameter record.
+    ///
+    /// This updates the friction coefficients only. It does not implicitly
+    /// enable compensation or change the total-torque bound.
+    pub fn apply_to_actuator_params(&self, actuator: &mut ActuatorParams) {
+        let friction = &mut actuator.compensation.friction;
+        if let Some(value) = self.positive_breakaway_torque {
+            friction.positive_breakaway_torque = value;
+        }
+        if let Some(value) = self.negative_breakaway_torque {
+            friction.negative_breakaway_torque = value;
+        }
+        if let Some(value) = self.positive_coulomb_torque {
+            friction.positive_coulomb_torque = value;
+        }
+        if let Some(value) = self.negative_coulomb_torque {
+            friction.negative_coulomb_torque = value;
+        }
+        if let Some(value) = self.positive_viscous_coefficient {
+            friction.positive_viscous_coefficient = value;
+        }
+        if let Some(value) = self.negative_viscous_coefficient {
+            friction.negative_viscous_coefficient = value;
+        }
+        if let Some(value) = self.zero_velocity_blend_band {
+            friction.zero_velocity_blend_band = value;
+        }
+    }
+}
+
+impl From<ActuatorFrictionCalibrationResult> for ActuatorCalibration {
+    #[inline]
+    fn from(result: ActuatorFrictionCalibrationResult) -> Self {
+        Self {
+            positive_coulomb_torque: Some(result.positive_coulomb_torque),
+            negative_coulomb_torque: Some(result.negative_coulomb_torque),
+            positive_viscous_coefficient: Some(result.positive_viscous_coefficient),
+            negative_viscous_coefficient: Some(result.negative_viscous_coefficient),
+            ..Self::empty()
+        }
+    }
+}
+
+impl From<ActuatorBreakawayCalibrationResult> for ActuatorCalibration {
+    #[inline]
+    fn from(result: ActuatorBreakawayCalibrationResult) -> Self {
+        Self {
+            positive_breakaway_torque: Some(result.positive_breakaway_torque),
+            negative_breakaway_torque: Some(result.negative_breakaway_torque),
+            ..Self::empty()
+        }
+    }
+}
+
+impl From<ActuatorBlendBandCalibrationResult> for ActuatorCalibration {
+    #[inline]
+    fn from(result: ActuatorBlendBandCalibrationResult) -> Self {
+        Self {
+            zero_velocity_blend_band: Some(result.zero_velocity_blend_band),
+            ..Self::empty()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fluxkit_math::units::{NewtonMeters, RadPerSec};
+
+    use super::ActuatorCalibration;
+    use crate::{
+        actuator::{ActuatorCompensationConfig, ActuatorParams, FrictionCompensation},
+        calibration::{
+            ActuatorBlendBandCalibrationResult, ActuatorBreakawayCalibrationResult,
+            ActuatorFrictionCalibrationResult,
+        },
+    };
+
+    #[test]
+    fn merge_prefers_newer_populated_fields() {
+        let older = ActuatorCalibration {
+            positive_coulomb_torque: Some(NewtonMeters::new(0.1)),
+            ..ActuatorCalibration::empty()
+        };
+        let newer = ActuatorCalibration {
+            positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
+            positive_viscous_coefficient: Some(0.02),
+            ..ActuatorCalibration::empty()
+        };
+
+        let merged = older.merge(newer);
+        assert_eq!(
+            merged.positive_coulomb_torque,
+            Some(NewtonMeters::new(0.04))
+        );
+        assert_eq!(merged.positive_viscous_coefficient, Some(0.02));
+    }
+
+    #[test]
+    fn apply_to_actuator_params_overwrites_only_populated_fields() {
+        let mut actuator = ActuatorParams {
+            gear_ratio: 2.0,
+            max_output_velocity: None,
+            max_output_torque: None,
+            compensation: ActuatorCompensationConfig {
+                friction: FrictionCompensation {
+                    enabled: false,
+                    positive_breakaway_torque: NewtonMeters::new(0.2),
+                    negative_breakaway_torque: NewtonMeters::new(0.2),
+                    positive_coulomb_torque: NewtonMeters::new(0.1),
+                    negative_coulomb_torque: NewtonMeters::new(0.1),
+                    positive_viscous_coefficient: 0.05,
+                    negative_viscous_coefficient: 0.05,
+                    zero_velocity_blend_band: RadPerSec::new(0.5),
+                },
+                max_total_torque: NewtonMeters::new(1.0),
+            },
+        };
+
+        ActuatorCalibration {
+            positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
+            negative_viscous_coefficient: Some(0.02),
+            ..ActuatorCalibration::empty()
+        }
+        .apply_to_actuator_params(&mut actuator);
+
+        assert_eq!(
+            actuator.compensation.friction.positive_coulomb_torque,
+            NewtonMeters::new(0.04)
+        );
+        assert_eq!(
+            actuator.compensation.friction.negative_viscous_coefficient,
+            0.02
+        );
+        assert_eq!(
+            actuator.compensation.friction.positive_breakaway_torque,
+            NewtonMeters::new(0.2)
+        );
+        assert!(!actuator.compensation.friction.enabled);
+    }
+
+    #[test]
+    fn friction_result_maps_to_actuator_calibration_surface() {
+        let calibration: ActuatorCalibration = ActuatorFrictionCalibrationResult {
+            positive_coulomb_torque: NewtonMeters::new(0.04),
+            negative_coulomb_torque: NewtonMeters::new(0.05),
+            positive_viscous_coefficient: 0.02,
+            negative_viscous_coefficient: 0.03,
+        }
+        .into();
+
+        assert_eq!(
+            calibration.positive_coulomb_torque,
+            Some(NewtonMeters::new(0.04))
+        );
+        assert_eq!(
+            calibration.negative_coulomb_torque,
+            Some(NewtonMeters::new(0.05))
+        );
+        assert_eq!(calibration.positive_viscous_coefficient, Some(0.02));
+        assert_eq!(calibration.negative_viscous_coefficient, Some(0.03));
+    }
+
+    #[test]
+    fn breakaway_result_maps_to_actuator_calibration_surface() {
+        let calibration: ActuatorCalibration = ActuatorBreakawayCalibrationResult {
+            positive_breakaway_torque: NewtonMeters::new(0.08),
+            negative_breakaway_torque: NewtonMeters::new(0.09),
+        }
+        .into();
+
+        assert_eq!(
+            calibration.positive_breakaway_torque,
+            Some(NewtonMeters::new(0.08))
+        );
+        assert_eq!(
+            calibration.negative_breakaway_torque,
+            Some(NewtonMeters::new(0.09))
+        );
+    }
+
+    #[test]
+    fn blend_band_result_maps_to_actuator_calibration_surface() {
+        let calibration: ActuatorCalibration = ActuatorBlendBandCalibrationResult {
+            zero_velocity_blend_band: RadPerSec::new(0.05),
+        }
+        .into();
+
+        assert_eq!(
+            calibration.zero_velocity_blend_band,
+            Some(RadPerSec::new(0.05))
+        );
+    }
+}

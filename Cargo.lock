@@ -289,6 +289,7 @@ version = "0.1.0"
 dependencies = [
  "fluxkit-core",
  "fluxkit-hal",
+ "fluxkit-pmsm-sim",
  "fluxkit_math",
 ]
 

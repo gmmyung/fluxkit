@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut uncompensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();
     let mut compensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();
     let mut samples = Vec::with_capacity(SIMULATION_STEPS);
-    let expected_output_inertia = total_output_equivalent_inertia_kg_m2();
+    let expected_output_inertia = total_output_inertia_kg_m2();
     let mut expected_output_velocity = 0.0_f32;
 
     uncompensated.set_mode(ControlMode::Torque);
@@ -395,13 +395,9 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
-        inertia_kg_m2: 0.0002,
-        viscous_friction_nm_per_rad_per_sec: 0.0002,
-        static_friction_nm: NewtonMeters::new(0.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
-            actuator_inertia_kg_m2: 0.005,
-            load_inertia_kg_m2: 0.015,
+            output_inertia_kg_m2: 0.0208,
             positive_breakaway_torque: NewtonMeters::new(0.08),
             negative_breakaway_torque: NewtonMeters::new(0.08),
             positive_coulomb_torque: NewtonMeters::new(0.04),
@@ -414,10 +410,9 @@ fn plant_params() -> PmsmParams {
     }
 }
 
-fn total_output_equivalent_inertia_kg_m2() -> f32 {
+fn total_output_inertia_kg_m2() -> f32 {
     let plant = plant_params();
     plant.actuator.total_output_inertia_kg_m2()
-        + plant.inertia_kg_m2 * plant.actuator.gear_ratio * plant.actuator.gear_ratio
 }
 
 fn output_torque_target_for_step(step: usize) -> f32 {

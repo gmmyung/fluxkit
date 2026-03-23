@@ -297,13 +297,11 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
-        inertia_kg_m2: 0.0002,
-        viscous_friction_nm_per_rad_per_sec: 0.0002,
-        static_friction_nm: NewtonMeters::new(0.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
-            actuator_inertia_kg_m2: 0.005,
-            load_inertia_kg_m2: 0.015,
+            output_inertia_kg_m2: 0.0208,
+            positive_viscous_coefficient: 0.0002,
+            negative_viscous_coefficient: 0.0002,
             ..ActuatorPlantParams::disabled()
         },
         max_voltage_mag: None,

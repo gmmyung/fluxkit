@@ -17,13 +17,8 @@ pub struct PmsmParams {
     pub q_inductance_h: Henries,
     /// Permanent-magnet flux linkage.
     pub flux_linkage_weber: Webers,
-    /// Motor-side rotor inertia in `kg·m²`.
-    pub inertia_kg_m2: f32,
-    /// Viscous friction coefficient in `Nm / (rad/s)`.
-    pub viscous_friction_nm_per_rad_per_sec: f32,
-    /// Constant load-independent opposing torque such as seal drag.
-    pub static_friction_nm: NewtonMeters,
-    /// Output-side actuator parasitics and reduction.
+    /// Combined mechanical drivetrain model, including rotor-side and
+    /// output-side dynamics.
     pub actuator: ActuatorPlantParams,
     /// Optional magnitude clamp for the applied stator-voltage vector.
     ///
@@ -33,17 +28,15 @@ pub struct PmsmParams {
     pub max_voltage_mag: Option<Volts>,
 }
 
-/// Output-side actuator reduction and parasitic load model.
+/// Output-side actuator reduction, inertia, and friction model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActuatorPlantParams {
     /// Mechanical reduction ratio from motor shaft to output axis.
     pub gear_ratio: f32,
-    /// Output-side actuator inertia in `kg·m²`.
-    pub actuator_inertia_kg_m2: f32,
-    /// Attached output-side load inertia in `kg·m²`.
-    pub load_inertia_kg_m2: f32,
+    /// Total equivalent inertia expressed on the output side in `kg·m²`.
+    pub output_inertia_kg_m2: f32,
     /// Additional startup torque near zero speed in the positive direction.
     pub positive_breakaway_torque: NewtonMeters,
     /// Additional startup torque near zero speed in the negative direction.
@@ -61,12 +54,11 @@ pub struct ActuatorPlantParams {
 }
 
 impl ActuatorPlantParams {
-    /// Returns a zero-parasitic actuator model with unity reduction.
+    /// Returns a zero-friction actuator model with unity reduction.
     pub const fn disabled() -> Self {
         Self {
             gear_ratio: 1.0,
-            actuator_inertia_kg_m2: 0.0,
-            load_inertia_kg_m2: 0.0,
+            output_inertia_kg_m2: 0.0,
             positive_breakaway_torque: NewtonMeters::ZERO,
             negative_breakaway_torque: NewtonMeters::ZERO,
             positive_coulomb_torque: NewtonMeters::ZERO,
@@ -77,16 +69,16 @@ impl ActuatorPlantParams {
         }
     }
 
-    /// Returns the total output-side inertia in `kg·m²`.
+    /// Returns the total equivalent output-side inertia in `kg·m²`.
     #[inline]
     pub const fn total_output_inertia_kg_m2(&self) -> f32 {
-        self.actuator_inertia_kg_m2 + self.load_inertia_kg_m2
+        self.output_inertia_kg_m2
     }
 
     /// Returns the total output-side inertia reflected to the motor shaft.
     #[inline]
     pub fn reflected_inertia_kg_m2(&self) -> f32 {
         let gear_ratio = self.gear_ratio.max(f32::EPSILON);
-        self.total_output_inertia_kg_m2() / (gear_ratio * gear_ratio)
+        self.output_inertia_kg_m2 / (gear_ratio * gear_ratio)
     }
 }

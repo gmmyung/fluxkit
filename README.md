@@ -193,6 +193,53 @@ Not implemented:
 - sensorless support
 - Embassy integration
 
+## Calibration
+
+The repo now includes pure calibration procedures in `fluxkit_core` plus
+HAL-facing wrappers in `fluxkit`.
+
+Recommended order:
+
+1. Motor electrical calibration
+2. Actuator friction calibration
+
+Motor calibration procedures:
+
+- pole pairs + electrical angle offset
+- phase resistance
+- phase inductance
+- flux linkage
+
+Actuator calibration procedures:
+
+- Coulomb + viscous friction from steady velocity sweeps
+- breakaway torque from slow torque ramps
+- `zero_velocity_blend_band` from low-speed release ramps
+
+Persisted records:
+
+- `MotorCalibration`
+- `ActuatorCalibration`
+
+Typical flow:
+
+1. Run the pure procedure through `MotorCalibrationSystem` or `ActuatorCalibrationSystem`.
+2. Merge each completed result into the corresponding persisted record.
+3. Apply the merged record onto `MotorParams` or `ActuatorParams`.
+4. Persist those populated parameter structs in board/runtime code.
+
+Current simulator-backed confidence:
+
+- pole pairs are recovered exactly
+- electrical offset is validated to within `0.03 rad`
+- phase inductance and flux linkage are within about `1%` in the current simulator setup
+- Coulomb and viscous friction are close fits
+- breakaway and blend-band calibration are usable but lower-confidence than the motor electrical terms
+
+These procedures are validated against the in-repo simulator. They should be
+treated as a strong bring-up baseline, not as final proof of real-hardware
+accuracy.
+
 ## PMSM simulator
 
 `fluxkit_pmsm_sim` provides an allocation-free ideal PMSM plant model intended
