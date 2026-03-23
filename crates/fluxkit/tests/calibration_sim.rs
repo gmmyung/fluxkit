@@ -3,10 +3,14 @@ use std::{cell::RefCell, rc::Rc};
 use fluxkit::{
     ActuatorBlendBandCalibrationConfig, ActuatorBlendBandCalibrator,
     ActuatorBreakawayCalibrationConfig, ActuatorBreakawayCalibrator, ActuatorCalibration,
-    ActuatorCalibrationSystem, ActuatorCompensationConfig, ActuatorFrictionCalibrationConfig,
-    ActuatorFrictionCalibrator, ActuatorParams, CalibrationTickResult, CurrentLoopConfig,
-    ElectricalAngle, FluxLinkageCalibrationConfig, FluxLinkageCalibrator, InverterParams,
-    MechanicalAngle, MotorCalibration, MotorCalibrationHardware, MotorCalibrationSystem,
+    ActuatorCalibrationRoutine, ActuatorCalibrationRoutineResult, ActuatorCalibrationSystem,
+    ActuatorCalibrationWorkflow, ActuatorCalibrationWorkflowConfig, ActuatorCompensationConfig,
+    ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrator,
+    ActuatorGearRatioCalibrationConfig, ActuatorGearRatioCalibrator, ActuatorParams,
+    CalibrationTickResult, CurrentLoopConfig, ElectricalAngle, FluxLinkageCalibrationConfig,
+    FluxLinkageCalibrator, InverterParams, MechanicalAngle, MotorCalibration,
+    MotorCalibrationHardware, MotorCalibrationRoutine, MotorCalibrationRoutineResult,
+    MotorCalibrationSystem, MotorCalibrationWorkflow, MotorCalibrationWorkflowConfig,
     MotorController, MotorHardware, MotorParams, MotorSystem, PhaseInductanceCalibrationConfig,
     PhaseInductanceCalibrator, PhaseResistanceCalibrationConfig, PhaseResistanceCalibrator,
     PolePairsAndOffsetCalibrationConfig, PolePairsAndOffsetCalibrator, TickSchedule,
@@ -135,6 +139,15 @@ fn current_loop_config() -> CurrentLoopConfig {
 fn actuator_params_calibrating() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
+        max_output_velocity: Some(RadPerSec::new(30.0)),
+        max_output_torque: Some(NewtonMeters::new(10.0)),
+        compensation: ActuatorCompensationConfig::disabled(),
+    }
+}
+
+fn actuator_params_unknown_ratio() -> ActuatorParams {
+    ActuatorParams {
+        gear_ratio: 1.0,
         max_output_velocity: Some(RadPerSec::new(30.0)),
         max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig::disabled(),
@@ -336,12 +349,23 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
     .unwrap();
 
     let resistance_result = loop {
-        match system
-            .tick_phase_resistance(&mut resistance, FAST_DT_SECONDS)
-            .unwrap()
-        {
-            CalibrationTickResult::Running => {}
-            CalibrationTickResult::Complete(result) => break result,
+        let mut routine = MotorCalibrationRoutine::PhaseResistance(resistance);
+        match system.tick(&mut routine, FAST_DT_SECONDS).unwrap() {
+            CalibrationTickResult::Running => {
+                let MotorCalibrationRoutine::PhaseResistance(calibrator) = routine else {
+                    unreachable!();
+                };
+                resistance = calibrator;
+            }
+            CalibrationTickResult::Complete(MotorCalibrationRoutineResult::PhaseResistance(
+                result,
+            )) => {
+                let MotorCalibrationRoutine::PhaseResistance(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
         }
     };
 
@@ -359,12 +383,23 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
     .unwrap();
 
     let inductance_result = loop {
-        match system
-            .tick_phase_inductance(&mut inductance, FAST_DT_SECONDS)
-            .unwrap()
-        {
-            CalibrationTickResult::Running => {}
-            CalibrationTickResult::Complete(result) => break result,
+        let mut routine = MotorCalibrationRoutine::PhaseInductance(inductance);
+        match system.tick(&mut routine, FAST_DT_SECONDS).unwrap() {
+            CalibrationTickResult::Running => {
+                let MotorCalibrationRoutine::PhaseInductance(calibrator) = routine else {
+                    unreachable!();
+                };
+                inductance = calibrator;
+            }
+            CalibrationTickResult::Complete(MotorCalibrationRoutineResult::PhaseInductance(
+                result,
+            )) => {
+                let MotorCalibrationRoutine::PhaseInductance(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
         }
     };
 
@@ -456,12 +491,23 @@ fn motor_calibration_system_recovers_pole_pairs_and_offset_through_public_wrappe
     .unwrap();
 
     let result = loop {
-        match system
-            .tick_pole_pairs_and_offset(&mut calibrator, FAST_DT_SECONDS)
-            .unwrap()
-        {
-            CalibrationTickResult::Running => {}
-            CalibrationTickResult::Complete(result) => break result,
+        let mut routine = MotorCalibrationRoutine::PolePairsAndOffset(calibrator);
+        match system.tick(&mut routine, FAST_DT_SECONDS).unwrap() {
+            CalibrationTickResult::Running => {
+                let MotorCalibrationRoutine::PolePairsAndOffset(next) = routine else {
+                    unreachable!();
+                };
+                calibrator = next;
+            }
+            CalibrationTickResult::Complete(MotorCalibrationRoutineResult::PolePairsAndOffset(
+                result,
+            )) => {
+                let MotorCalibrationRoutine::PolePairsAndOffset(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
         }
     };
 
@@ -520,8 +566,54 @@ fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
     .unwrap();
 
     let result = loop {
+        let mut routine = MotorCalibrationRoutine::FluxLinkage(calibrator);
+        match system.tick(&mut routine, FAST_DT_SECONDS).unwrap() {
+            CalibrationTickResult::Running => {
+                let MotorCalibrationRoutine::FluxLinkage(next) = routine else {
+                    unreachable!();
+                };
+                calibrator = next;
+            }
+            CalibrationTickResult::Complete(MotorCalibrationRoutineResult::FluxLinkage(result)) => {
+                let MotorCalibrationRoutine::FluxLinkage(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
+        }
+    };
+
+    assert!((result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 1.0e-4);
+}
+
+#[test]
+fn motor_calibration_workflow_runs_recommended_order() {
+    let params = plant_params();
+    let shared = Rc::new(RefCell::new(SimHarness {
+        plant: PmsmModel::new(
+            params,
+            PmsmState {
+                mechanical_angle: MechanicalAngle::new(0.4),
+                mechanical_velocity: RadPerSec::ZERO,
+                current_dq: fluxkit::Dq::new(Amps::ZERO, Amps::ZERO),
+            },
+        )
+        .unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+        rotor_bias: 0.21,
+    }));
+    let mut system = MotorCalibrationSystem::new(hardware(&shared));
+    let mut workflow = MotorCalibrationWorkflow::new(
+        MotorCalibrationWorkflowConfig::default_for_full_motor_calibration(),
+    )
+    .unwrap();
+
+    let result = loop {
         match system
-            .tick_flux_linkage(&mut calibrator, FAST_DT_SECONDS)
+            .tick_workflow(&mut workflow, FAST_DT_SECONDS)
             .unwrap()
         {
             CalibrationTickResult::Running => {}
@@ -529,7 +621,17 @@ fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
         }
     };
 
-    assert!((result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 1.0e-4);
+    assert_eq!(result.pole_pairs, Some(params.pole_pairs));
+    assert!(
+        (result.phase_resistance_ohm.unwrap().get() - params.phase_resistance_ohm.get()).abs()
+            < 0.01
+    );
+    assert!((result.d_inductance_h.unwrap().get() - params.d_inductance_h.get()).abs() < 3.0e-6);
+    assert!((result.q_inductance_h.unwrap().get() - params.q_inductance_h.get()).abs() < 3.0e-6);
+    assert!(
+        (result.flux_linkage_weber.unwrap().get() - params.flux_linkage_weber.get()).abs() < 1.0e-4
+    );
+    assert!(result.electrical_angle_offset.is_some());
 }
 
 #[test]
@@ -558,12 +660,24 @@ fn actuator_calibration_system_recovers_friction_through_public_wrapper() {
     let result = loop {
         let schedule = TickSchedule::with_medium(FAST_DT_SECONDS);
 
+        let mut routine = ActuatorCalibrationRoutine::Friction(calibrator);
         match system
-            .tick_friction(&mut calibrator, FAST_DT_SECONDS, schedule)
+            .tick(&mut routine, FAST_DT_SECONDS, schedule)
             .unwrap()
         {
-            CalibrationTickResult::Running => {}
-            CalibrationTickResult::Complete(result) => break result,
+            CalibrationTickResult::Running => {
+                let ActuatorCalibrationRoutine::Friction(next) = routine else {
+                    unreachable!();
+                };
+                calibrator = next;
+            }
+            CalibrationTickResult::Complete(ActuatorCalibrationRoutineResult::Friction(result)) => {
+                let ActuatorCalibrationRoutine::Friction(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
         }
     };
     assert!((result.positive_coulomb_torque.get() - 0.04).abs() < 0.01);
@@ -576,6 +690,63 @@ fn actuator_calibration_system_recovers_friction_through_public_wrapper() {
     calibration.apply_to_actuator_params(&mut actuator);
     assert!((actuator.compensation.friction.positive_coulomb_torque.get() - 0.04).abs() < 0.01);
     assert!((actuator.compensation.friction.negative_viscous_coefficient - 0.03).abs() < 0.01);
+}
+
+#[test]
+fn actuator_calibration_system_recovers_gear_ratio_through_public_wrapper() {
+    let shared = Rc::new(RefCell::new(SimHarness {
+        plant: PmsmModel::new_zeroed(actuator_friction_plant_params()).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+        rotor_bias: 0.0,
+    }));
+
+    let controller = MotorController::new(
+        controller_motor_params(),
+        inverter_params(),
+        actuator_params_unknown_ratio(),
+        current_loop_config(),
+    );
+    let motor_system = MotorSystem::new(motor_hardware(&shared), controller);
+    let mut system = ActuatorCalibrationSystem::new(motor_system);
+    let mut calibrator = ActuatorGearRatioCalibrator::new(
+        ActuatorGearRatioCalibrationConfig::default_for_travel_ratio(),
+    )
+    .unwrap();
+
+    let result = loop {
+        let schedule = TickSchedule::with_medium(FAST_DT_SECONDS);
+
+        let mut routine = ActuatorCalibrationRoutine::GearRatio(calibrator);
+        match system
+            .tick(&mut routine, FAST_DT_SECONDS, schedule)
+            .unwrap()
+        {
+            CalibrationTickResult::Running => {
+                let ActuatorCalibrationRoutine::GearRatio(next) = routine else {
+                    unreachable!();
+                };
+                calibrator = next;
+            }
+            CalibrationTickResult::Complete(ActuatorCalibrationRoutineResult::GearRatio(
+                result,
+            )) => {
+                let ActuatorCalibrationRoutine::GearRatio(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
+        }
+    };
+
+    assert!((result.gear_ratio - GEAR_RATIO).abs() < 0.05);
+
+    let mut actuator = actuator_params_unknown_ratio();
+    let calibration: ActuatorCalibration = result.into();
+    calibration.apply_to_actuator_params(&mut actuator);
+    assert!((actuator.gear_ratio - GEAR_RATIO).abs() < 0.05);
 }
 
 #[test]
@@ -612,12 +783,26 @@ fn actuator_calibration_system_recovers_breakaway_through_public_wrapper() {
     let result = loop {
         let schedule = TickSchedule::with_medium(FAST_DT_SECONDS);
 
+        let mut routine = ActuatorCalibrationRoutine::Breakaway(calibrator);
         match system
-            .tick_breakaway(&mut calibrator, FAST_DT_SECONDS, schedule)
+            .tick(&mut routine, FAST_DT_SECONDS, schedule)
             .unwrap()
         {
-            CalibrationTickResult::Running => {}
-            CalibrationTickResult::Complete(result) => break result,
+            CalibrationTickResult::Running => {
+                let ActuatorCalibrationRoutine::Breakaway(next) = routine else {
+                    unreachable!();
+                };
+                calibrator = next;
+            }
+            CalibrationTickResult::Complete(ActuatorCalibrationRoutineResult::Breakaway(
+                result,
+            )) => {
+                let ActuatorCalibrationRoutine::Breakaway(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
         }
     };
     assert!((result.positive_breakaway_torque.get() - 0.08).abs() < 0.02);
@@ -674,12 +859,26 @@ fn actuator_calibration_system_recovers_zero_velocity_blend_band_through_public_
     let result = loop {
         let schedule = TickSchedule::with_medium(FAST_DT_SECONDS);
 
+        let mut routine = ActuatorCalibrationRoutine::BlendBand(calibrator);
         match system
-            .tick_blend_band(&mut calibrator, FAST_DT_SECONDS, schedule)
+            .tick(&mut routine, FAST_DT_SECONDS, schedule)
             .unwrap()
         {
-            CalibrationTickResult::Running => {}
-            CalibrationTickResult::Complete(result) => break result,
+            CalibrationTickResult::Running => {
+                let ActuatorCalibrationRoutine::BlendBand(next) = routine else {
+                    unreachable!();
+                };
+                calibrator = next;
+            }
+            CalibrationTickResult::Complete(ActuatorCalibrationRoutineResult::BlendBand(
+                result,
+            )) => {
+                let ActuatorCalibrationRoutine::BlendBand(_) = routine else {
+                    unreachable!();
+                };
+                break result;
+            }
+            CalibrationTickResult::Complete(_) => unreachable!(),
         }
     };
     assert!((result.zero_velocity_blend_band.get() - 0.05).abs() < 0.01);
@@ -696,5 +895,75 @@ fn actuator_calibration_system_recovers_zero_velocity_blend_band_through_public_
             - 0.05)
             .abs()
             < 0.01
+    );
+}
+
+#[test]
+fn actuator_calibration_workflow_runs_gear_ratio_before_friction() {
+    let shared = Rc::new(RefCell::new(SimHarness {
+        plant: PmsmModel::new_zeroed(PmsmParams {
+            pole_pairs: 7,
+            phase_resistance_ohm: Ohms::new(0.12),
+            d_inductance_h: Henries::new(0.000_03),
+            q_inductance_h: Henries::new(0.000_03),
+            flux_linkage_weber: Webers::new(0.005),
+            actuator: ActuatorPlantParams {
+                gear_ratio: GEAR_RATIO,
+                output_inertia_kg_m2: 0.0208,
+                positive_breakaway_torque: NewtonMeters::new(0.08),
+                negative_breakaway_torque: NewtonMeters::new(0.09),
+                positive_coulomb_torque: NewtonMeters::new(0.04),
+                negative_coulomb_torque: NewtonMeters::new(0.05),
+                positive_viscous_coefficient: 0.02,
+                negative_viscous_coefficient: 0.03,
+                zero_velocity_blend_band: RadPerSec::new(0.05),
+            },
+            max_voltage_mag: None,
+        })
+        .unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+        rotor_bias: 0.0,
+    }));
+
+    let controller = MotorController::new(
+        controller_motor_params(),
+        inverter_params(),
+        actuator_params_unknown_ratio(),
+        current_loop_config(),
+    );
+    let motor_system = MotorSystem::new(motor_hardware(&shared), controller);
+    let mut system = ActuatorCalibrationSystem::new(motor_system);
+    let mut workflow = ActuatorCalibrationWorkflow::new(
+        ActuatorCalibrationWorkflowConfig::default_for_full_actuator_calibration(),
+    )
+    .unwrap();
+
+    let result = loop {
+        let schedule = TickSchedule::with_medium(FAST_DT_SECONDS);
+        match system
+            .tick_workflow(&mut workflow, FAST_DT_SECONDS, schedule)
+            .unwrap()
+        {
+            CalibrationTickResult::Running => {}
+            CalibrationTickResult::Complete(result) => break result,
+        }
+    };
+
+    assert!((result.gear_ratio.unwrap() - GEAR_RATIO).abs() < 0.05);
+    assert!((result.positive_coulomb_torque.unwrap().get() - 0.04).abs() < 0.01);
+    assert!((result.negative_coulomb_torque.unwrap().get() - 0.05).abs() < 0.01);
+    assert!(result.positive_breakaway_torque.is_some());
+    assert!(result.zero_velocity_blend_band.is_some());
+    assert!(
+        (system
+            .motor_system()
+            .controller()
+            .actuator_params()
+            .gear_ratio
+            - GEAR_RATIO)
+            .abs()
+            < 0.05
     );
 }

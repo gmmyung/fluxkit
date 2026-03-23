@@ -4,7 +4,9 @@ use fluxkit_core::{
     ActuatorBreakawayCalibrationConfig, ActuatorBreakawayCalibrationInput,
     ActuatorBreakawayCalibrationState, ActuatorBreakawayCalibrator, ActuatorCompensationConfig,
     ActuatorEstimate, ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
-    ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator, ActuatorParams, ControlMode,
+    ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator,
+    ActuatorGearRatioCalibrationConfig, ActuatorGearRatioCalibrationInput,
+    ActuatorGearRatioCalibrationState, ActuatorGearRatioCalibrator, ActuatorParams, ControlMode,
     CurrentLoopConfig, FastLoopInput, FluxLinkageCalibrationConfig, FluxLinkageCalibrationInput,
     FluxLinkageCalibrationState, FluxLinkageCalibrator, InverterParams, MotorController,
     PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
@@ -90,6 +92,15 @@ fn current_loop_config() -> CurrentLoopConfig {
 fn actuator_params_calibrating() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
+        max_output_velocity: Some(RadPerSec::new(30.0)),
+        max_output_torque: Some(NewtonMeters::new(10.0)),
+        compensation: ActuatorCompensationConfig::disabled(),
+    }
+}
+
+fn actuator_params_unknown_ratio() -> ActuatorParams {
+    ActuatorParams {
+        gear_ratio: 1.0,
         max_output_velocity: Some(RadPerSec::new(30.0)),
         max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig::disabled(),
@@ -484,6 +495,65 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
         (result.negative_viscous_coefficient - 0.03).abs() < 0.01,
         "estimated negative viscous = {}",
         result.negative_viscous_coefficient
+    );
+}
+
+#[test]
+fn steady_velocity_travel_recovers_actuator_gear_ratio() {
+    let bus_voltage = Volts::new(24.0);
+    let mut controller = MotorController::new(
+        controller_motor_params(),
+        inverter_params(),
+        actuator_params_unknown_ratio(),
+        current_loop_config(),
+    );
+    let mut plant = PmsmModel::new_zeroed(plant_params_with_asymmetric_friction()).unwrap();
+    let mut calibrator = ActuatorGearRatioCalibrator::new(
+        ActuatorGearRatioCalibrationConfig::default_for_travel_ratio(),
+    )
+    .unwrap();
+
+    controller.set_mode(ControlMode::Velocity);
+    controller.enable();
+
+    for _ in 0..200_000 {
+        let status = controller.status();
+        let command = calibrator.tick(ActuatorGearRatioCalibrationInput {
+            rotor_mechanical_angle: status.last_rotor_mechanical_angle,
+            output_mechanical_angle: status.last_output_mechanical_angle,
+            output_velocity: status.last_output_mechanical_velocity,
+            dt_seconds: FAST_DT_SECONDS,
+        });
+        controller.set_velocity_target(command.velocity_target);
+
+        let output = controller.tick(
+            fast_loop_input(&plant, bus_voltage),
+            TickSchedule::with_medium(FAST_DT_SECONDS),
+        );
+        assert_eq!(output.error, None);
+        plant
+            .step_phase_duty(
+                output.phase_duty,
+                bus_voltage,
+                NewtonMeters::ZERO,
+                FAST_DT_SECONDS,
+            )
+            .unwrap();
+
+        if calibrator.state() == ActuatorGearRatioCalibrationState::Complete {
+            break;
+        }
+    }
+
+    assert_eq!(
+        calibrator.state(),
+        ActuatorGearRatioCalibrationState::Complete
+    );
+    let result = calibrator.result().unwrap();
+    assert!(
+        (result.gear_ratio - GEAR_RATIO).abs() < 0.05,
+        "estimated gear ratio = {}",
+        result.gear_ratio
     );
 }
 

@@ -6,7 +6,7 @@ use crate::{
     actuator::ActuatorParams,
     calibration::{
         ActuatorBlendBandCalibrationResult, ActuatorBreakawayCalibrationResult,
-        ActuatorFrictionCalibrationResult,
+        ActuatorFrictionCalibrationResult, ActuatorGearRatioCalibrationResult,
     },
 };
 
@@ -18,6 +18,8 @@ use crate::{
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActuatorCalibration {
+    /// Mechanical reduction ratio from motor shaft to output axis.
+    pub gear_ratio: Option<f32>,
     /// Additional startup torque near zero speed in the positive direction.
     pub positive_breakaway_torque: Option<NewtonMeters>,
     /// Additional startup torque near zero speed in the negative direction.
@@ -39,6 +41,7 @@ impl ActuatorCalibration {
     #[inline]
     pub const fn empty() -> Self {
         Self {
+            gear_ratio: None,
             positive_breakaway_torque: None,
             negative_breakaway_torque: None,
             positive_coulomb_torque: None,
@@ -53,6 +56,11 @@ impl ActuatorCalibration {
     #[inline]
     pub const fn merge(self, newer: Self) -> Self {
         Self {
+            gear_ratio: if newer.gear_ratio.is_some() {
+                newer.gear_ratio
+            } else {
+                self.gear_ratio
+            },
             positive_breakaway_torque: if newer.positive_breakaway_torque.is_some() {
                 newer.positive_breakaway_torque
             } else {
@@ -93,9 +101,12 @@ impl ActuatorCalibration {
 
     /// Applies any populated fields onto an existing actuator-parameter record.
     ///
-    /// This updates the friction coefficients only. It does not implicitly
-    /// enable compensation or change the total-torque bound.
+    /// This updates the gear ratio and friction coefficients only. It does not
+    /// implicitly enable compensation or change the total-torque bound.
     pub fn apply_to_actuator_params(&self, actuator: &mut ActuatorParams) {
+        if let Some(value) = self.gear_ratio {
+            actuator.gear_ratio = value;
+        }
         let friction = &mut actuator.compensation.friction;
         if let Some(value) = self.positive_breakaway_torque {
             friction.positive_breakaway_torque = value;
@@ -117,6 +128,16 @@ impl ActuatorCalibration {
         }
         if let Some(value) = self.zero_velocity_blend_band {
             friction.zero_velocity_blend_band = value;
+        }
+    }
+}
+
+impl From<ActuatorGearRatioCalibrationResult> for ActuatorCalibration {
+    #[inline]
+    fn from(result: ActuatorGearRatioCalibrationResult) -> Self {
+        Self {
+            gear_ratio: Some(result.gear_ratio),
+            ..Self::empty()
         }
     }
 }
@@ -164,23 +185,26 @@ mod tests {
         actuator::{ActuatorCompensationConfig, ActuatorParams, FrictionCompensation},
         calibration::{
             ActuatorBlendBandCalibrationResult, ActuatorBreakawayCalibrationResult,
-            ActuatorFrictionCalibrationResult,
+            ActuatorFrictionCalibrationResult, ActuatorGearRatioCalibrationResult,
         },
     };
 
     #[test]
     fn merge_prefers_newer_populated_fields() {
         let older = ActuatorCalibration {
+            gear_ratio: Some(1.0),
             positive_coulomb_torque: Some(NewtonMeters::new(0.1)),
             ..ActuatorCalibration::empty()
         };
         let newer = ActuatorCalibration {
+            gear_ratio: Some(2.0),
             positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
             positive_viscous_coefficient: Some(0.02),
             ..ActuatorCalibration::empty()
         };
 
         let merged = older.merge(newer);
+        assert_eq!(merged.gear_ratio, Some(2.0));
         assert_eq!(
             merged.positive_coulomb_torque,
             Some(NewtonMeters::new(0.04))
@@ -210,12 +234,14 @@ mod tests {
         };
 
         ActuatorCalibration {
+            gear_ratio: Some(3.0),
             positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
             negative_viscous_coefficient: Some(0.02),
             ..ActuatorCalibration::empty()
         }
         .apply_to_actuator_params(&mut actuator);
 
+        assert_eq!(actuator.gear_ratio, 3.0);
         assert_eq!(
             actuator.compensation.friction.positive_coulomb_torque,
             NewtonMeters::new(0.04)
@@ -251,6 +277,14 @@ mod tests {
         );
         assert_eq!(calibration.positive_viscous_coefficient, Some(0.02));
         assert_eq!(calibration.negative_viscous_coefficient, Some(0.03));
+    }
+
+    #[test]
+    fn gear_ratio_result_maps_to_actuator_calibration_surface() {
+        let calibration: ActuatorCalibration =
+            ActuatorGearRatioCalibrationResult { gear_ratio: 2.0 }.into();
+
+        assert_eq!(calibration.gear_ratio, Some(2.0));
     }
 
     #[test]

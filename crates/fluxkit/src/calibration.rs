@@ -16,6 +16,7 @@
 //!    - phase inductance
 //!    - flux linkage
 //! 2. `ActuatorCalibrationSystem`
+//!    - gear ratio
 //!    - Coulomb + viscous friction
 //!    - breakaway torque
 //!    - zero-velocity blend band
@@ -25,10 +26,13 @@ use core::fmt;
 use fluxkit_core::{
     ActuatorBlendBandCalibrationInput, ActuatorBlendBandCalibrationResult,
     ActuatorBlendBandCalibrator, ActuatorBreakawayCalibrationInput,
-    ActuatorBreakawayCalibrationResult, ActuatorBreakawayCalibrator,
-    ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrationResult,
-    ActuatorFrictionCalibrator, CalibrationError, ControlMode, FluxLinkageCalibrationInput,
-    FluxLinkageCalibrationResult, FluxLinkageCalibrator, PhaseInductanceCalibrationInput,
+    ActuatorBreakawayCalibrationResult, ActuatorBreakawayCalibrator, ActuatorCalibration,
+    ActuatorCalibrationRoutine, ActuatorCalibrationRoutineResult, ActuatorFrictionCalibrationInput,
+    ActuatorFrictionCalibrationResult, ActuatorFrictionCalibrator,
+    ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrationResult,
+    ActuatorGearRatioCalibrator, CalibrationError, ControlMode, FluxLinkageCalibrationInput,
+    FluxLinkageCalibrationResult, FluxLinkageCalibrator, MotorCalibration, MotorCalibrationRoutine,
+    MotorCalibrationRoutineResult, PhaseInductanceCalibrationInput,
     PhaseInductanceCalibrationResult, PhaseInductanceCalibrator, PhaseResistanceCalibrationInput,
     PhaseResistanceCalibrationResult, PhaseResistanceCalibrator,
     PolePairsAndOffsetCalibrationInput, PolePairsAndOffsetCalibrationResult,
@@ -40,6 +44,308 @@ use fluxkit_hal::{
 use fluxkit_math::{AlphaBeta, Modulator, Svpwm, Volts};
 
 use crate::{MotorSystem, MotorSystemError};
+
+/// Static configuration for the full chained actuator-calibration workflow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ActuatorCalibrationWorkflowConfig {
+    /// Gear-ratio identification settings.
+    pub gear_ratio: fluxkit_core::ActuatorGearRatioCalibrationConfig,
+    /// Coulomb and viscous friction identification settings.
+    pub friction: fluxkit_core::ActuatorFrictionCalibrationConfig,
+    /// Breakaway identification settings.
+    pub breakaway: fluxkit_core::ActuatorBreakawayCalibrationConfig,
+    /// Zero-velocity blend-band identification settings.
+    pub blend_band: fluxkit_core::ActuatorBlendBandCalibrationConfig,
+}
+
+impl ActuatorCalibrationWorkflowConfig {
+    /// Returns a conservative default suitable for simulator-backed tests.
+    pub const fn default_for_full_actuator_calibration() -> Self {
+        Self {
+            gear_ratio: fluxkit_core::ActuatorGearRatioCalibrationConfig::default_for_travel_ratio(
+            ),
+            friction: fluxkit_core::ActuatorFrictionCalibrationConfig::default_for_velocity_sweep(),
+            breakaway: fluxkit_core::ActuatorBreakawayCalibrationConfig::default_for_torque_ramp(),
+            blend_band: fluxkit_core::ActuatorBlendBandCalibrationConfig::default_for_release_ramp(
+            ),
+        }
+    }
+}
+
+/// High-level stage of the chained actuator-calibration workflow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActuatorCalibrationWorkflowState {
+    /// Calibrating gear ratio from simultaneous rotor/output motion.
+    GearRatio,
+    /// Calibrating Coulomb and viscous friction.
+    Friction,
+    /// Calibrating breakaway torque.
+    Breakaway,
+    /// Calibrating zero-velocity blend band.
+    BlendBand,
+    /// The workflow completed successfully.
+    Complete,
+    /// The workflow failed due to a calibration error.
+    Failed(CalibrationError),
+}
+
+/// Chained actuator-calibration workflow that advances through the recommended
+/// routine order and accumulates a persisted actuator-calibration record.
+#[derive(Debug)]
+pub struct ActuatorCalibrationWorkflow {
+    config: ActuatorCalibrationWorkflowConfig,
+    calibration: ActuatorCalibration,
+    routine: Option<ActuatorCalibrationRoutine>,
+    error: Option<CalibrationError>,
+}
+
+impl ActuatorCalibrationWorkflow {
+    /// Creates a new chained actuator-calibration workflow.
+    pub fn new(config: ActuatorCalibrationWorkflowConfig) -> Result<Self, CalibrationError> {
+        let gear_ratio = ActuatorGearRatioCalibrator::new(config.gear_ratio)
+            .map(ActuatorCalibrationRoutine::GearRatio)?;
+        Ok(Self {
+            config,
+            calibration: ActuatorCalibration::empty(),
+            routine: Some(gear_ratio),
+            error: None,
+        })
+    }
+
+    /// Returns the current workflow state.
+    pub const fn state(&self) -> ActuatorCalibrationWorkflowState {
+        if let Some(error) = self.error {
+            ActuatorCalibrationWorkflowState::Failed(error)
+        } else {
+            match &self.routine {
+                Some(ActuatorCalibrationRoutine::GearRatio(_)) => {
+                    ActuatorCalibrationWorkflowState::GearRatio
+                }
+                Some(ActuatorCalibrationRoutine::Friction(_)) => {
+                    ActuatorCalibrationWorkflowState::Friction
+                }
+                Some(ActuatorCalibrationRoutine::Breakaway(_)) => {
+                    ActuatorCalibrationWorkflowState::Breakaway
+                }
+                Some(ActuatorCalibrationRoutine::BlendBand(_)) => {
+                    ActuatorCalibrationWorkflowState::BlendBand
+                }
+                None => ActuatorCalibrationWorkflowState::Complete,
+            }
+        }
+    }
+
+    /// Returns the accumulated calibration record after successful completion.
+    pub const fn result(&self) -> Option<ActuatorCalibration> {
+        if self.error.is_none() && self.routine.is_none() {
+            Some(self.calibration)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the accumulated partial calibration record.
+    pub const fn partial_result(&self) -> ActuatorCalibration {
+        self.calibration
+    }
+
+    /// Returns the failure cause when the workflow has failed.
+    pub const fn error(&self) -> Option<CalibrationError> {
+        self.error
+    }
+
+    fn advance(
+        &mut self,
+        completed: ActuatorCalibrationRoutineResult,
+    ) -> Result<(), CalibrationError> {
+        self.calibration = self.calibration.merge(completed.into());
+        self.routine = Some(match completed {
+            ActuatorCalibrationRoutineResult::GearRatio(_) => ActuatorCalibrationRoutine::Friction(
+                ActuatorFrictionCalibrator::new(self.config.friction)?,
+            ),
+            ActuatorCalibrationRoutineResult::Friction(_) => {
+                let mut breakaway = self.config.breakaway;
+                breakaway.positive_coulomb_torque = self
+                    .calibration
+                    .positive_coulomb_torque
+                    .unwrap_or(breakaway.positive_coulomb_torque);
+                breakaway.negative_coulomb_torque = self
+                    .calibration
+                    .negative_coulomb_torque
+                    .unwrap_or(breakaway.negative_coulomb_torque);
+                ActuatorCalibrationRoutine::Breakaway(ActuatorBreakawayCalibrator::new(breakaway)?)
+            }
+            ActuatorCalibrationRoutineResult::Breakaway(_) => {
+                ActuatorCalibrationRoutine::BlendBand(ActuatorBlendBandCalibrator::new(
+                    self.config.blend_band,
+                )?)
+            }
+            ActuatorCalibrationRoutineResult::BlendBand(_) => {
+                self.routine = None;
+                return Ok(());
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Static configuration for the full chained motor-calibration workflow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorCalibrationWorkflowConfig {
+    /// Pole-pair and electrical-offset identification settings.
+    pub pole_pairs_and_offset: fluxkit_core::PolePairsAndOffsetCalibrationConfig,
+    /// Phase-resistance identification settings.
+    pub phase_resistance: fluxkit_core::PhaseResistanceCalibrationConfig,
+    /// Phase-inductance identification settings.
+    pub phase_inductance: fluxkit_core::PhaseInductanceCalibrationConfig,
+    /// Flux-linkage identification settings.
+    pub flux_linkage: fluxkit_core::FluxLinkageCalibrationConfig,
+}
+
+impl MotorCalibrationWorkflowConfig {
+    /// Returns a conservative default suitable for simulator-backed tests.
+    pub const fn default_for_full_motor_calibration() -> Self {
+        Self {
+            pole_pairs_and_offset:
+                fluxkit_core::PolePairsAndOffsetCalibrationConfig::default_for_sweep(),
+            phase_resistance: fluxkit_core::PhaseResistanceCalibrationConfig::default_for_hold(),
+            phase_inductance: fluxkit_core::PhaseInductanceCalibrationConfig::default_for_hold(),
+            flux_linkage: fluxkit_core::FluxLinkageCalibrationConfig::default_for_spin(),
+        }
+    }
+}
+
+/// High-level stage of the chained motor-calibration workflow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotorCalibrationWorkflowState {
+    /// Calibrating pole pairs and electrical angle offset.
+    PolePairsAndOffset,
+    /// Calibrating phase resistance.
+    PhaseResistance,
+    /// Calibrating phase inductance.
+    PhaseInductance,
+    /// Calibrating flux linkage.
+    FluxLinkage,
+    /// The workflow completed successfully.
+    Complete,
+    /// The workflow failed due to a calibration error.
+    Failed(CalibrationError),
+}
+
+/// Chained motor-calibration workflow that advances through the recommended
+/// routine order and accumulates a persisted motor-calibration record.
+#[derive(Debug)]
+pub struct MotorCalibrationWorkflow {
+    config: MotorCalibrationWorkflowConfig,
+    calibration: MotorCalibration,
+    routine: Option<MotorCalibrationRoutine>,
+    error: Option<CalibrationError>,
+}
+
+impl MotorCalibrationWorkflow {
+    /// Creates a new chained motor-calibration workflow.
+    pub fn new(config: MotorCalibrationWorkflowConfig) -> Result<Self, CalibrationError> {
+        let pole_pairs_and_offset = PolePairsAndOffsetCalibrator::new(config.pole_pairs_and_offset)
+            .map(MotorCalibrationRoutine::PolePairsAndOffset)?;
+        Ok(Self {
+            config,
+            calibration: MotorCalibration::empty(),
+            routine: Some(pole_pairs_and_offset),
+            error: None,
+        })
+    }
+
+    /// Returns the current workflow state.
+    pub const fn state(&self) -> MotorCalibrationWorkflowState {
+        if let Some(error) = self.error {
+            MotorCalibrationWorkflowState::Failed(error)
+        } else {
+            match &self.routine {
+                Some(MotorCalibrationRoutine::PolePairsAndOffset(_)) => {
+                    MotorCalibrationWorkflowState::PolePairsAndOffset
+                }
+                Some(MotorCalibrationRoutine::PhaseResistance(_)) => {
+                    MotorCalibrationWorkflowState::PhaseResistance
+                }
+                Some(MotorCalibrationRoutine::PhaseInductance(_)) => {
+                    MotorCalibrationWorkflowState::PhaseInductance
+                }
+                Some(MotorCalibrationRoutine::FluxLinkage(_)) => {
+                    MotorCalibrationWorkflowState::FluxLinkage
+                }
+                None => MotorCalibrationWorkflowState::Complete,
+            }
+        }
+    }
+
+    /// Returns the accumulated calibration record after successful completion.
+    pub const fn result(&self) -> Option<MotorCalibration> {
+        if self.error.is_none() && self.routine.is_none() {
+            Some(self.calibration)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the accumulated partial calibration record.
+    pub const fn partial_result(&self) -> MotorCalibration {
+        self.calibration
+    }
+
+    /// Returns the failure cause when the workflow has failed.
+    pub const fn error(&self) -> Option<CalibrationError> {
+        self.error
+    }
+
+    fn advance(
+        &mut self,
+        completed: MotorCalibrationRoutineResult,
+    ) -> Result<(), CalibrationError> {
+        self.calibration = self.calibration.merge(completed.into());
+        self.routine = Some(match completed {
+            MotorCalibrationRoutineResult::PolePairsAndOffset(_) => {
+                MotorCalibrationRoutine::PhaseResistance(PhaseResistanceCalibrator::new(
+                    self.config.phase_resistance,
+                )?)
+            }
+            MotorCalibrationRoutineResult::PhaseResistance(_) => {
+                let mut inductance = self.config.phase_inductance;
+                inductance.phase_resistance_ohm = self
+                    .calibration
+                    .phase_resistance_ohm
+                    .unwrap_or(inductance.phase_resistance_ohm);
+                MotorCalibrationRoutine::PhaseInductance(PhaseInductanceCalibrator::new(
+                    inductance,
+                )?)
+            }
+            MotorCalibrationRoutineResult::PhaseInductance(_) => {
+                let mut flux_linkage = self.config.flux_linkage;
+                flux_linkage.phase_resistance_ohm = self
+                    .calibration
+                    .phase_resistance_ohm
+                    .unwrap_or(flux_linkage.phase_resistance_ohm);
+                flux_linkage.phase_inductance_h = self
+                    .calibration
+                    .d_inductance_h
+                    .unwrap_or(flux_linkage.phase_inductance_h);
+                flux_linkage.pole_pairs = self
+                    .calibration
+                    .pole_pairs
+                    .unwrap_or(flux_linkage.pole_pairs);
+                flux_linkage.electrical_angle_offset = self
+                    .calibration
+                    .electrical_angle_offset
+                    .unwrap_or(flux_linkage.electrical_angle_offset);
+                MotorCalibrationRoutine::FluxLinkage(FluxLinkageCalibrator::new(flux_linkage)?)
+            }
+            MotorCalibrationRoutineResult::FluxLinkage(_) => {
+                self.routine = None;
+                return Ok(());
+            }
+        });
+        Ok(())
+    }
+}
 
 /// Concrete hardware handles required to run motor-side calibration procedures.
 #[derive(Debug)]
@@ -198,6 +504,67 @@ where
     OUTPUT: OutputSensor,
     MOD: Modulator,
 {
+    /// Runs one actuator gear-ratio calibration tick through the public motor
+    /// system.
+    fn tick_gear_ratio(
+        &mut self,
+        calibrator: &mut ActuatorGearRatioCalibrator,
+        dt_seconds: f32,
+        schedule: TickSchedule,
+    ) -> Result<
+        CalibrationTickResult<ActuatorGearRatioCalibrationResult>,
+        ActuatorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+        >,
+    > {
+        if let Some(result) = calibrator.result() {
+            self.disable_motor()?;
+            return Ok(CalibrationTickResult::Complete(result));
+        }
+        if let Some(error) = calibrator.error() {
+            self.disable_motor()?;
+            return Err(ActuatorCalibrationSystemError::Calibration(error));
+        }
+
+        self.motor_system
+            .controller_mut()
+            .set_mode(ControlMode::Velocity);
+        if self.motor_system.controller().status().state == fluxkit_core::MotorState::Disabled {
+            self.motor_system
+                .enable()
+                .map_err(ActuatorCalibrationSystemError::Motor)?;
+        }
+
+        let status = self.motor_system.controller().status();
+        let command = calibrator.tick(ActuatorGearRatioCalibrationInput {
+            rotor_mechanical_angle: status.last_rotor_mechanical_angle,
+            output_mechanical_angle: status.last_output_mechanical_angle,
+            output_velocity: status.last_output_mechanical_velocity,
+            dt_seconds,
+        });
+        self.motor_system
+            .controller_mut()
+            .set_velocity_target(command.velocity_target);
+        let _ = self
+            .motor_system
+            .tick(dt_seconds, schedule)
+            .map_err(ActuatorCalibrationSystemError::Motor)?;
+
+        if let Some(result) = calibrator.result() {
+            self.disable_motor()?;
+            Ok(CalibrationTickResult::Complete(result))
+        } else if let Some(error) = calibrator.error() {
+            self.disable_motor()?;
+            Err(ActuatorCalibrationSystemError::Calibration(error))
+        } else {
+            Ok(CalibrationTickResult::Running)
+        }
+    }
+
     /// Creates a new actuator-calibration system from an owned motor system.
     pub fn new(motor_system: MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD>) -> Self {
         Self { motor_system }
@@ -227,7 +594,7 @@ where
     /// The wrapped controller must have friction compensation disabled so the
     /// sampled torque command reflects the plant friction rather than an
     /// already-compensated request.
-    pub fn tick_friction(
+    fn tick_friction(
         &mut self,
         calibrator: &mut ActuatorFrictionCalibrator,
         dt_seconds: f32,
@@ -300,13 +667,109 @@ where
         }
     }
 
+    /// Runs one actuator-calibration tick through the public motor system.
+    pub fn tick(
+        &mut self,
+        routine: &mut ActuatorCalibrationRoutine,
+        dt_seconds: f32,
+        schedule: TickSchedule,
+    ) -> Result<
+        CalibrationTickResult<ActuatorCalibrationRoutineResult>,
+        ActuatorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+        >,
+    > {
+        match routine {
+            ActuatorCalibrationRoutine::GearRatio(calibrator) => self
+                .tick_gear_ratio(calibrator, dt_seconds, schedule)
+                .map(map_actuator_result(
+                    ActuatorCalibrationRoutineResult::GearRatio,
+                )),
+            ActuatorCalibrationRoutine::Friction(calibrator) => self
+                .tick_friction(calibrator, dt_seconds, schedule)
+                .map(map_actuator_result(
+                    ActuatorCalibrationRoutineResult::Friction,
+                )),
+            ActuatorCalibrationRoutine::Breakaway(calibrator) => self
+                .tick_breakaway(calibrator, dt_seconds, schedule)
+                .map(map_actuator_result(
+                    ActuatorCalibrationRoutineResult::Breakaway,
+                )),
+            ActuatorCalibrationRoutine::BlendBand(calibrator) => self
+                .tick_blend_band(calibrator, dt_seconds, schedule)
+                .map(map_actuator_result(
+                    ActuatorCalibrationRoutineResult::BlendBand,
+                )),
+        }
+    }
+
+    /// Runs one tick of the full chained actuator-calibration workflow.
+    ///
+    /// Each completed routine is merged into the accumulated actuator
+    /// calibration record and immediately applied back onto the live
+    /// controller before the next routine begins.
+    pub fn tick_workflow(
+        &mut self,
+        workflow: &mut ActuatorCalibrationWorkflow,
+        dt_seconds: f32,
+        schedule: TickSchedule,
+    ) -> Result<
+        CalibrationTickResult<ActuatorCalibration>,
+        ActuatorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+        >,
+    > {
+        if let Some(result) = workflow.result() {
+            return Ok(CalibrationTickResult::Complete(result));
+        }
+        if let Some(error) = workflow.error() {
+            return Err(ActuatorCalibrationSystemError::Calibration(error));
+        }
+
+        let Some(routine) = workflow.routine.as_mut() else {
+            return Ok(CalibrationTickResult::Complete(workflow.partial_result()));
+        };
+
+        match self.tick(routine, dt_seconds, schedule) {
+            Ok(CalibrationTickResult::Running) => Ok(CalibrationTickResult::Running),
+            Ok(CalibrationTickResult::Complete(result)) => {
+                workflow.advance(result).map_err(|error| {
+                    workflow.error = Some(error);
+                    ActuatorCalibrationSystemError::Calibration(error)
+                })?;
+                workflow.partial_result().apply_to_actuator_params(
+                    self.motor_system.controller_mut().actuator_params_mut(),
+                );
+
+                if let Some(result) = workflow.result() {
+                    Ok(CalibrationTickResult::Complete(result))
+                } else {
+                    Ok(CalibrationTickResult::Running)
+                }
+            }
+            Err(ActuatorCalibrationSystemError::Calibration(error)) => {
+                workflow.error = Some(error);
+                Err(ActuatorCalibrationSystemError::Calibration(error))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Runs one actuator-breakaway calibration tick through the public motor
     /// system.
     ///
     /// The wrapped controller must have friction compensation disabled so the
     /// measured release torque reflects the plant deadzone rather than an
     /// already-compensated request.
-    pub fn tick_breakaway(
+    fn tick_breakaway(
         &mut self,
         calibrator: &mut ActuatorBreakawayCalibrator,
         dt_seconds: f32,
@@ -385,7 +848,7 @@ where
     /// The wrapped controller must have friction compensation disabled so the
     /// measured release speed reflects the plant transition out of the
     /// deadzone rather than an already-compensated request.
-    pub fn tick_blend_band(
+    fn tick_blend_band(
         &mut self,
         calibrator: &mut ActuatorBlendBandCalibrator,
         dt_seconds: f32,
@@ -525,7 +988,7 @@ where
     }
 
     /// Runs one slow-sweep pole-pair and electrical-offset calibration tick.
-    pub fn tick_pole_pairs_and_offset(
+    fn tick_pole_pairs_and_offset(
         &mut self,
         calibrator: &mut PolePairsAndOffsetCalibrator,
         dt_seconds: f32,
@@ -562,8 +1025,81 @@ where
         Self::pole_pairs_result_from_state(calibrator)
     }
 
+    /// Runs one motor-calibration tick through the HAL.
+    pub fn tick(
+        &mut self,
+        routine: &mut MotorCalibrationRoutine,
+        dt_seconds: f32,
+    ) -> Result<
+        CalibrationTickResult<MotorCalibrationRoutineResult>,
+        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+    > {
+        match routine {
+            MotorCalibrationRoutine::PolePairsAndOffset(calibrator) => self
+                .tick_pole_pairs_and_offset(calibrator, dt_seconds)
+                .map(map_motor_result(
+                    MotorCalibrationRoutineResult::PolePairsAndOffset,
+                )),
+            MotorCalibrationRoutine::PhaseResistance(calibrator) => self
+                .tick_phase_resistance(calibrator, dt_seconds)
+                .map(map_motor_result(
+                    MotorCalibrationRoutineResult::PhaseResistance,
+                )),
+            MotorCalibrationRoutine::PhaseInductance(calibrator) => self
+                .tick_phase_inductance(calibrator, dt_seconds)
+                .map(map_motor_result(
+                    MotorCalibrationRoutineResult::PhaseInductance,
+                )),
+            MotorCalibrationRoutine::FluxLinkage(calibrator) => self
+                .tick_flux_linkage(calibrator, dt_seconds)
+                .map(map_motor_result(MotorCalibrationRoutineResult::FluxLinkage)),
+        }
+    }
+
+    /// Runs one tick of the full chained motor-calibration workflow.
+    pub fn tick_workflow(
+        &mut self,
+        workflow: &mut MotorCalibrationWorkflow,
+        dt_seconds: f32,
+    ) -> Result<
+        CalibrationTickResult<MotorCalibration>,
+        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+    > {
+        if let Some(result) = workflow.result() {
+            return Ok(CalibrationTickResult::Complete(result));
+        }
+        if let Some(error) = workflow.error() {
+            return Err(MotorCalibrationSystemError::Calibration(error));
+        }
+
+        let Some(routine) = workflow.routine.as_mut() else {
+            return Ok(CalibrationTickResult::Complete(workflow.partial_result()));
+        };
+
+        match self.tick(routine, dt_seconds) {
+            Ok(CalibrationTickResult::Running) => Ok(CalibrationTickResult::Running),
+            Ok(CalibrationTickResult::Complete(result)) => {
+                workflow.advance(result).map_err(|error| {
+                    workflow.error = Some(error);
+                    MotorCalibrationSystemError::Calibration(error)
+                })?;
+
+                if let Some(result) = workflow.result() {
+                    Ok(CalibrationTickResult::Complete(result))
+                } else {
+                    Ok(CalibrationTickResult::Running)
+                }
+            }
+            Err(MotorCalibrationSystemError::Calibration(error)) => {
+                workflow.error = Some(error);
+                Err(MotorCalibrationSystemError::Calibration(error))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Runs one phase-resistance calibration tick through the HAL.
-    pub fn tick_phase_resistance(
+    fn tick_phase_resistance(
         &mut self,
         calibrator: &mut PhaseResistanceCalibrator,
         dt_seconds: f32,
@@ -611,7 +1147,7 @@ where
     }
 
     /// Runs one phase-inductance calibration tick through the HAL.
-    pub fn tick_phase_inductance(
+    fn tick_phase_inductance(
         &mut self,
         calibrator: &mut PhaseInductanceCalibrator,
         dt_seconds: f32,
@@ -659,7 +1195,7 @@ where
     }
 
     /// Runs one flux-linkage calibration tick through the HAL.
-    pub fn tick_flux_linkage(
+    fn tick_flux_linkage(
         &mut self,
         calibrator: &mut FluxLinkageCalibrator,
         dt_seconds: f32,
@@ -787,13 +1323,35 @@ where
     }
 }
 
+fn map_motor_result<R, Mapped>(
+    map_complete: fn(R) -> Mapped,
+) -> impl FnOnce(CalibrationTickResult<R>) -> CalibrationTickResult<Mapped> {
+    move |result| match result {
+        CalibrationTickResult::Running => CalibrationTickResult::Running,
+        CalibrationTickResult::Complete(result) => {
+            CalibrationTickResult::Complete(map_complete(result))
+        }
+    }
+}
+
+fn map_actuator_result<R, Mapped>(
+    map_complete: fn(R) -> Mapped,
+) -> impl FnOnce(CalibrationTickResult<R>) -> CalibrationTickResult<Mapped> {
+    move |result| match result {
+        CalibrationTickResult::Running => CalibrationTickResult::Running,
+        CalibrationTickResult::Complete(result) => {
+            CalibrationTickResult::Complete(map_complete(result))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::convert::Infallible;
 
     use fluxkit_core::{
         FluxLinkageCalibrationConfig, FluxLinkageCalibrationState, FluxLinkageCalibrator,
-        PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationState,
+        MotorCalibrationRoutine, PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationState,
         PhaseInductanceCalibrator, PhaseResistanceCalibrationConfig,
         PhaseResistanceCalibrationState, PhaseResistanceCalibrator,
     };
@@ -904,7 +1462,7 @@ mod tests {
         let mut hardware = hardware();
         hardware.current.sample.validity = CurrentSampleValidity::Invalid;
         let mut system = MotorCalibrationSystem::new(hardware);
-        let mut calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
+        let calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
             settle_time_seconds: 0.01,
             sample_time_seconds: 0.01,
             timeout_seconds: 1.0,
@@ -912,12 +1470,16 @@ mod tests {
         })
         .unwrap();
 
-        let result = system.tick_phase_resistance(&mut calibrator, 0.005);
+        let mut routine = MotorCalibrationRoutine::PhaseResistance(calibrator);
+        let result = system.tick(&mut routine, 0.005);
         assert!(matches!(
             result,
             Err(MotorCalibrationSystemError::InvalidCurrentSample)
         ));
         assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
+        let MotorCalibrationRoutine::PhaseResistance(calibrator) = routine else {
+            unreachable!();
+        };
         assert_eq!(
             calibrator.state(),
             PhaseResistanceCalibrationState::Aligning
@@ -929,7 +1491,7 @@ mod tests {
         let mut hardware = hardware();
         hardware.current.sample.validity = CurrentSampleValidity::Invalid;
         let mut system = MotorCalibrationSystem::new(hardware);
-        let mut calibrator = PhaseInductanceCalibrator::new(PhaseInductanceCalibrationConfig {
+        let calibrator = PhaseInductanceCalibrator::new(PhaseInductanceCalibrationConfig {
             phase_resistance_ohm: fluxkit_math::units::Ohms::new(0.12),
             settle_time_seconds: 0.01,
             sample_time_seconds: 200.0e-6,
@@ -938,12 +1500,16 @@ mod tests {
         })
         .unwrap();
 
-        let result = system.tick_phase_inductance(&mut calibrator, 0.005);
+        let mut routine = MotorCalibrationRoutine::PhaseInductance(calibrator);
+        let result = system.tick(&mut routine, 0.005);
         assert!(matches!(
             result,
             Err(MotorCalibrationSystemError::InvalidCurrentSample)
         ));
         assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
+        let MotorCalibrationRoutine::PhaseInductance(calibrator) = routine else {
+            unreachable!();
+        };
         assert_eq!(
             calibrator.state(),
             PhaseInductanceCalibrationState::Aligning
@@ -955,7 +1521,7 @@ mod tests {
         let mut hardware = hardware();
         hardware.current.sample.validity = CurrentSampleValidity::Invalid;
         let mut system = MotorCalibrationSystem::new(hardware);
-        let mut calibrator = FluxLinkageCalibrator::new(FluxLinkageCalibrationConfig {
+        let calibrator = FluxLinkageCalibrator::new(FluxLinkageCalibrationConfig {
             phase_resistance_ohm: fluxkit_math::units::Ohms::new(0.12),
             phase_inductance_h: fluxkit_math::units::Henries::new(30.0e-6),
             pole_pairs: 7,
@@ -967,12 +1533,16 @@ mod tests {
         })
         .unwrap();
 
-        let result = system.tick_flux_linkage(&mut calibrator, 0.005);
+        let mut routine = MotorCalibrationRoutine::FluxLinkage(calibrator);
+        let result = system.tick(&mut routine, 0.005);
         assert!(matches!(
             result,
             Err(MotorCalibrationSystemError::InvalidCurrentSample)
         ));
         assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
+        let MotorCalibrationRoutine::FluxLinkage(calibrator) = routine else {
+            unreachable!();
+        };
         assert_eq!(calibrator.state(), FluxLinkageCalibrationState::Aligning);
     }
 }

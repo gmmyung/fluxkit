@@ -212,6 +212,7 @@ Motor calibration procedures:
 
 Actuator calibration procedures:
 
+- gear ratio from simultaneous rotor/output travel
 - Coulomb + viscous friction from steady velocity sweeps
 - breakaway torque from slow torque ramps
 - `zero_velocity_blend_band` from low-speed release ramps
@@ -224,6 +225,7 @@ Persisted records:
 Typical flow:
 
 1. Run the pure procedure through `MotorCalibrationSystem` or `ActuatorCalibrationSystem`.
+   Or run the full chained workflow through `MotorCalibrationWorkflow` / `ActuatorCalibrationWorkflow`.
 2. Merge each completed result into the corresponding persisted record.
 3. Apply the merged record onto `MotorParams` or `ActuatorParams`.
 4. Persist those populated parameter structs in board/runtime code.

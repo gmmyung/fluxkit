@@ -12,8 +12,10 @@ pub mod calibration;
 pub mod system;
 
 pub use calibration::{
-    ActuatorCalibrationSystem, ActuatorCalibrationSystemError, CalibrationTickResult,
+    ActuatorCalibrationSystem, ActuatorCalibrationSystemError, ActuatorCalibrationWorkflow,
+    ActuatorCalibrationWorkflowConfig, ActuatorCalibrationWorkflowState, CalibrationTickResult,
     MotorCalibrationHardware, MotorCalibrationSystem, MotorCalibrationSystemError,
+    MotorCalibrationWorkflow, MotorCalibrationWorkflowConfig, MotorCalibrationWorkflowState,
 };
 pub use fluxkit_core as core;
 pub use fluxkit_core::{
@@ -23,15 +25,19 @@ pub use fluxkit_core::{
     ActuatorBreakawayCalibrationCommand, ActuatorBreakawayCalibrationConfig,
     ActuatorBreakawayCalibrationInput, ActuatorBreakawayCalibrationResult,
     ActuatorBreakawayCalibrationState, ActuatorBreakawayCalibrator, ActuatorCalibration,
-    ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate,
-    ActuatorFrictionCalibrationCommand, ActuatorFrictionCalibrationConfig,
-    ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrationResult,
-    ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator, ActuatorParams, CalibrationError,
-    ControlMode, CurrentLoopConfig, Error, FastLoopInput, FastLoopOutput,
-    FluxLinkageCalibrationConfig, FluxLinkageCalibrationInput, FluxLinkageCalibrationResult,
-    FluxLinkageCalibrationState, FluxLinkageCalibrator, FrictionCompensation, InverterParams,
-    MotorCalibration, MotorController, MotorParams, MotorState, MotorStatus,
-    PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
+    ActuatorCalibrationRoutine, ActuatorCalibrationRoutineResult, ActuatorCompensationConfig,
+    ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorFrictionCalibrationCommand,
+    ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
+    ActuatorFrictionCalibrationResult, ActuatorFrictionCalibrationState,
+    ActuatorFrictionCalibrator, ActuatorGearRatioCalibrationCommand,
+    ActuatorGearRatioCalibrationConfig, ActuatorGearRatioCalibrationInput,
+    ActuatorGearRatioCalibrationResult, ActuatorGearRatioCalibrationState,
+    ActuatorGearRatioCalibrator, ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig,
+    Error, FastLoopInput, FastLoopOutput, FluxLinkageCalibrationConfig,
+    FluxLinkageCalibrationInput, FluxLinkageCalibrationResult, FluxLinkageCalibrationState,
+    FluxLinkageCalibrator, FrictionCompensation, InverterParams, MotorCalibration,
+    MotorCalibrationRoutine, MotorCalibrationRoutineResult, MotorController, MotorParams,
+    MotorState, MotorStatus, PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
     PhaseInductanceCalibrationResult, PhaseInductanceCalibrationState, PhaseInductanceCalibrator,
     PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
     PhaseResistanceCalibrationResult, PhaseResistanceCalibrationState, PhaseResistanceCalibrator,

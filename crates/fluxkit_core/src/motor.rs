@@ -249,6 +249,12 @@ where
         &self.actuator
     }
 
+    /// Returns mutable access to the static actuator parameters.
+    #[inline]
+    pub fn actuator_params_mut(&mut self) -> &mut ActuatorParams {
+        &mut self.actuator
+    }
+
     /// Returns the runtime current-loop configuration.
     #[inline]
     pub const fn config(&self) -> &CurrentLoopConfig {
