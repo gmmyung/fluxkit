@@ -32,4 +32,5 @@ pub use fluxkit_hal::{
 };
 pub use fluxkit_math as math;
 pub use fluxkit_math::*;
+pub use system::{MotorCommand, MotorHandle, MotorRuntimeConfig, MotorRuntimeStatus};
 pub use system::{MotorHardware, MotorSystem, MotorSystemError};

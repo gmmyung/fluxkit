@@ -12,9 +12,11 @@ defmt = ["fluxkit_core/defmt", "fluxkit_hal/defmt", "fluxkit_math/defmt"]
 serde = ["fluxkit_core/serde", "fluxkit_hal/serde", "fluxkit_math/serde"]
 
 [dependencies]
+critical-section = "1"
 fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core" }
 fluxkit_hal = { path = "../fluxkit_hal", package = "fluxkit-hal" }
 fluxkit_math = { path = "../fluxkit_math" }
 
 [dev-dependencies]
+critical-section = { version = "1", features = ["std"] }
 fluxkit-pmsm-sim = { path = "../fluxkit_pmsm_sim" }
