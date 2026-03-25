@@ -1,11 +1,12 @@
 use std::{env, error::Error, fs};
 
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorParams, ControlMode, CurrentLoopConfig,
-    FastLoopInput, InverterParams, MotorController, MotorParams, RotorEstimate,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlMode,
+    CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorLimits, MotorParams,
+    RotorEstimate,
 };
 use fluxkit_math::{
-    MechanicalAngle,
+    ContinuousMechanicalAngle,
     angle::mechanical_to_electrical,
     inverse_clarke, inverse_park,
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
@@ -53,12 +54,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         controller.set_iq_target(Amps::new(iq_target));
 
         let state = *plant.state();
-        let mechanical_angle = state.mechanical_angle.wrapped_0_2pi();
+        let mechanical_angle = state.mechanical_angle.wrapped();
         let output_angle =
-            MechanicalAngle::new(state.mechanical_angle.get() / GEAR_RATIO).wrapped_0_2pi();
+            ContinuousMechanicalAngle::new(state.mechanical_angle.get() / GEAR_RATIO).wrapped();
         let electrical_angle =
-            mechanical_to_electrical(mechanical_angle, plant.params().pole_pairs as u32)
-                .wrapped_pm_pi();
+            mechanical_to_electrical(mechanical_angle.into(), plant.params().pole_pairs as u32);
         let phase_currents = inverse_clarke(inverse_park(
             state.current_dq.map(|current| current.get()),
             electrical_angle.get(),
@@ -69,11 +69,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             phase_currents,
             bus_voltage,
             rotor: RotorEstimate {
-                mechanical_angle,
+                mechanical_angle: mechanical_angle.into(),
                 mechanical_velocity: state.mechanical_velocity,
             },
             actuator: ActuatorEstimate {
-                output_angle,
+                output_angle: output_angle.into(),
                 output_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
             },
             dt_seconds: FAST_DT_SECONDS,
@@ -243,10 +243,12 @@ fn motor_params() -> MotorParams {
         phase_resistance_ohm: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
-        flux_linkage_weber: Some(Webers::new(0.005)),
+        flux_linkage_weber: Webers::new(0.005),
         electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
-        max_phase_current: Amps::new(10.0),
-        max_mech_speed: Some(RadPerSec::new(150.0)),
+        limits: MotorLimits {
+            max_phase_current: Amps::new(10.0),
+            max_mech_speed: Some(RadPerSec::new(150.0)),
+        },
     }
 }
 
@@ -284,9 +286,11 @@ fn config() -> CurrentLoopConfig {
 fn actuator_params() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig::disabled(),
+        limits: ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+        },
     }
 }
 

@@ -31,40 +31,35 @@ pub mod util;
 pub mod validation;
 
 pub use actuator::{
-    ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorParams,
-    FrictionCompensation,
+    ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorLimits,
+    ActuatorModel, ActuatorParams, FrictionCompensation,
 };
 pub use calibration::{
     ActuatorBlendBandCalibrationCommand, ActuatorBlendBandCalibrationConfig,
     ActuatorBlendBandCalibrationInput, ActuatorBlendBandCalibrationResult,
-    ActuatorBlendBandCalibrationState, ActuatorBlendBandCalibrator,
-    ActuatorBreakawayCalibrationCommand, ActuatorBreakawayCalibrationConfig,
-    ActuatorBreakawayCalibrationInput, ActuatorBreakawayCalibrationResult,
-    ActuatorBreakawayCalibrationState, ActuatorBreakawayCalibrator, ActuatorCalibration,
-    ActuatorCalibrationRoutine, ActuatorCalibrationRoutineResult,
-    ActuatorFrictionCalibrationCommand, ActuatorFrictionCalibrationConfig,
-    ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrationResult,
-    ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator,
+    ActuatorBlendBandCalibrator, ActuatorBreakawayCalibrationCommand,
+    ActuatorBreakawayCalibrationConfig, ActuatorBreakawayCalibrationInput,
+    ActuatorBreakawayCalibrationResult, ActuatorBreakawayCalibrator, ActuatorCalibration,
+    ActuatorCalibrationRoutine, ActuatorFrictionCalibration, ActuatorFrictionCalibrationCommand,
+    ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
+    ActuatorFrictionCalibrationResult, ActuatorFrictionCalibrator,
     ActuatorGearRatioCalibrationCommand, ActuatorGearRatioCalibrationConfig,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrationResult,
-    ActuatorGearRatioCalibrationState, ActuatorGearRatioCalibrator, CalibrationError,
-    FluxLinkageCalibrationConfig, FluxLinkageCalibrationInput, FluxLinkageCalibrationResult,
-    FluxLinkageCalibrationState, FluxLinkageCalibrator, MotorCalibration, MotorCalibrationRoutine,
-    MotorCalibrationRoutineResult, PhaseInductanceCalibrationConfig,
-    PhaseInductanceCalibrationInput, PhaseInductanceCalibrationResult,
-    PhaseInductanceCalibrationState, PhaseInductanceCalibrator, PhaseResistanceCalibrationConfig,
-    PhaseResistanceCalibrationInput, PhaseResistanceCalibrationResult,
-    PhaseResistanceCalibrationState, PhaseResistanceCalibrator,
+    ActuatorGearRatioCalibrator, CalibrationError, FluxLinkageCalibrationConfig,
+    FluxLinkageCalibrationInput, FluxLinkageCalibrationResult, FluxLinkageCalibrator,
+    MotorCalibration, MotorCalibrationRoutine, PhaseInductanceCalibrationConfig,
+    PhaseInductanceCalibrationInput, PhaseInductanceCalibrationResult, PhaseInductanceCalibrator,
+    PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
+    PhaseResistanceCalibrationResult, PhaseResistanceCalibrator,
     PolePairsAndOffsetCalibrationConfig, PolePairsAndOffsetCalibrationInput,
-    PolePairsAndOffsetCalibrationResult, PolePairsAndOffsetCalibrationState,
-    PolePairsAndOffsetCalibrator,
+    PolePairsAndOffsetCalibrationResult, PolePairsAndOffsetCalibrator,
 };
 pub use config::CurrentLoopConfig;
 pub use error::Error;
 pub use io::{FastLoopInput, FastLoopOutput, RotorEstimate};
 pub use mode::ControlMode;
 pub use motor::MotorController;
-pub use params::{InverterParams, MotorParams};
+pub use params::{InverterParams, MotorLimits, MotorModel, MotorParams};
 pub use schedule::TickSchedule;
 pub use state::MotorState;
 pub use status::MotorStatus;

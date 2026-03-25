@@ -37,7 +37,7 @@ pub mod state;
 
 use fluxkit_math::angle::mechanical_to_electrical;
 use fluxkit_math::{
-    ElectricalAngle, MechanicalAngle, clamp, clarke,
+    ContinuousMechanicalAngle, ElectricalAngle, clamp, clarke,
     frame::{Abc, AlphaBeta, Dq},
     inverse_clarke, inverse_park,
     modulation::PhaseDuty,
@@ -73,7 +73,7 @@ impl PmsmModel {
         Self::new(
             params,
             PmsmState {
-                mechanical_angle: MechanicalAngle::new(0.0),
+                mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: Dq::new(Amps::ZERO, Amps::ZERO),
             },
@@ -347,9 +347,9 @@ impl PmsmModel {
 
         PmsmSnapshot {
             state: self.state,
-            electrical_angle: electrical_angle.wrapped_pm_pi(),
-            wrapped_mechanical_angle: self.state.mechanical_angle.wrapped_0_2pi(),
-            wrapped_output_angle: self.output_angle().wrapped_0_2pi(),
+            electrical_angle,
+            wrapped_mechanical_angle: self.state.mechanical_angle.wrapped(),
+            wrapped_output_angle: self.output_angle().wrapped(),
             output_velocity: self.output_velocity(),
             phase_currents,
             applied_alpha_beta,
@@ -373,8 +373,8 @@ impl PmsmModel {
         mechanical_to_electrical(self.state.mechanical_angle, self.params.pole_pairs as u32)
     }
 
-    fn output_angle(&self) -> MechanicalAngle {
-        MechanicalAngle::new(
+    fn output_angle(&self) -> ContinuousMechanicalAngle {
+        ContinuousMechanicalAngle::new(
             self.state.mechanical_angle.get() / self.params.actuator.gear_ratio.max(f32::EPSILON),
         )
     }
@@ -388,7 +388,7 @@ impl PmsmModel {
 
     fn electrical_angle_from_theta(&self, theta_mech: f32) -> f32 {
         mechanical_to_electrical(
-            MechanicalAngle::new(theta_mech),
+            ContinuousMechanicalAngle::new(theta_mech),
             self.params.pole_pairs as u32,
         )
         .get()
@@ -447,7 +447,7 @@ impl From<PmsmState> for PlantState {
 impl From<PlantState> for PmsmState {
     fn from(value: PlantState) -> Self {
         Self {
-            mechanical_angle: MechanicalAngle::new(value.theta_mech),
+            mechanical_angle: ContinuousMechanicalAngle::new(value.theta_mech),
             mechanical_velocity: RadPerSec::new(value.omega_mech),
             current_dq: Dq::new(Amps::new(value.id), Amps::new(value.iq)),
         }
@@ -611,7 +611,7 @@ fn finite_non_negative(value: f32) -> bool {
 mod tests {
     use super::{Error, PmsmModel, PmsmParams};
     use fluxkit_math::{
-        MechanicalAngle,
+        ContinuousMechanicalAngle,
         frame::{Abc, AlphaBeta, Dq},
         inverse_clarke,
         modulation::PhaseDuty,
@@ -731,7 +731,7 @@ mod tests {
         let mut plant = PmsmModel::new(
             test_params(),
             crate::PmsmState {
-                mechanical_angle: MechanicalAngle::new(core::f32::consts::TAU + 0.25),
+                mechanical_angle: ContinuousMechanicalAngle::new(core::f32::consts::TAU + 0.25),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: Dq::new(Amps::ZERO, Amps::ZERO),
             },
@@ -748,7 +748,7 @@ mod tests {
 
         assert_eq!(
             snapshot.wrapped_mechanical_angle,
-            snapshot.state.mechanical_angle.wrapped_0_2pi()
+            snapshot.state.mechanical_angle.wrapped()
         );
         assert_eq!(
             snapshot.wrapped_output_angle,
@@ -798,7 +798,7 @@ mod tests {
         let mut plant = PmsmModel::new(
             test_params(),
             crate::PmsmState {
-                mechanical_angle: MechanicalAngle::new(1.0),
+                mechanical_angle: ContinuousMechanicalAngle::new(1.0),
                 mechanical_velocity: RadPerSec::new(2.0),
                 current_dq: Dq::new(Amps::new(0.5), Amps::new(-0.25)),
             },

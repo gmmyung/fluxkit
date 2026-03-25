@@ -1,14 +1,15 @@
 use std::{cell::RefCell, rc::Rc};
 
 use fluxkit::{
-    ActuatorCompensationConfig, ActuatorParams, ControlMode, CurrentLoopConfig, InverterParams,
-    MotorController, MotorHardware, MotorParams, MotorSystem, centered_phase_duty,
+    ActuatorCompensationConfig, ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode,
+    CurrentLoopConfig, InverterParams, MotorController, MotorHardware, MotorLimits, MotorModel,
+    MotorParams, MotorSystem, centered_phase_duty,
     hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
         PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
     },
     math::{
-        MechanicalAngle, inverse_clarke, inverse_park,
+        ContinuousMechanicalAngle, inverse_clarke, inverse_park,
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
     },
 };
@@ -18,16 +19,20 @@ const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
 const GEAR_RATIO: f32 = 2.0;
 
 fn motor_params() -> MotorParams {
-    MotorParams {
-        pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
-        d_inductance_h: Henries::new(0.000_03),
-        q_inductance_h: Henries::new(0.000_03),
-        flux_linkage_weber: Some(Webers::new(0.005)),
-        electrical_angle_offset: fluxkit::ElectricalAngle::new(0.0),
-        max_phase_current: Amps::new(10.0),
-        max_mech_speed: Some(RadPerSec::new(150.0)),
-    }
+    MotorParams::from_model_and_limits(
+        MotorModel {
+            pole_pairs: 7,
+            phase_resistance_ohm: Ohms::new(0.12),
+            d_inductance_h: Henries::new(0.000_03),
+            q_inductance_h: Henries::new(0.000_03),
+            flux_linkage_weber: Webers::new(0.005),
+            electrical_angle_offset: fluxkit::ElectricalAngle::new(0.0),
+        },
+        MotorLimits {
+            max_phase_current: Amps::new(10.0),
+            max_mech_speed: Some(RadPerSec::new(150.0)),
+        },
+    )
 }
 
 fn inverter_params() -> InverterParams {
@@ -62,12 +67,16 @@ fn current_loop_config() -> CurrentLoopConfig {
 }
 
 fn actuator_params() -> ActuatorParams {
-    ActuatorParams {
-        gear_ratio: GEAR_RATIO,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
-        compensation: ActuatorCompensationConfig::disabled(),
-    }
+    ActuatorParams::from_model_limits_and_compensation(
+        ActuatorModel {
+            gear_ratio: GEAR_RATIO,
+        },
+        ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+        },
+        ActuatorCompensationConfig::disabled(),
+    )
 }
 
 fn plant_params() -> PmsmParams {
@@ -102,10 +111,9 @@ fn phase_currents(shared: &SharedHarness) -> fluxkit::math::frame::Abc<Amps> {
     let harness = shared.borrow();
     let state = *harness.plant.state();
     let electrical_angle = fluxkit::math::angle::mechanical_to_electrical(
-        state.mechanical_angle.wrapped_0_2pi(),
+        state.mechanical_angle.wrapped().into(),
         harness.plant.params().pole_pairs as u32,
-    )
-    .wrapped_pm_pi();
+    );
     inverse_clarke(inverse_park(
         state.current_dq.map(|current| current.get()),
         electrical_angle.get(),
@@ -184,7 +192,7 @@ impl RotorSensor for SimRotor {
         let harness = self.shared.borrow();
         let state = *harness.plant.state();
         Ok(RotorReading {
-            mechanical_angle: state.mechanical_angle.wrapped_0_2pi(),
+            mechanical_angle: state.mechanical_angle.wrapped(),
             mechanical_velocity: state.mechanical_velocity,
         })
     }
@@ -202,8 +210,10 @@ impl OutputSensor for SimOutput {
         let harness = self.shared.borrow();
         let state = *harness.plant.state();
         Ok(OutputReading {
-            mechanical_angle: MechanicalAngle::new(state.mechanical_angle.get() / GEAR_RATIO)
-                .wrapped_0_2pi(),
+            mechanical_angle: ContinuousMechanicalAngle::new(
+                state.mechanical_angle.get() / GEAR_RATIO,
+            )
+            .wrapped(),
             mechanical_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
         })
     }
@@ -241,14 +251,19 @@ fn motor_system_closes_current_loop_against_simulator() {
         actuator_params(),
         current_loop_config(),
     );
-    let mut system = MotorSystem::new(hardware, controller);
+    let mut system = MotorSystem::new(
+        hardware,
+        controller,
+        fluxkit::PassThroughEstimator::new(),
+        fluxkit::PassThroughEstimator::new(),
+    );
     system.controller_mut().set_mode(ControlMode::Current);
     system.controller_mut().set_iq_target(Amps::new(3.0));
     system.enable().unwrap();
 
     for _ in 0..4_000 {
-        let output = system.fast_tick(FAST_DT_SECONDS).unwrap();
-        assert_eq!(output.error, None);
+        let _output = system.fast_tick(FAST_DT_SECONDS).unwrap();
+        assert_eq!(system.controller().status().active_error, None);
     }
 
     let status = system.controller().status();

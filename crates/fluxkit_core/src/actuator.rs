@@ -34,11 +34,22 @@ in the actuator model.
 #![doc = include_str!("../../../docs/plots/closed_loop_velocity_command.svg")]
 
 use fluxkit_math::{
-    MechanicalAngle,
+    ContinuousMechanicalAngle,
     units::{NewtonMeters, RadPerSec},
 };
 
-/// Static actuator parameters that map motor-shaft behavior to the output axis.
+/// Static actuator model that maps motor-shaft behavior to the output axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ActuatorModel {
+    /// Mechanical reduction ratio from motor shaft to output axis.
+    ///
+    /// A value of `5.0` means the motor rotates five turns for one output-axis turn.
+    pub gear_ratio: f32,
+}
+
+/// Static actuator model, optional compensation, and independent limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -47,12 +58,21 @@ pub struct ActuatorParams {
     ///
     /// A value of `5.0` means the motor rotates five turns for one output-axis turn.
     pub gear_ratio: f32,
+    /// Optional calibrated mechanical and load-side compensation model.
+    pub compensation: ActuatorCompensationConfig,
+    /// Operating limits that are not part of the calibrated actuator model.
+    pub limits: ActuatorLimits,
+}
+
+/// Safety and operating limits for the actuator output axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ActuatorLimits {
     /// Optional output-axis mechanical speed limit.
     pub max_output_velocity: Option<RadPerSec>,
     /// Optional output-axis continuous torque limit.
     pub max_output_torque: Option<NewtonMeters>,
-    /// Optional calibrated mechanical and load-side compensation model.
-    pub compensation: ActuatorCompensationConfig,
 }
 
 /// Output-axis estimate supplied by platform code.
@@ -60,8 +80,8 @@ pub struct ActuatorParams {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActuatorEstimate {
-    /// Wrapped output-axis angle from the output encoder.
-    pub output_angle: MechanicalAngle,
+    /// Wrapped output-axis angle in `[-pi, pi)`.
+    pub output_angle: ContinuousMechanicalAngle,
     /// Output-axis mechanical velocity estimate.
     pub output_velocity: RadPerSec,
 }
@@ -83,6 +103,31 @@ impl ActuatorCompensationConfig {
         Self {
             friction: FrictionCompensation::disabled(),
             max_total_torque: NewtonMeters::ZERO,
+        }
+    }
+}
+
+impl ActuatorParams {
+    /// Builds actuator parameters from a kinematic model, compensation, and
+    /// independent limits.
+    #[inline]
+    pub const fn from_model_limits_and_compensation(
+        model: ActuatorModel,
+        limits: ActuatorLimits,
+        compensation: ActuatorCompensationConfig,
+    ) -> Self {
+        Self {
+            gear_ratio: model.gear_ratio,
+            compensation,
+            limits,
+        }
+    }
+
+    /// Returns the calibrated actuator model portion of these parameters.
+    #[inline]
+    pub const fn model(&self) -> ActuatorModel {
+        ActuatorModel {
+            gear_ratio: self.gear_ratio,
         }
     }
 }

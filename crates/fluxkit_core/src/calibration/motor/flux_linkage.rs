@@ -10,15 +10,15 @@
 //! `psi ~= (v_q - R i_q - L di_q/dt) / omega_e - L i_d`
 
 use fluxkit_math::{
-    AlphaBeta, ElectricalAngle, MechanicalAngle,
-    angle::{mechanical_to_electrical, wrap_pm_pi},
+    AlphaBeta, ContinuousMechanicalAngle, ElectricalAngle,
+    angle::{mechanical_to_electrical, wrap},
     frame::Abc,
     transforms::{clarke, park},
     trig::sin_cos,
     units::{Amps, Ohms, RadPerSec, Volts, Webers},
 };
 
-use super::error::CalibrationError;
+use crate::calibration::shared::CalibrationError;
 
 /// Static configuration for flux-linkage calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -55,7 +55,7 @@ pub struct FluxLinkageCalibrationConfig {
 
 impl FluxLinkageCalibrationConfig {
     /// Returns conservative defaults suitable for simulator-backed tests.
-    pub const fn default_for_spin() -> Self {
+    pub fn default_for_spin() -> Self {
         Self {
             phase_resistance_ohm: Ohms::new(0.1),
             phase_inductance_h: fluxkit_math::units::Henries::new(30.0e-6),
@@ -82,7 +82,7 @@ pub struct FluxLinkageCalibrationInput {
     /// Measured three-phase currents.
     pub phase_currents: Abc<Amps>,
     /// Measured wrapped mechanical angle from the encoder path.
-    pub mechanical_angle: MechanicalAngle,
+    pub mechanical_angle: ContinuousMechanicalAngle,
     /// Measured mechanical rotor velocity.
     pub mechanical_velocity: RadPerSec,
     /// Time since the previous calibration tick.
@@ -96,23 +96,6 @@ pub struct FluxLinkageCalibrationInput {
 pub struct FluxLinkageCalibrationResult {
     /// Calibrated permanent-magnet flux linkage.
     pub flux_linkage_weber: Webers,
-}
-
-/// Compact state of the flux-linkage calibration procedure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum FluxLinkageCalibrationState {
-    /// The rotor is being magnetically aligned before the spin starts.
-    Aligning,
-    /// The procedure is spinning the stator field but not yet sampling.
-    Spinning,
-    /// The procedure is averaging flux-linkage estimates.
-    Sampling,
-    /// The procedure completed successfully.
-    Complete,
-    /// The procedure failed.
-    Failed(CalibrationError),
 }
 
 /// Pure state machine for flux-linkage calibration.
@@ -155,22 +138,6 @@ impl FluxLinkageCalibrator {
             result: None,
             error: None,
         })
-    }
-
-    /// Returns the current calibration state.
-    #[inline]
-    pub const fn state(&self) -> FluxLinkageCalibrationState {
-        if let Some(error) = self.error {
-            FluxLinkageCalibrationState::Failed(error)
-        } else if self.result.is_some() {
-            FluxLinkageCalibrationState::Complete
-        } else if self.sample_seconds > 0.0 {
-            FluxLinkageCalibrationState::Sampling
-        } else if self.spinning {
-            FluxLinkageCalibrationState::Spinning
-        } else {
-            FluxLinkageCalibrationState::Aligning
-        }
     }
 
     /// Returns the finished result when calibration has succeeded.
@@ -306,7 +273,7 @@ impl FluxLinkageCalibrator {
     fn next_spin_command(&mut self, dt_seconds: f32) -> AlphaBeta<Volts> {
         let angle = self.command_angle;
         self.last_command_angle = Some(angle);
-        self.command_angle = ElectricalAngle::new(wrap_pm_pi(
+        self.command_angle = ElectricalAngle::new(wrap(
             angle.get() + self.config.spin_electrical_velocity.get() * dt_seconds,
         ));
         voltage_vector(angle, self.config.spin_voltage_mag.get())
@@ -321,7 +288,7 @@ impl FluxLinkageCalibrator {
 }
 
 fn rotor_electrical_angle(
-    mechanical_angle: MechanicalAngle,
+    mechanical_angle: ContinuousMechanicalAngle,
     pole_pairs: u32,
     electrical_angle_offset: ElectricalAngle,
 ) -> ElectricalAngle {
@@ -329,7 +296,6 @@ fn rotor_electrical_angle(
         mechanical_to_electrical(mechanical_angle, pole_pairs).get()
             + electrical_angle_offset.get(),
     )
-    .wrapped_pm_pi()
 }
 
 fn voltage_vector(angle: ElectricalAngle, magnitude: f32) -> AlphaBeta<Volts> {
@@ -378,14 +344,14 @@ fn validate_input(input: FluxLinkageCalibrationInput) -> bool {
 mod tests {
     use fluxkit_math::{
         ElectricalAngle,
-        angle::MechanicalAngle,
+        angle::ContinuousMechanicalAngle,
         frame::Abc,
         units::{Amps, Henries, Ohms, RadPerSec},
     };
 
     use super::{
         CalibrationError, FluxLinkageCalibrationConfig, FluxLinkageCalibrationInput,
-        FluxLinkageCalibrationState, FluxLinkageCalibrator,
+        FluxLinkageCalibrator,
     };
 
     #[test]
@@ -407,15 +373,12 @@ mod tests {
         for _ in 0..20 {
             let _ = calibrator.tick(FluxLinkageCalibrationInput {
                 phase_currents: Abc::new(Amps::ZERO, Amps::ZERO, Amps::ZERO),
-                mechanical_angle: MechanicalAngle::new(0.0),
+                mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 mechanical_velocity: RadPerSec::ZERO,
                 dt_seconds: 0.005,
             });
         }
 
-        assert_eq!(
-            calibrator.state(),
-            FluxLinkageCalibrationState::Failed(CalibrationError::Timeout)
-        );
+        assert_eq!(calibrator.error(), Some(CalibrationError::Timeout));
     }
 }

@@ -1,7 +1,7 @@
 //! Dynamic PMSM plant state and snapshots.
 
 use fluxkit_math::{
-    ElectricalAngle, MechanicalAngle,
+    ContinuousMechanicalAngle, ElectricalAngle, MechanicalAngle,
     frame::{Abc, AlphaBeta, Dq},
     modulation::PhaseDuty,
     units::{Amps, NewtonMeters, RadPerSec, Volts},
@@ -13,7 +13,7 @@ use fluxkit_math::{
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PmsmState {
     /// Unwrapped mechanical rotor angle.
-    pub mechanical_angle: MechanicalAngle,
+    pub mechanical_angle: ContinuousMechanicalAngle,
     /// Mechanical rotor velocity.
     pub mechanical_velocity: RadPerSec,
     /// `d/q` current state.
@@ -27,11 +27,11 @@ pub struct PmsmState {
 pub struct PmsmSnapshot {
     /// Updated dynamic state.
     pub state: PmsmState,
-    /// Wrapped electrical rotor angle corresponding to the state.
+    /// Wrapped electrical rotor angle corresponding to the state in `[-pi, pi)`.
     pub electrical_angle: ElectricalAngle,
-    /// Wrapped mechanical rotor angle corresponding to the state.
+    /// Wrapped mechanical rotor angle corresponding to the state in `[-pi, pi)`.
     pub wrapped_mechanical_angle: MechanicalAngle,
-    /// Wrapped output-axis angle corresponding to the state.
+    /// Wrapped output-axis angle corresponding to the state in `[-pi, pi)`.
     pub wrapped_output_angle: MechanicalAngle,
     /// Output-axis mechanical velocity corresponding to the state.
     pub output_velocity: RadPerSec,

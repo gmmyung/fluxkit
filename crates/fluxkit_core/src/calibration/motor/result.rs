@@ -5,13 +5,7 @@ use fluxkit_math::{
     units::{Henries, Ohms, Webers},
 };
 
-use crate::{
-    calibration::{
-        FluxLinkageCalibrationResult, PhaseInductanceCalibrationResult,
-        PhaseResistanceCalibrationResult, PolePairsAndOffsetCalibrationResult,
-    },
-    params::MotorParams,
-};
+use crate::{calibration::motor, params::MotorParams};
 
 /// Persistable collection of motor-side calibration values.
 ///
@@ -27,10 +21,8 @@ pub struct MotorCalibration {
     pub electrical_angle_offset: Option<ElectricalAngle>,
     /// Estimated phase resistance.
     pub phase_resistance_ohm: Option<Ohms>,
-    /// Estimated `d`-axis inductance.
-    pub d_inductance_h: Option<Henries>,
-    /// Estimated `q`-axis inductance.
-    pub q_inductance_h: Option<Henries>,
+    /// Estimated phase inductance applied to both `d` and `q` axes.
+    pub phase_inductance_h: Option<Henries>,
     /// Estimated flux linkage.
     pub flux_linkage_weber: Option<Webers>,
 }
@@ -43,8 +35,7 @@ impl MotorCalibration {
             pole_pairs: None,
             electrical_angle_offset: None,
             phase_resistance_ohm: None,
-            d_inductance_h: None,
-            q_inductance_h: None,
+            phase_inductance_h: None,
             flux_linkage_weber: None,
         }
     }
@@ -68,15 +59,10 @@ impl MotorCalibration {
             } else {
                 self.phase_resistance_ohm
             },
-            d_inductance_h: if newer.d_inductance_h.is_some() {
-                newer.d_inductance_h
+            phase_inductance_h: if newer.phase_inductance_h.is_some() {
+                newer.phase_inductance_h
             } else {
-                self.d_inductance_h
-            },
-            q_inductance_h: if newer.q_inductance_h.is_some() {
-                newer.q_inductance_h
-            } else {
-                self.q_inductance_h
+                self.phase_inductance_h
             },
             flux_linkage_weber: if newer.flux_linkage_weber.is_some() {
                 newer.flux_linkage_weber
@@ -97,21 +83,28 @@ impl MotorCalibration {
         if let Some(resistance) = self.phase_resistance_ohm {
             motor.phase_resistance_ohm = resistance;
         }
-        if let Some(inductance) = self.d_inductance_h {
+        if let Some(inductance) = self.phase_inductance_h {
             motor.d_inductance_h = inductance;
-        }
-        if let Some(inductance) = self.q_inductance_h {
             motor.q_inductance_h = inductance;
         }
         if let Some(flux_linkage) = self.flux_linkage_weber {
-            motor.flux_linkage_weber = Some(flux_linkage);
+            motor.flux_linkage_weber = flux_linkage;
         }
     }
 }
 
-impl From<PolePairsAndOffsetCalibrationResult> for MotorCalibration {
+impl MotorParams {
+    /// Returns a copy of these parameters with a calibration record applied.
     #[inline]
-    fn from(result: PolePairsAndOffsetCalibrationResult) -> Self {
+    pub fn with_calibration(mut self, calibration: &MotorCalibration) -> Self {
+        calibration.apply_to_motor_params(&mut self);
+        self
+    }
+}
+
+impl From<motor::PolePairsAndOffsetCalibrationResult> for MotorCalibration {
+    #[inline]
+    fn from(result: motor::PolePairsAndOffsetCalibrationResult) -> Self {
         Self {
             pole_pairs: Some(result.pole_pairs),
             electrical_angle_offset: Some(result.electrical_angle_offset),
@@ -120,9 +113,9 @@ impl From<PolePairsAndOffsetCalibrationResult> for MotorCalibration {
     }
 }
 
-impl From<PhaseResistanceCalibrationResult> for MotorCalibration {
+impl From<motor::PhaseResistanceCalibrationResult> for MotorCalibration {
     #[inline]
-    fn from(result: PhaseResistanceCalibrationResult) -> Self {
+    fn from(result: motor::PhaseResistanceCalibrationResult) -> Self {
         Self {
             phase_resistance_ohm: Some(result.phase_resistance_ohm),
             ..Self::empty()
@@ -130,20 +123,19 @@ impl From<PhaseResistanceCalibrationResult> for MotorCalibration {
     }
 }
 
-impl From<PhaseInductanceCalibrationResult> for MotorCalibration {
+impl From<motor::PhaseInductanceCalibrationResult> for MotorCalibration {
     #[inline]
-    fn from(result: PhaseInductanceCalibrationResult) -> Self {
+    fn from(result: motor::PhaseInductanceCalibrationResult) -> Self {
         Self {
-            d_inductance_h: Some(result.phase_inductance_h),
-            q_inductance_h: Some(result.phase_inductance_h),
+            phase_inductance_h: Some(result.phase_inductance_h),
             ..Self::empty()
         }
     }
 }
 
-impl From<FluxLinkageCalibrationResult> for MotorCalibration {
+impl From<motor::FluxLinkageCalibrationResult> for MotorCalibration {
     #[inline]
-    fn from(result: FluxLinkageCalibrationResult) -> Self {
+    fn from(result: motor::FluxLinkageCalibrationResult) -> Self {
         Self {
             flux_linkage_weber: Some(result.flux_linkage_weber),
             ..Self::empty()
@@ -155,12 +147,13 @@ impl From<FluxLinkageCalibrationResult> for MotorCalibration {
 mod tests {
     use fluxkit_math::{
         ElectricalAngle,
-        units::{Henries, Ohms, Webers},
+        units::{Amps, Henries, Ohms, Webers},
     };
 
     use super::MotorCalibration;
     use crate::{
-        FluxLinkageCalibrationResult, PhaseInductanceCalibrationResult, params::MotorParams,
+        FluxLinkageCalibrationResult, MotorLimits, PhaseInductanceCalibrationResult,
+        params::MotorParams,
     };
 
     #[test]
@@ -187,16 +180,20 @@ mod tests {
 
     #[test]
     fn apply_to_motor_params_overwrites_only_populated_fields() {
-        let mut params = MotorParams {
-            pole_pairs: 4,
-            phase_resistance_ohm: Ohms::new(0.2),
-            d_inductance_h: fluxkit_math::units::Henries::new(0.001),
-            q_inductance_h: fluxkit_math::units::Henries::new(0.001),
-            flux_linkage_weber: None,
-            electrical_angle_offset: ElectricalAngle::new(0.0),
-            max_phase_current: fluxkit_math::units::Amps::new(10.0),
-            max_mech_speed: None,
-        };
+        let mut params = MotorParams::from_model_and_limits(
+            crate::params::MotorModel {
+                pole_pairs: 4,
+                phase_resistance_ohm: Ohms::new(0.2),
+                d_inductance_h: fluxkit_math::units::Henries::new(0.001),
+                q_inductance_h: fluxkit_math::units::Henries::new(0.001),
+                flux_linkage_weber: Webers::new(0.001),
+                electrical_angle_offset: ElectricalAngle::new(0.0),
+            },
+            MotorLimits {
+                max_phase_current: Amps::new(10.0),
+                max_mech_speed: None,
+            },
+        );
 
         MotorCalibration {
             pole_pairs: Some(7),
@@ -218,8 +215,7 @@ mod tests {
         }
         .into();
 
-        assert_eq!(calibration.d_inductance_h, Some(Henries::new(30.0e-6)));
-        assert_eq!(calibration.q_inductance_h, Some(Henries::new(30.0e-6)));
+        assert_eq!(calibration.phase_inductance_h, Some(Henries::new(30.0e-6)));
     }
 
     #[test]

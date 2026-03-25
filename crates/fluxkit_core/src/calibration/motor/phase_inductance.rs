@@ -19,7 +19,7 @@ use fluxkit_math::{
     units::{Amps, Henries, Ohms, RadPerSec, Volts},
 };
 
-use super::error::CalibrationError;
+use crate::calibration::shared::{CalibrationError, timing::HoldTiming};
 
 /// Static configuration for phase-inductance calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,7 +48,7 @@ pub struct PhaseInductanceCalibrationConfig {
 
 impl PhaseInductanceCalibrationConfig {
     /// Returns a conservative default suitable for simulator-backed tests.
-    pub const fn default_for_hold() -> Self {
+    pub fn default_for_hold() -> Self {
         Self {
             phase_resistance_ohm: Ohms::new(0.1),
             hold_voltage_mag: Volts::new(1.0),
@@ -85,29 +85,13 @@ pub struct PhaseInductanceCalibrationResult {
     pub phase_inductance_h: Henries,
 }
 
-/// Compact state of the phase-inductance calibration procedure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum PhaseInductanceCalibrationState {
-    /// The calibrator is holding the field and waiting for settle.
-    Aligning,
-    /// The calibrator is measuring the early current step response.
-    Sampling,
-    /// The procedure completed successfully.
-    Complete,
-    /// The procedure failed.
-    Failed(CalibrationError),
-}
-
 /// Pure state machine for common phase-inductance calibration.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhaseInductanceCalibrator {
     config: PhaseInductanceCalibrationConfig,
-    elapsed_seconds: f32,
-    settled_seconds: f32,
+    timing: HoldTiming,
     sample_seconds: f32,
     baseline_projected_current: Option<f32>,
     sample_count: u32,
@@ -128,8 +112,7 @@ impl PhaseInductanceCalibrator {
 
         Ok(Self {
             config,
-            elapsed_seconds: 0.0,
-            settled_seconds: 0.0,
+            timing: HoldTiming::new(),
             sample_seconds: 0.0,
             baseline_projected_current: None,
             sample_count: 0,
@@ -140,20 +123,6 @@ impl PhaseInductanceCalibrator {
             result: None,
             error: None,
         })
-    }
-
-    /// Returns the current calibration state.
-    #[inline]
-    pub const fn state(&self) -> PhaseInductanceCalibrationState {
-        if let Some(error) = self.error {
-            PhaseInductanceCalibrationState::Failed(error)
-        } else if self.result.is_some() {
-            PhaseInductanceCalibrationState::Complete
-        } else if self.baseline_projected_current.is_some() {
-            PhaseInductanceCalibrationState::Sampling
-        } else {
-            PhaseInductanceCalibrationState::Aligning
-        }
     }
 
     /// Returns the finished result when calibration has succeeded.
@@ -194,9 +163,11 @@ impl PhaseInductanceCalibrator {
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
 
-        self.elapsed_seconds += input.dt_seconds;
-        if self.elapsed_seconds >= self.config.timeout_seconds {
-            self.error = Some(CalibrationError::Timeout);
+        if let Some(error) = self
+            .timing
+            .advance_elapsed(input.dt_seconds, self.config.timeout_seconds)
+        {
+            self.error = Some(error);
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
 
@@ -225,8 +196,10 @@ impl PhaseInductanceCalibrator {
             return self.commanded_voltage_alpha_beta();
         }
 
-        self.settled_seconds += input.dt_seconds;
-        if self.settled_seconds >= self.config.settle_time_seconds {
+        if self
+            .timing
+            .settle_ready(true, input.dt_seconds, self.config.settle_time_seconds)
+        {
             self.baseline_projected_current = Some(projected_current);
             self.sample_seconds = 0.0;
             self.sample_count = 0;
@@ -273,7 +246,7 @@ impl PhaseInductanceCalibrator {
     }
 
     fn reset_measurement_state(&mut self) {
-        self.settled_seconds = 0.0;
+        self.timing.reset_settle();
         self.sample_seconds = 0.0;
         self.baseline_projected_current = None;
         self.sample_count = 0;
@@ -333,7 +306,7 @@ mod tests {
 
     use super::{
         CalibrationError, PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
-        PhaseInductanceCalibrationState, PhaseInductanceCalibrator,
+        PhaseInductanceCalibrator,
     };
 
     #[test]
@@ -367,15 +340,12 @@ mod tests {
                 mechanical_velocity: fluxkit_math::units::RadPerSec::ZERO,
                 dt_seconds: 0.005,
             });
-            if calibrator.state() == PhaseInductanceCalibrationState::Complete {
+            if calibrator.result().is_some() {
                 break;
             }
         }
 
-        assert_eq!(
-            calibrator.state(),
-            PhaseInductanceCalibrationState::Complete
-        );
+        assert_eq!(calibrator.error(), None);
         let result = calibrator.result().unwrap();
         assert!((result.phase_inductance_h.get() - 0.00125).abs() < 1.0e-6);
     }
@@ -400,9 +370,6 @@ mod tests {
             });
         }
 
-        assert_eq!(
-            calibrator.state(),
-            PhaseInductanceCalibrationState::Failed(CalibrationError::Timeout)
-        );
+        assert_eq!(calibrator.error(), Some(CalibrationError::Timeout));
     }
 }

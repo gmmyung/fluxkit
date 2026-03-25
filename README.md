@@ -189,7 +189,6 @@ the other generated example outputs.
 Not implemented:
 
 - startup state machines
-- calibration state machines
 - sensorless support
 - Embassy integration
 
@@ -224,11 +223,37 @@ Persisted records:
 
 Typical flow:
 
-1. Run the pure procedure through `MotorCalibrationSystem` or `ActuatorCalibrationSystem`.
-   Or run the full chained workflow through `MotorCalibrationWorkflow` / `ActuatorCalibrationWorkflow`.
+1. Run each pure procedure through `MotorCalibrationSystem` or `ActuatorCalibrationSystem`.
 2. Merge each completed result into the corresponding persisted record.
 3. Apply the merged record onto `MotorParams` or `ActuatorParams`.
 4. Persist those populated parameter structs in board/runtime code.
+
+Minimal wrapper API:
+
+```rust
+let mut calibration = fluxkit::MotorCalibration::empty();
+let mut routine = fluxkit::MotorCalibrationRoutine::PhaseResistance(
+    fluxkit::PhaseResistanceCalibrator::new(
+        fluxkit::PhaseResistanceCalibrationConfig::default_for_hold(),
+    )?,
+);
+
+loop {
+    if let Some(delta) = system.tick(&mut routine, dt_seconds)? {
+        calibration = calibration.merge(delta);
+        break;
+    }
+}
+
+motor_params = motor_params.with_calibration(&calibration);
+```
+
+The actuator side follows the same pattern:
+
+- construct one `ActuatorCalibrationRoutine`
+- call `ActuatorCalibrationSystem::tick(...)` until it returns `Some(delta)`
+- merge into `ActuatorCalibration`
+- apply with `ActuatorParams::with_calibration(...)`
 
 Current simulator-backed confidence:
 

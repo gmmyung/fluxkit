@@ -1,7 +1,7 @@
 //! Compact status snapshots for telemetry and inspection.
 
 use fluxkit_math::{
-    MechanicalAngle,
+    ContinuousMechanicalAngle,
     frame::Dq,
     units::{Amps, RadPerSec, Volts},
 };
@@ -27,16 +27,16 @@ pub struct MotorStatus {
     pub last_measured_idq: Dq<Amps>,
     /// Most recent limited `d/q` voltage command.
     pub last_commanded_vdq: Dq<Volts>,
-    /// Most recent wrapped mechanical rotor angle from the motor encoder.
-    pub last_rotor_mechanical_angle: MechanicalAngle,
+    /// Most recent wrapped mechanical rotor angle from the motor encoder in `[-pi, pi)`.
+    pub last_rotor_mechanical_angle: ContinuousMechanicalAngle,
     /// Most recent unwrapped mechanical rotor angle accumulated across encoder wraps.
-    pub last_unwrapped_rotor_mechanical_angle: MechanicalAngle,
+    pub last_unwrapped_rotor_mechanical_angle: ContinuousMechanicalAngle,
     /// Most recent measured mechanical rotor velocity.
     pub last_rotor_mechanical_velocity: RadPerSec,
-    /// Most recent wrapped output-axis angle from the actuator encoder.
-    pub last_output_mechanical_angle: MechanicalAngle,
+    /// Most recent wrapped output-axis angle from the actuator encoder in `[-pi, pi)`.
+    pub last_output_mechanical_angle: ContinuousMechanicalAngle,
     /// Most recent unwrapped output-axis angle accumulated across encoder wraps.
-    pub last_unwrapped_output_mechanical_angle: MechanicalAngle,
+    pub last_unwrapped_output_mechanical_angle: ContinuousMechanicalAngle,
     /// Most recent measured output-axis mechanical velocity.
     pub last_output_mechanical_velocity: RadPerSec,
     /// Most recent actuator compensation breakdown.

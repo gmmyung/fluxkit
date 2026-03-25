@@ -12,7 +12,7 @@
 
 use fluxkit_math::units::{NewtonMeters, RadPerSec};
 
-use super::error::CalibrationError;
+use crate::calibration::shared::CalibrationError;
 
 const NUM_VELOCITY_POINTS: usize = 3;
 
@@ -87,21 +87,6 @@ pub struct ActuatorFrictionCalibrationResult {
     pub negative_viscous_coefficient: f32,
 }
 
-/// Compact state of the actuator-friction calibration procedure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ActuatorFrictionCalibrationState {
-    /// The calibrator is waiting for steady-state motion at the current target.
-    Settling,
-    /// The calibrator is averaging the steady-state torque sample.
-    Sampling,
-    /// The procedure completed successfully.
-    Complete,
-    /// The procedure failed.
-    Failed(CalibrationError),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SweepDirection {
     Positive,
@@ -163,20 +148,6 @@ impl ActuatorFrictionCalibrator {
             result: None,
             error: None,
         })
-    }
-
-    /// Returns the current calibration state.
-    #[inline]
-    pub const fn state(&self) -> ActuatorFrictionCalibrationState {
-        if let Some(error) = self.error {
-            ActuatorFrictionCalibrationState::Failed(error)
-        } else if self.result.is_some() {
-            ActuatorFrictionCalibrationState::Complete
-        } else if self.sample_seconds > 0.0 {
-            ActuatorFrictionCalibrationState::Sampling
-        } else {
-            ActuatorFrictionCalibrationState::Settling
-        }
     }
 
     /// Returns the finished result when calibration has succeeded.
@@ -424,7 +395,7 @@ fn validate_input(input: ActuatorFrictionCalibrationInput) -> bool {
 mod tests {
     use super::{
         ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
-        ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator,
+        ActuatorFrictionCalibrator,
     };
     use crate::CalibrationError;
     use fluxkit_math::units::{NewtonMeters, RadPerSec};
@@ -443,7 +414,7 @@ mod tests {
                 dt_seconds: 0.01,
             });
 
-            if calibrator.state() == ActuatorFrictionCalibrationState::Complete {
+            if calibrator.result().is_some() {
                 let result = calibrator.result().unwrap();
                 assert!((result.positive_coulomb_torque.get() - 0.04).abs() < 1.0e-4);
                 assert!((result.negative_coulomb_torque.get() - 0.05).abs() < 1.0e-4);
@@ -478,10 +449,7 @@ mod tests {
             }
         }
 
-        assert!(matches!(
-            calibrator.state(),
-            ActuatorFrictionCalibrationState::Failed(CalibrationError::Timeout)
-        ));
+        assert_eq!(calibrator.error(), Some(CalibrationError::Timeout));
     }
 
     fn command_velocity_for_state(target: RadPerSec) -> RadPerSec {

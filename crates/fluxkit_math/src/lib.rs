@@ -15,8 +15,8 @@
 //! - Positive `q`: standard PMSM torque-producing direction under the chosen
 //!   Park sign convention.
 //! - Angle wrapping helpers:
-//!   - [`angle::wrap_pm_pi`] returns angles in `[-pi, pi)`.
-//!   - [`angle::wrap_0_2pi`] returns angles in `[0, 2pi)`.
+//!   - public wrapped-angle values in the workspace use `[-pi, pi)` by convention
+//!   - [`angle::wrap`] returns angles in `[-pi, pi)`.
 //! - SVPWM duties are normalized to `[0.0, 1.0]`.
 //! - PI anti-windup uses bounded integrator clamping/back-calculation so the
 //!   stored integrator remains consistent with the saturated output.
@@ -29,7 +29,7 @@
 //!
 pub mod angle;
 pub mod control;
-pub mod filter;
+pub mod estimation;
 pub mod frame;
 pub mod modulation;
 pub mod ramp;
@@ -40,9 +40,16 @@ pub mod trig;
 pub mod units;
 pub mod util;
 
-pub use angle::{ElectricalAngle, MechanicalAngle};
+pub use angle::{ContinuousMechanicalAngle, ElectricalAngle, MechanicalAngle};
 pub use control::pi::{PiConfig, PiController, PiState};
-pub use filter::lpf::LowPassFilter;
+pub use estimation::{
+    AngularEstimate, AngularEstimatorSeed, AngularSample, ContinuousAngleValue,
+    ContinuousEstimator, EstimatorSeed, LpfEstimator, LpfEstimatorConfig, LpfSignalEstimator,
+    LpfWrappedEstimator, MechanicalMotionEstimate, MechanicalMotionSample, MechanicalMotionSeed,
+    PassThroughEstimator, PassThroughSignalEstimator, PassThroughWrappedEstimator, PllEstimator,
+    PllEstimatorConfig, PllWrappedEstimator, SignalEstimate, SignalSample, WrappedAngleValue,
+    WrappedEstimator,
+};
 pub use frame::{Abc, AlphaBeta, Dq};
 pub use modulation::{
     ModulationOutput, Modulator, PhaseDuty, SinePwm, Svpwm, SvpwmResult, dq_q_limit, sine_pwm,

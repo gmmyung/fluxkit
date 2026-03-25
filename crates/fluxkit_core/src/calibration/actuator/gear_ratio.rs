@@ -6,9 +6,9 @@
 //!
 //! `gear_ratio ~= |rotor_travel / output_travel|`
 
-use fluxkit_math::{MechanicalAngle, angle::shortest_angle_delta, units::RadPerSec};
+use fluxkit_math::{ContinuousMechanicalAngle, angle::shortest_angle_delta, units::RadPerSec};
 
-use super::error::CalibrationError;
+use crate::calibration::shared::CalibrationError;
 
 /// Static configuration for actuator gear-ratio calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -24,7 +24,7 @@ pub struct ActuatorGearRatioCalibrationConfig {
     /// Travel-sampling window after settling.
     pub sample_time_seconds: f32,
     /// Minimum required output travel magnitude over the sample window.
-    pub min_output_travel: MechanicalAngle,
+    pub min_output_travel: ContinuousMechanicalAngle,
     /// Absolute timeout for the whole procedure.
     pub timeout_seconds: f32,
 }
@@ -37,7 +37,7 @@ impl ActuatorGearRatioCalibrationConfig {
             settle_velocity_error: RadPerSec::new(0.05),
             settle_time_seconds: 0.05,
             sample_time_seconds: 0.15,
-            min_output_travel: MechanicalAngle::new(0.05),
+            min_output_travel: ContinuousMechanicalAngle::new(0.05),
             timeout_seconds: 4.0,
         }
     }
@@ -49,9 +49,9 @@ impl ActuatorGearRatioCalibrationConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActuatorGearRatioCalibrationInput {
     /// Wrapped rotor mechanical angle from the motor encoder.
-    pub rotor_mechanical_angle: MechanicalAngle,
+    pub rotor_mechanical_angle: ContinuousMechanicalAngle,
     /// Wrapped output-axis mechanical angle from the actuator encoder.
-    pub output_mechanical_angle: MechanicalAngle,
+    pub output_mechanical_angle: ContinuousMechanicalAngle,
     /// Measured output-axis mechanical velocity.
     pub output_velocity: RadPerSec,
     /// Time since the previous calibration tick.
@@ -76,21 +76,6 @@ pub struct ActuatorGearRatioCalibrationResult {
     pub gear_ratio: f32,
 }
 
-/// Compact state of the actuator gear-ratio calibration procedure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ActuatorGearRatioCalibrationState {
-    /// Waiting for the output velocity to settle near the commanded target.
-    Settling,
-    /// Sampling simultaneous rotor/output travel.
-    Sampling,
-    /// The procedure completed successfully.
-    Complete,
-    /// The procedure failed.
-    Failed(CalibrationError),
-}
-
 /// Pure state machine for actuator gear-ratio calibration.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -104,8 +89,8 @@ pub struct ActuatorGearRatioCalibrator {
     start_unwrapped_output_angle: Option<f32>,
     current_unwrapped_rotor_angle: f32,
     current_unwrapped_output_angle: f32,
-    last_wrapped_rotor_angle: Option<MechanicalAngle>,
-    last_wrapped_output_angle: Option<MechanicalAngle>,
+    last_wrapped_rotor_angle: Option<ContinuousMechanicalAngle>,
+    last_wrapped_output_angle: Option<ContinuousMechanicalAngle>,
     result: Option<ActuatorGearRatioCalibrationResult>,
     error: Option<CalibrationError>,
 }
@@ -131,20 +116,6 @@ impl ActuatorGearRatioCalibrator {
             result: None,
             error: None,
         })
-    }
-
-    /// Returns the current calibration state.
-    #[inline]
-    pub const fn state(&self) -> ActuatorGearRatioCalibrationState {
-        if let Some(error) = self.error {
-            ActuatorGearRatioCalibrationState::Failed(error)
-        } else if self.result.is_some() {
-            ActuatorGearRatioCalibrationState::Complete
-        } else if self.sample_seconds > 0.0 {
-            ActuatorGearRatioCalibrationState::Sampling
-        } else {
-            ActuatorGearRatioCalibrationState::Settling
-        }
     }
 
     /// Returns the finished result when calibration has succeeded.
@@ -264,8 +235,8 @@ impl ActuatorGearRatioCalibrator {
 
     fn update_unwrapped_angles(
         &mut self,
-        rotor_wrapped_angle: MechanicalAngle,
-        output_wrapped_angle: MechanicalAngle,
+        rotor_wrapped_angle: ContinuousMechanicalAngle,
+        output_wrapped_angle: ContinuousMechanicalAngle,
     ) {
         match self.last_wrapped_rotor_angle {
             Some(last) => {
@@ -325,11 +296,11 @@ fn validate_input(input: ActuatorGearRatioCalibrationInput) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use fluxkit_math::{MechanicalAngle, angle::wrap_0_2pi, units::RadPerSec};
+    use fluxkit_math::{ContinuousMechanicalAngle, angle::wrap, units::RadPerSec};
 
     use super::{
         ActuatorGearRatioCalibrationConfig, ActuatorGearRatioCalibrationInput,
-        ActuatorGearRatioCalibrationState, ActuatorGearRatioCalibrator,
+        ActuatorGearRatioCalibrator,
     };
     use crate::CalibrationError;
 
@@ -340,7 +311,7 @@ mod tests {
             settle_velocity_error: RadPerSec::new(0.01),
             settle_time_seconds: 0.01,
             sample_time_seconds: 0.05,
-            min_output_travel: MechanicalAngle::new(0.02),
+            min_output_travel: ContinuousMechanicalAngle::new(0.02),
             timeout_seconds: 1.0,
         })
         .unwrap();
@@ -354,21 +325,18 @@ mod tests {
             rotor_angle += 3.0 * dt;
 
             let _ = calibrator.tick(ActuatorGearRatioCalibrationInput {
-                rotor_mechanical_angle: MechanicalAngle::new(wrap_0_2pi(rotor_angle)),
-                output_mechanical_angle: MechanicalAngle::new(wrap_0_2pi(output_angle)),
+                rotor_mechanical_angle: ContinuousMechanicalAngle::new(wrap(rotor_angle)),
+                output_mechanical_angle: ContinuousMechanicalAngle::new(wrap(output_angle)),
                 output_velocity: RadPerSec::new(1.0),
                 dt_seconds: dt,
             });
 
-            if calibrator.state() == ActuatorGearRatioCalibrationState::Complete {
+            if calibrator.result().is_some() {
                 break;
             }
         }
 
-        assert_eq!(
-            calibrator.state(),
-            ActuatorGearRatioCalibrationState::Complete
-        );
+        assert_eq!(calibrator.error(), None);
         let result = calibrator.result().unwrap();
         assert!((result.gear_ratio - 3.0).abs() < 1.0e-3);
     }
@@ -383,23 +351,17 @@ mod tests {
 
         for _ in 0..100 {
             let _ = calibrator.tick(ActuatorGearRatioCalibrationInput {
-                rotor_mechanical_angle: MechanicalAngle::new(0.0),
-                output_mechanical_angle: MechanicalAngle::new(0.0),
+                rotor_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
+                output_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 output_velocity: RadPerSec::ZERO,
                 dt_seconds: 0.001,
             });
 
-            if matches!(
-                calibrator.state(),
-                ActuatorGearRatioCalibrationState::Failed(CalibrationError::Timeout)
-            ) {
+            if calibrator.error().is_some() {
                 break;
             }
         }
 
-        assert_eq!(
-            calibrator.state(),
-            ActuatorGearRatioCalibrationState::Failed(CalibrationError::Timeout)
-        );
+        assert_eq!(calibrator.error(), Some(CalibrationError::Timeout));
     }
 }

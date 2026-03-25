@@ -1,23 +1,20 @@
 use fluxkit_core::{
     ActuatorBlendBandCalibrationConfig, ActuatorBlendBandCalibrationInput,
-    ActuatorBlendBandCalibrationState, ActuatorBlendBandCalibrator,
-    ActuatorBreakawayCalibrationConfig, ActuatorBreakawayCalibrationInput,
-    ActuatorBreakawayCalibrationState, ActuatorBreakawayCalibrator, ActuatorCompensationConfig,
+    ActuatorBlendBandCalibrator, ActuatorBreakawayCalibrationConfig,
+    ActuatorBreakawayCalibrationInput, ActuatorBreakawayCalibrator, ActuatorCompensationConfig,
     ActuatorEstimate, ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
-    ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator,
-    ActuatorGearRatioCalibrationConfig, ActuatorGearRatioCalibrationInput,
-    ActuatorGearRatioCalibrationState, ActuatorGearRatioCalibrator, ActuatorParams, ControlMode,
-    CurrentLoopConfig, FastLoopInput, FluxLinkageCalibrationConfig, FluxLinkageCalibrationInput,
-    FluxLinkageCalibrationState, FluxLinkageCalibrator, InverterParams, MotorController,
-    PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
-    PhaseInductanceCalibrationState, PhaseInductanceCalibrator, PhaseResistanceCalibrationConfig,
-    PhaseResistanceCalibrationInput, PhaseResistanceCalibrationState, PhaseResistanceCalibrator,
-    PolePairsAndOffsetCalibrationConfig, PolePairsAndOffsetCalibrationInput,
-    PolePairsAndOffsetCalibrationState, PolePairsAndOffsetCalibrator, RotorEstimate, TickSchedule,
+    ActuatorFrictionCalibrator, ActuatorGearRatioCalibrationConfig,
+    ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrator, ActuatorLimits, ActuatorModel,
+    ActuatorParams, ControlMode, CurrentLoopConfig, FastLoopInput, FluxLinkageCalibrationConfig,
+    FluxLinkageCalibrationInput, FluxLinkageCalibrator, InverterParams, MotorController,
+    MotorLimits, MotorModel, PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
+    PhaseInductanceCalibrator, PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
+    PhaseResistanceCalibrator, PolePairsAndOffsetCalibrationConfig,
+    PolePairsAndOffsetCalibrationInput, PolePairsAndOffsetCalibrator, RotorEstimate, TickSchedule,
 };
 use fluxkit_math::{
-    ElectricalAngle, MechanicalAngle,
-    angle::{mechanical_to_electrical, wrap_0_2pi, wrap_pm_pi},
+    ContinuousMechanicalAngle, ElectricalAngle, MechanicalAngle,
+    angle::{mechanical_to_electrical, wrap},
     inverse_clarke, inverse_park,
     units::{Henries, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
 };
@@ -46,16 +43,20 @@ fn motor_params() -> PmsmParams {
 }
 
 fn controller_motor_params() -> fluxkit_core::MotorParams {
-    fluxkit_core::MotorParams {
-        pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
-        d_inductance_h: Henries::new(0.000_03),
-        q_inductance_h: Henries::new(0.000_03),
-        flux_linkage_weber: Some(Webers::new(0.005)),
-        electrical_angle_offset: ElectricalAngle::new(0.0),
-        max_phase_current: fluxkit_math::units::Amps::new(10.0),
-        max_mech_speed: Some(RadPerSec::new(150.0)),
-    }
+    fluxkit_core::MotorParams::from_model_and_limits(
+        MotorModel {
+            pole_pairs: 7,
+            phase_resistance_ohm: Ohms::new(0.12),
+            d_inductance_h: Henries::new(0.000_03),
+            q_inductance_h: Henries::new(0.000_03),
+            flux_linkage_weber: Webers::new(0.005),
+            electrical_angle_offset: ElectricalAngle::new(0.0),
+        },
+        MotorLimits {
+            max_phase_current: fluxkit_math::units::Amps::new(10.0),
+            max_mech_speed: Some(RadPerSec::new(150.0)),
+        },
+    )
 }
 
 fn inverter_params() -> InverterParams {
@@ -90,21 +91,27 @@ fn current_loop_config() -> CurrentLoopConfig {
 }
 
 fn actuator_params_calibrating() -> ActuatorParams {
-    ActuatorParams {
-        gear_ratio: GEAR_RATIO,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
-        compensation: ActuatorCompensationConfig::disabled(),
-    }
+    ActuatorParams::from_model_limits_and_compensation(
+        ActuatorModel {
+            gear_ratio: GEAR_RATIO,
+        },
+        ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+        },
+        ActuatorCompensationConfig::disabled(),
+    )
 }
 
 fn actuator_params_unknown_ratio() -> ActuatorParams {
-    ActuatorParams {
-        gear_ratio: 1.0,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
-        compensation: ActuatorCompensationConfig::disabled(),
-    }
+    ActuatorParams::from_model_limits_and_compensation(
+        ActuatorModel { gear_ratio: 1.0 },
+        ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+        },
+        ActuatorCompensationConfig::disabled(),
+    )
 }
 
 fn plant_params_with_asymmetric_friction() -> PmsmParams {
@@ -153,10 +160,11 @@ fn plant_params_with_breakaway() -> PmsmParams {
 
 fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
     let state = *plant.state();
-    let wrapped_mechanical_angle = state.mechanical_angle.wrapped_0_2pi();
-    let electrical_angle =
-        mechanical_to_electrical(wrapped_mechanical_angle, plant.params().pole_pairs as u32)
-            .wrapped_pm_pi();
+    let wrapped_mechanical_angle = state.mechanical_angle.wrapped();
+    let electrical_angle = mechanical_to_electrical(
+        wrapped_mechanical_angle.into(),
+        plant.params().pole_pairs as u32,
+    );
     let phase_currents = inverse_clarke(inverse_park(
         state.current_dq.map(|current| current.get()),
         electrical_angle.get(),
@@ -167,12 +175,13 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
         phase_currents,
         bus_voltage,
         rotor: RotorEstimate {
-            mechanical_angle: wrapped_mechanical_angle,
+            mechanical_angle: wrapped_mechanical_angle.into(),
             mechanical_velocity: state.mechanical_velocity,
         },
         actuator: ActuatorEstimate {
-            output_angle: MechanicalAngle::new(state.mechanical_angle.get() / GEAR_RATIO)
-                .wrapped_0_2pi(),
+            output_angle: ContinuousMechanicalAngle::new(state.mechanical_angle.get() / GEAR_RATIO)
+                .wrapped()
+                .into(),
             output_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
         },
         dt_seconds: FAST_DT_SECONDS,
@@ -185,7 +194,7 @@ fn magnetic_hold_recovers_phase_resistance() {
     let mut plant = PmsmModel::new(
         params,
         PmsmState {
-            mechanical_angle: MechanicalAngle::new(0.4),
+            mechanical_angle: ContinuousMechanicalAngle::new(0.4),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
         },
@@ -219,15 +228,12 @@ fn magnetic_hold_recovers_phase_resistance() {
             .unwrap();
         phase_currents = snapshot.phase_currents;
 
-        if calibrator.state() == PhaseResistanceCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(
-        calibrator.state(),
-        PhaseResistanceCalibrationState::Complete
-    );
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
         (result.phase_resistance_ohm.get() - params.phase_resistance_ohm.get()).abs() < 0.01,
@@ -243,7 +249,7 @@ fn magnetic_hold_recovers_phase_inductance() {
     let mut plant = PmsmModel::new(
         params,
         PmsmState {
-            mechanical_angle: MechanicalAngle::new(0.4),
+            mechanical_angle: ContinuousMechanicalAngle::new(0.4),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
         },
@@ -279,15 +285,12 @@ fn magnetic_hold_recovers_phase_inductance() {
             .unwrap();
         phase_currents = snapshot.phase_currents;
 
-        if calibrator.state() == PhaseInductanceCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(
-        calibrator.state(),
-        PhaseInductanceCalibrationState::Complete
-    );
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
         (result.phase_inductance_h.get() - params.d_inductance_h.get()).abs() < 3.0e-6,
@@ -303,7 +306,7 @@ fn slow_sweep_recovers_pole_pairs_and_offset() {
     let mut plant = PmsmModel::new(
         params,
         PmsmState {
-            mechanical_angle: MechanicalAngle::new(0.9),
+            mechanical_angle: ContinuousMechanicalAngle::new(0.9),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
         },
@@ -327,7 +330,7 @@ fn slow_sweep_recovers_pole_pairs_and_offset() {
     let mut last_measured_angle = MechanicalAngle::new(0.0);
 
     for _ in 0..80_000 {
-        last_measured_angle = MechanicalAngle::new(wrap_0_2pi(
+        last_measured_angle = MechanicalAngle::new(wrap(
             plant.state().mechanical_angle.get() + encoder_mechanical_bias,
         ));
         let command = calibrator.tick(PolePairsAndOffsetCalibrationInput {
@@ -340,19 +343,16 @@ fn slow_sweep_recovers_pole_pairs_and_offset() {
             .step_alpha_beta(command, NewtonMeters::ZERO, FAST_DT_SECONDS)
             .unwrap();
 
-        if calibrator.state() == PolePairsAndOffsetCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(
-        calibrator.state(),
-        PolePairsAndOffsetCalibrationState::Complete
-    );
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert_eq!(result.pole_pairs, params.pole_pairs);
-    let reconstructed = wrap_pm_pi(
-        mechanical_to_electrical(last_measured_angle, result.pole_pairs as u32).get()
+    let reconstructed = wrap(
+        mechanical_to_electrical(last_measured_angle.into(), result.pole_pairs as u32).get()
             + result.electrical_angle_offset.get()
             - align_stator_angle.get(),
     );
@@ -368,7 +368,7 @@ fn controlled_spin_recovers_flux_linkage() {
     let mut plant = PmsmModel::new(
         params,
         PmsmState {
-            mechanical_angle: MechanicalAngle::new(0.4),
+            mechanical_angle: ContinuousMechanicalAngle::new(0.4),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
         },
@@ -399,7 +399,7 @@ fn controlled_spin_recovers_flux_linkage() {
     for _ in 0..60_000 {
         let command = calibrator.tick(FluxLinkageCalibrationInput {
             phase_currents,
-            mechanical_angle: plant.state().mechanical_angle.wrapped_0_2pi(),
+            mechanical_angle: plant.state().mechanical_angle.wrapped().into(),
             mechanical_velocity: plant.state().mechanical_velocity,
             dt_seconds: FAST_DT_SECONDS,
         });
@@ -409,12 +409,12 @@ fn controlled_spin_recovers_flux_linkage() {
             .unwrap();
         phase_currents = snapshot.phase_currents;
 
-        if calibrator.state() == FluxLinkageCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(calibrator.state(), FluxLinkageCalibrationState::Complete);
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
         (result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 1.0e-4,
@@ -456,7 +456,7 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
         let _ = step;
         let schedule = TickSchedule::with_medium(FAST_DT_SECONDS);
         let output = controller.tick(fast_loop_input(&plant, bus_voltage), schedule);
-        assert_eq!(output.error, None);
+        assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
                 output.phase_duty,
@@ -466,15 +466,12 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
             )
             .unwrap();
 
-        if calibrator.state() == ActuatorFrictionCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(
-        calibrator.state(),
-        ActuatorFrictionCalibrationState::Complete
-    );
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
         (result.positive_coulomb_torque.get() - 0.04).abs() < 0.01,
@@ -530,7 +527,7 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
             fast_loop_input(&plant, bus_voltage),
             TickSchedule::with_medium(FAST_DT_SECONDS),
         );
-        assert_eq!(output.error, None);
+        assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
                 output.phase_duty,
@@ -540,15 +537,12 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
             )
             .unwrap();
 
-        if calibrator.state() == ActuatorGearRatioCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(
-        calibrator.state(),
-        ActuatorGearRatioCalibrationState::Complete
-    );
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
         (result.gear_ratio - GEAR_RATIO).abs() < 0.05,
@@ -598,7 +592,7 @@ fn torque_ramp_recovers_actuator_breakaway() {
             fast_loop_input(&plant, bus_voltage),
             TickSchedule::with_medium(FAST_DT_SECONDS),
         );
-        assert_eq!(output.error, None);
+        assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
                 output.phase_duty,
@@ -608,15 +602,12 @@ fn torque_ramp_recovers_actuator_breakaway() {
             )
             .unwrap();
 
-        if calibrator.state() == ActuatorBreakawayCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(
-        calibrator.state(),
-        ActuatorBreakawayCalibrationState::Complete
-    );
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
         (result.positive_breakaway_torque.get() - 0.08).abs() < 0.02,
@@ -663,7 +654,7 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
             fast_loop_input(&plant, bus_voltage),
             TickSchedule::with_medium(FAST_DT_SECONDS),
         );
-        assert_eq!(output.error, None);
+        assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
                 output.phase_duty,
@@ -673,15 +664,12 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
             )
             .unwrap();
 
-        if calibrator.state() == ActuatorBlendBandCalibrationState::Complete {
+        if calibrator.result().is_some() {
             break;
         }
     }
 
-    assert_eq!(
-        calibrator.state(),
-        ActuatorBlendBandCalibrationState::Complete
-    );
+    assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
         (result.zero_velocity_blend_band.get() - 0.05).abs() < 0.01,

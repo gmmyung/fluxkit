@@ -21,22 +21,22 @@ pub fn validate_controller_config(
         && finite_positive(motor.phase_resistance_ohm.get())
         && finite_positive(motor.d_inductance_h.get())
         && finite_positive(motor.q_inductance_h.get())
-        && motor
-            .flux_linkage_weber
-            .map(|flux| finite_non_negative(flux.get()))
-            .unwrap_or(true)
+        && finite_positive(motor.flux_linkage_weber.get())
         && motor.electrical_angle_offset.get().is_finite()
-        && finite_positive(motor.max_phase_current.get())
+        && finite_positive(motor.limits.max_phase_current.get())
         && motor
+            .limits
             .max_mech_speed
             .map(|speed| finite_positive(speed.get()))
             .unwrap_or(true)
         && finite_positive(actuator.gear_ratio)
         && actuator
+            .limits
             .max_output_velocity
             .map(|speed| finite_positive(speed.get()))
             .unwrap_or(true)
         && actuator
+            .limits
             .max_output_torque
             .map(|torque| finite_positive(torque.get()))
             .unwrap_or(true)

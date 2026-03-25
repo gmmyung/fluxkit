@@ -24,61 +24,38 @@
 //!
 //! That lets board/runtime code run multiple procedures, merge the completed
 //! results, then apply the accumulated values onto parameter structs.
+//!
+//! The intended usage model is deliberately explicit:
+//!
+//! 1. construct one routine
+//! 2. tick it until it produces a calibration delta
+//! 3. merge that delta into the persisted record
+//! 4. apply the merged record onto the live parameter struct
 
-pub mod actuator_blend_band;
-pub mod actuator_breakaway;
-pub mod actuator_friction;
-pub mod actuator_gear_ratio;
-pub mod actuator_result;
-pub mod error;
-pub mod flux_linkage;
-pub mod phase_inductance;
-pub mod phase_resistance;
-pub mod pole_pairs_and_offset;
-pub mod result;
-pub mod routine;
+pub mod actuator;
+pub mod motor;
+pub mod shared;
 
-pub use actuator_blend_band::{
+pub use actuator::{
     ActuatorBlendBandCalibrationCommand, ActuatorBlendBandCalibrationConfig,
     ActuatorBlendBandCalibrationInput, ActuatorBlendBandCalibrationResult,
-    ActuatorBlendBandCalibrationState, ActuatorBlendBandCalibrator,
-};
-pub use actuator_breakaway::{
-    ActuatorBreakawayCalibrationCommand, ActuatorBreakawayCalibrationConfig,
-    ActuatorBreakawayCalibrationInput, ActuatorBreakawayCalibrationResult,
-    ActuatorBreakawayCalibrationState, ActuatorBreakawayCalibrator,
-};
-pub use actuator_friction::{
-    ActuatorFrictionCalibrationCommand, ActuatorFrictionCalibrationConfig,
-    ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrationResult,
-    ActuatorFrictionCalibrationState, ActuatorFrictionCalibrator,
-};
-pub use actuator_gear_ratio::{
+    ActuatorBlendBandCalibrator, ActuatorBreakawayCalibrationCommand,
+    ActuatorBreakawayCalibrationConfig, ActuatorBreakawayCalibrationInput,
+    ActuatorBreakawayCalibrationResult, ActuatorBreakawayCalibrator, ActuatorCalibration,
+    ActuatorFrictionCalibration, ActuatorFrictionCalibrationCommand,
+    ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
+    ActuatorFrictionCalibrationResult, ActuatorFrictionCalibrator,
     ActuatorGearRatioCalibrationCommand, ActuatorGearRatioCalibrationConfig,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrationResult,
-    ActuatorGearRatioCalibrationState, ActuatorGearRatioCalibrator,
+    ActuatorGearRatioCalibrator,
 };
-pub use actuator_result::ActuatorCalibration;
-pub use error::CalibrationError;
-pub use flux_linkage::{
+pub use motor::{
     FluxLinkageCalibrationConfig, FluxLinkageCalibrationInput, FluxLinkageCalibrationResult,
-    FluxLinkageCalibrationState, FluxLinkageCalibrator,
-};
-pub use phase_inductance::{
-    PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
-    PhaseInductanceCalibrationResult, PhaseInductanceCalibrationState, PhaseInductanceCalibrator,
-};
-pub use phase_resistance::{
+    FluxLinkageCalibrator, MotorCalibration, PhaseInductanceCalibrationConfig,
+    PhaseInductanceCalibrationInput, PhaseInductanceCalibrationResult, PhaseInductanceCalibrator,
     PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
-    PhaseResistanceCalibrationResult, PhaseResistanceCalibrationState, PhaseResistanceCalibrator,
-};
-pub use pole_pairs_and_offset::{
+    PhaseResistanceCalibrationResult, PhaseResistanceCalibrator,
     PolePairsAndOffsetCalibrationConfig, PolePairsAndOffsetCalibrationInput,
-    PolePairsAndOffsetCalibrationResult, PolePairsAndOffsetCalibrationState,
-    PolePairsAndOffsetCalibrator,
+    PolePairsAndOffsetCalibrationResult, PolePairsAndOffsetCalibrator,
 };
-pub use result::MotorCalibration;
-pub use routine::{
-    ActuatorCalibrationRoutine, ActuatorCalibrationRoutineResult, MotorCalibrationRoutine,
-    MotorCalibrationRoutineResult,
-};
+pub use shared::{ActuatorCalibrationRoutine, CalibrationError, MotorCalibrationRoutine};

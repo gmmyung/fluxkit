@@ -7,7 +7,10 @@
 
 use fluxkit_math::units::{NewtonMeters, RadPerSec};
 
-use super::error::CalibrationError;
+use crate::calibration::shared::{
+    CalibrationError,
+    release_ramp::{BidirectionalRampPhase, BidirectionalRampTracker},
+};
 
 /// Static configuration for actuator breakaway calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,30 +87,6 @@ pub struct ActuatorBreakawayCalibrationResult {
     pub negative_breakaway_torque: NewtonMeters,
 }
 
-/// Compact state of the actuator breakaway calibration procedure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ActuatorBreakawayCalibrationState {
-    /// The calibrator is ramping positive torque from zero.
-    PositiveRamp,
-    /// The calibrator is waiting at zero torque for the actuator to stop.
-    NeutralSettle,
-    /// The calibrator is ramping negative torque from zero.
-    NegativeRamp,
-    /// The procedure completed successfully.
-    Complete,
-    /// The procedure failed.
-    Failed(CalibrationError),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BreakawayPhase {
-    PositiveRamp,
-    NeutralSettle,
-    NegativeRamp,
-}
-
 /// Pure state machine for actuator breakaway calibration.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -115,11 +94,7 @@ enum BreakawayPhase {
 pub struct ActuatorBreakawayCalibrator {
     config: ActuatorBreakawayCalibrationConfig,
     elapsed_seconds: f32,
-    phase: BreakawayPhase,
-    ramp_seconds: f32,
-    motion_seconds: f32,
-    rest_seconds: f32,
-    release_torque_candidate: Option<NewtonMeters>,
+    ramp: BidirectionalRampTracker,
     positive_result: Option<NewtonMeters>,
     negative_result: Option<NewtonMeters>,
     result: Option<ActuatorBreakawayCalibrationResult>,
@@ -136,32 +111,12 @@ impl ActuatorBreakawayCalibrator {
         Ok(Self {
             config,
             elapsed_seconds: 0.0,
-            phase: BreakawayPhase::PositiveRamp,
-            ramp_seconds: 0.0,
-            motion_seconds: 0.0,
-            rest_seconds: 0.0,
-            release_torque_candidate: None,
+            ramp: BidirectionalRampTracker::new(),
             positive_result: None,
             negative_result: None,
             result: None,
             error: None,
         })
-    }
-
-    /// Returns the current calibration state.
-    #[inline]
-    pub const fn state(&self) -> ActuatorBreakawayCalibrationState {
-        if let Some(error) = self.error {
-            ActuatorBreakawayCalibrationState::Failed(error)
-        } else if self.result.is_some() {
-            ActuatorBreakawayCalibrationState::Complete
-        } else {
-            match self.phase {
-                BreakawayPhase::PositiveRamp => ActuatorBreakawayCalibrationState::PositiveRamp,
-                BreakawayPhase::NeutralSettle => ActuatorBreakawayCalibrationState::NeutralSettle,
-                BreakawayPhase::NegativeRamp => ActuatorBreakawayCalibrationState::NegativeRamp,
-            }
-        }
     }
 
     /// Returns the finished result when calibration has succeeded.
@@ -183,11 +138,10 @@ impl ActuatorBreakawayCalibrator {
             return NewtonMeters::ZERO;
         }
 
-        match self.phase {
-            BreakawayPhase::PositiveRamp => NewtonMeters::new(self.current_ramp_torque()),
-            BreakawayPhase::NeutralSettle => NewtonMeters::ZERO,
-            BreakawayPhase::NegativeRamp => NewtonMeters::new(-self.current_ramp_torque()),
-        }
+        self.ramp.commanded_torque_target(
+            self.config.torque_ramp_rate_nm_per_sec,
+            self.config.max_torque,
+        )
     }
 
     /// Advances the calibration procedure by one sample.
@@ -216,10 +170,10 @@ impl ActuatorBreakawayCalibrator {
             };
         }
 
-        match self.phase {
-            BreakawayPhase::PositiveRamp => self.tick_positive_ramp(input),
-            BreakawayPhase::NeutralSettle => self.tick_neutral_settle(input),
-            BreakawayPhase::NegativeRamp => self.tick_negative_ramp(input),
+        match self.ramp.phase {
+            BidirectionalRampPhase::PositiveRamp => self.tick_positive_ramp(input),
+            BidirectionalRampPhase::NeutralSettle => self.tick_neutral_settle(input),
+            BidirectionalRampPhase::NegativeRamp => self.tick_negative_ramp(input),
         }
 
         ActuatorBreakawayCalibrationCommand {
@@ -228,72 +182,50 @@ impl ActuatorBreakawayCalibrator {
     }
 
     fn tick_positive_ramp(&mut self, input: ActuatorBreakawayCalibrationInput) {
-        self.ramp_seconds += input.dt_seconds;
-        if input.output_velocity.get() >= self.config.motion_velocity_threshold.get() {
-            if self.motion_seconds <= 0.0 {
-                self.release_torque_candidate =
-                    Some(NewtonMeters::new(input.output_torque_command.get().abs()));
-            }
-            self.motion_seconds += input.dt_seconds;
-        } else {
-            self.motion_seconds = 0.0;
-            self.release_torque_candidate = None;
-        }
-
-        if self.motion_seconds >= self.config.motion_confirm_time_seconds {
-            let release_torque = self
-                .release_torque_candidate
-                .unwrap_or(NewtonMeters::new(input.output_torque_command.get().abs()))
-                .get();
+        let ramp_torque = self.ramp.advance_ramp(
+            input.dt_seconds,
+            self.config.torque_ramp_rate_nm_per_sec,
+            self.config.max_torque,
+        );
+        if let Some(release_torque) = self.ramp.observe_release(
+            input.output_velocity.get() >= self.config.motion_velocity_threshold.get(),
+            input.dt_seconds,
+            input.output_torque_command.get().abs(),
+            self.config.motion_confirm_time_seconds,
+        ) {
             let breakaway = (release_torque - self.config.positive_coulomb_torque.get()).max(0.0);
             self.positive_result = Some(NewtonMeters::new(breakaway));
-            self.phase = BreakawayPhase::NeutralSettle;
-            self.ramp_seconds = 0.0;
-            self.motion_seconds = 0.0;
-            self.rest_seconds = 0.0;
-            self.release_torque_candidate = None;
+            self.ramp.begin_neutral_settle();
             return;
         }
 
-        if self.current_ramp_torque() >= self.config.max_torque.get() {
+        if ramp_torque >= self.config.max_torque.get() {
             self.error = Some(CalibrationError::IndeterminateEstimate);
         }
     }
 
     fn tick_neutral_settle(&mut self, input: ActuatorBreakawayCalibrationInput) {
-        if input.output_velocity.get().abs() <= self.config.rest_velocity_threshold.get() {
-            self.rest_seconds += input.dt_seconds;
-        } else {
-            self.rest_seconds = 0.0;
-        }
-
-        if self.rest_seconds >= self.config.rest_time_seconds {
-            self.phase = BreakawayPhase::NegativeRamp;
-            self.ramp_seconds = 0.0;
-            self.motion_seconds = 0.0;
-            self.rest_seconds = 0.0;
-            self.release_torque_candidate = None;
+        if self.ramp.observe_rest(
+            input.output_velocity.get().abs() <= self.config.rest_velocity_threshold.get(),
+            input.dt_seconds,
+            self.config.rest_time_seconds,
+        ) {
+            self.ramp.begin_negative_ramp();
         }
     }
 
     fn tick_negative_ramp(&mut self, input: ActuatorBreakawayCalibrationInput) {
-        self.ramp_seconds += input.dt_seconds;
-        if input.output_velocity.get() <= -self.config.motion_velocity_threshold.get() {
-            if self.motion_seconds <= 0.0 {
-                self.release_torque_candidate =
-                    Some(NewtonMeters::new(input.output_torque_command.get().abs()));
-            }
-            self.motion_seconds += input.dt_seconds;
-        } else {
-            self.motion_seconds = 0.0;
-            self.release_torque_candidate = None;
-        }
-
-        if self.motion_seconds >= self.config.motion_confirm_time_seconds {
-            let release_torque = self
-                .release_torque_candidate
-                .unwrap_or(NewtonMeters::new(input.output_torque_command.get().abs()))
-                .get();
+        let ramp_torque = self.ramp.advance_ramp(
+            input.dt_seconds,
+            self.config.torque_ramp_rate_nm_per_sec,
+            self.config.max_torque,
+        );
+        if let Some(release_torque) = self.ramp.observe_release(
+            input.output_velocity.get() <= -self.config.motion_velocity_threshold.get(),
+            input.dt_seconds,
+            input.output_torque_command.get().abs(),
+            self.config.motion_confirm_time_seconds,
+        ) {
             let breakaway = (release_torque - self.config.negative_coulomb_torque.get()).max(0.0);
             self.negative_result = Some(NewtonMeters::new(breakaway));
             self.result = Some(ActuatorBreakawayCalibrationResult {
@@ -303,15 +235,9 @@ impl ActuatorBreakawayCalibrator {
             return;
         }
 
-        if self.current_ramp_torque() >= self.config.max_torque.get() {
+        if ramp_torque >= self.config.max_torque.get() {
             self.error = Some(CalibrationError::IndeterminateEstimate);
         }
-    }
-
-    #[inline]
-    fn current_ramp_torque(&self) -> f32 {
-        (self.ramp_seconds * self.config.torque_ramp_rate_nm_per_sec)
-            .min(self.config.max_torque.get())
     }
 }
 
@@ -350,7 +276,7 @@ mod tests {
 
     use super::{
         ActuatorBreakawayCalibrationConfig, ActuatorBreakawayCalibrationInput,
-        ActuatorBreakawayCalibrationState, ActuatorBreakawayCalibrator,
+        ActuatorBreakawayCalibrator,
     };
     use fluxkit_math::units::{NewtonMeters, RadPerSec};
 
@@ -384,7 +310,7 @@ mod tests {
                 dt_seconds: 0.01,
             });
 
-            if calibrator.state() == ActuatorBreakawayCalibrationState::Complete {
+            if calibrator.result().is_some() {
                 let result = calibrator.result().unwrap();
                 assert!((result.positive_breakaway_torque.get() - 0.09).abs() < 0.02);
                 assert!((result.negative_breakaway_torque.get() - 0.11).abs() < 0.02);
@@ -417,11 +343,8 @@ mod tests {
         }
 
         assert!(matches!(
-            calibrator.state(),
-            ActuatorBreakawayCalibrationState::Failed(CalibrationError::Timeout)
-                | ActuatorBreakawayCalibrationState::Failed(
-                    CalibrationError::IndeterminateEstimate
-                )
+            calibrator.error(),
+            Some(CalibrationError::Timeout | CalibrationError::IndeterminateEstimate)
         ));
     }
 }

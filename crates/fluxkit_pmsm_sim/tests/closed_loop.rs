@@ -1,10 +1,10 @@
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorParams, ControlMode, CurrentLoopConfig,
-    FastLoopInput, FrictionCompensation, InverterParams, MotorController, MotorParams,
-    RotorEstimate, TickSchedule,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlMode,
+    CurrentLoopConfig, FastLoopInput, FrictionCompensation, InverterParams, MotorController,
+    MotorLimits, MotorParams, RotorEstimate, TickSchedule,
 };
 use fluxkit_math::{
-    MechanicalAngle,
+    ContinuousMechanicalAngle,
     angle::mechanical_to_electrical,
     inverse_clarke, inverse_park,
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
@@ -24,10 +24,12 @@ fn motor_params() -> MotorParams {
         phase_resistance_ohm: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
-        flux_linkage_weber: Some(Webers::new(0.005)),
+        flux_linkage_weber: Webers::new(0.005),
         electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
-        max_phase_current: Amps::new(10.0),
-        max_mech_speed: Some(RadPerSec::new(150.0)),
+        limits: MotorLimits {
+            max_phase_current: Amps::new(10.0),
+            max_mech_speed: Some(RadPerSec::new(150.0)),
+        },
     }
 }
 
@@ -65,9 +67,11 @@ fn current_loop_config() -> CurrentLoopConfig {
 fn actuator_params() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig::disabled(),
+        limits: ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+        },
     }
 }
 
@@ -105,8 +109,6 @@ fn plant_params_with_output_inertia() -> PmsmParams {
 fn actuator_params_with_friction_compensation() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig {
             friction: FrictionCompensation {
                 enabled: true,
@@ -120,18 +122,24 @@ fn actuator_params_with_friction_compensation() -> ActuatorParams {
             },
             max_total_torque: NewtonMeters::new(0.4),
         },
+        limits: ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+        },
     }
 }
 
 fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
     let state = *plant.state();
-    let wrapped_mechanical_angle = state.mechanical_angle.wrapped_0_2pi();
-    let wrapped_output_angle =
-        MechanicalAngle::new(state.mechanical_angle.get() / plant.params().actuator.gear_ratio)
-            .wrapped_0_2pi();
-    let electrical_angle =
-        mechanical_to_electrical(wrapped_mechanical_angle, plant.params().pole_pairs as u32)
-            .wrapped_pm_pi();
+    let wrapped_mechanical_angle = state.mechanical_angle.wrapped();
+    let wrapped_output_angle = ContinuousMechanicalAngle::new(
+        state.mechanical_angle.get() / plant.params().actuator.gear_ratio,
+    )
+    .wrapped();
+    let electrical_angle = mechanical_to_electrical(
+        wrapped_mechanical_angle.into(),
+        plant.params().pole_pairs as u32,
+    );
     let phase_currents = inverse_clarke(inverse_park(
         state.current_dq.map(|current| current.get()),
         electrical_angle.get(),
@@ -142,11 +150,11 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
         phase_currents,
         bus_voltage,
         rotor: RotorEstimate {
-            mechanical_angle: wrapped_mechanical_angle,
+            mechanical_angle: wrapped_mechanical_angle.into(),
             mechanical_velocity: state.mechanical_velocity,
         },
         actuator: ActuatorEstimate {
-            output_angle: wrapped_output_angle,
+            output_angle: wrapped_output_angle.into(),
             output_velocity: RadPerSec::new(
                 state.mechanical_velocity.get() / plant.params().actuator.gear_ratio,
             ),
@@ -162,7 +170,7 @@ fn run_fast_step(
     load_torque: NewtonMeters,
 ) {
     let output = controller.fast_tick(fast_loop_input(plant, bus_voltage));
-    assert_eq!(output.error, None);
+    assert_eq!(controller.status().active_error, None);
     plant
         .step_phase_duty(output.phase_duty, bus_voltage, load_torque, FAST_DT_SECONDS)
         .unwrap();
@@ -228,7 +236,7 @@ fn position_mode_tracks_output_axis_feedback() {
     let mut plant = PmsmModel::new_zeroed(plant_params()).unwrap();
 
     controller.set_mode(ControlMode::Position);
-    controller.set_position_target(MechanicalAngle::new(POSITION_TARGET_RADIANS));
+    controller.set_position_target(ContinuousMechanicalAngle::new(POSITION_TARGET_RADIANS));
     controller.enable();
 
     for step in 0..200_000 {
@@ -238,7 +246,7 @@ fn position_mode_tracks_output_axis_feedback() {
             TickSchedule::none()
         };
         let output = controller.tick(fast_loop_input(&plant, bus_voltage), schedule);
-        assert_eq!(output.error, None);
+        assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
                 output.phase_duty,
@@ -311,8 +319,8 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
         let compensated_output =
             compensated.tick(fast_loop_input(&compensated_plant, bus_voltage), schedule);
 
-        assert_eq!(uncompensated_output.error, None);
-        assert_eq!(compensated_output.error, None);
+        assert_eq!(uncompensated.status().active_error, None);
+        assert_eq!(compensated.status().active_error, None);
 
         uncompensated_plant
             .step_phase_duty(

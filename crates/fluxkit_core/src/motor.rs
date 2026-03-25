@@ -2,8 +2,8 @@
 
 use fluxkit_math::angle::{mechanical_to_electrical, shortest_angle_delta};
 use fluxkit_math::{
-    MechanicalAngle, Modulator, PiConfig, PiController, Svpwm, clamp, clarke, inverse_park,
-    limit_norm_dq, park,
+    ContinuousMechanicalAngle, Modulator, PiConfig, PiController, Svpwm, clamp, clarke,
+    inverse_park, limit_norm_dq, park,
     units::{Amps, NewtonMeters, RadPerSec, Volts},
 };
 
@@ -98,7 +98,7 @@ pub struct MotorController<M = Svpwm> {
     iq_target: Amps,
     output_torque_target: NewtonMeters,
     output_velocity_target: RadPerSec,
-    output_position_target: MechanicalAngle,
+    output_position_target: ContinuousMechanicalAngle,
     open_loop_voltage_target: fluxkit_math::frame::Dq<Volts>,
     d_pi: PiController,
     q_pi: PiController,
@@ -106,8 +106,8 @@ pub struct MotorController<M = Svpwm> {
     position_pi: PiController,
     active_error: Option<Error>,
     last_rotor: Option<RotorEstimate>,
-    last_wrapped_mechanical_angle: Option<MechanicalAngle>,
-    last_wrapped_output_angle: Option<MechanicalAngle>,
+    last_wrapped_mechanical_angle: Option<ContinuousMechanicalAngle>,
+    last_wrapped_output_angle: Option<ContinuousMechanicalAngle>,
     last_current_ref: Option<fluxkit_math::frame::Dq<Amps>>,
     status: MotorStatus,
 }
@@ -144,11 +144,11 @@ where
 
         let id_target = clamp(
             config.id_ref_default.get(),
-            -current_limit(config.max_id_target, motor.max_phase_current),
-            current_limit(config.max_id_target, motor.max_phase_current),
+            -current_limit(config.max_id_target, motor.limits.max_phase_current),
+            current_limit(config.max_id_target, motor.limits.max_phase_current),
         );
         let velocity_limit = output_velocity_limit(config.max_velocity_target, actuator);
-        let current_limit = current_limit(config.max_iq_target, motor.max_phase_current);
+        let current_limit = current_limit(config.max_iq_target, motor.limits.max_phase_current);
         let output_torque_limit = output_torque_limit(current_limit, motor, actuator);
 
         let mut controller = Self {
@@ -163,7 +163,7 @@ where
             iq_target: Amps::ZERO,
             output_torque_target: NewtonMeters::ZERO,
             output_velocity_target: RadPerSec::ZERO,
-            output_position_target: MechanicalAngle::new(0.0),
+            output_position_target: ContinuousMechanicalAngle::new(0.0),
             open_loop_voltage_target: zero_voltage_dq(),
             d_pi: PiController::new(PiConfig {
                 kp: config.kp_d,
@@ -201,11 +201,11 @@ where
                 last_bus_voltage: Volts::ZERO,
                 last_measured_idq: zero_current_dq(),
                 last_commanded_vdq: zero_voltage_dq(),
-                last_rotor_mechanical_angle: MechanicalAngle::new(0.0),
-                last_unwrapped_rotor_mechanical_angle: MechanicalAngle::new(0.0),
+                last_rotor_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
+                last_unwrapped_rotor_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 last_rotor_mechanical_velocity: RadPerSec::ZERO,
-                last_output_mechanical_angle: MechanicalAngle::new(0.0),
-                last_unwrapped_output_mechanical_angle: MechanicalAngle::new(0.0),
+                last_output_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
+                last_unwrapped_output_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 last_output_mechanical_velocity: RadPerSec::ZERO,
                 last_actuator_compensation: ActuatorCompensationTelemetry::zero(),
                 last_saturated: false,
@@ -275,13 +275,19 @@ where
 
     /// Updates the `q`-axis current target, clamped to configured limits.
     pub fn set_iq_target(&mut self, iq: Amps) {
-        let limit = current_limit(self.config.max_iq_target, self.motor.max_phase_current);
+        let limit = current_limit(
+            self.config.max_iq_target,
+            self.motor.limits.max_phase_current,
+        );
         self.iq_target = Amps::new(clamp(iq.get(), -limit, limit));
     }
 
     /// Updates the `d`-axis current target, clamped to configured limits.
     pub fn set_id_target(&mut self, id: Amps) {
-        let limit = current_limit(self.config.max_id_target, self.motor.max_phase_current);
+        let limit = current_limit(
+            self.config.max_id_target,
+            self.motor.limits.max_phase_current,
+        );
         self.id_target = Amps::new(clamp(id.get(), -limit, limit));
     }
 
@@ -305,7 +311,7 @@ where
     /// Updates the output-axis mechanical position target used by `Position` mode.
     ///
     /// This target is not wrapped, so it can represent multi-turn positioning.
-    pub fn set_position_target(&mut self, position: MechanicalAngle) {
+    pub fn set_position_target(&mut self, position: ContinuousMechanicalAngle) {
         self.output_position_target = position;
     }
 
@@ -399,7 +405,6 @@ where
                 measured_idq,
                 commanded_vdq: zero_voltage_dq(),
                 saturated: false,
-                error: None,
             };
         }
 
@@ -484,11 +489,8 @@ where
             ControlMode::Torque => {
                 let total_output_torque =
                     self.total_output_torque_command(self.output_torque_target);
-                if let Some(iq_target) = self.output_torque_to_iq(total_output_torque) {
-                    self.set_iq_target(iq_target);
-                } else {
-                    self.latch_error(Error::ConfigurationInvalid);
-                }
+                let iq_target = self.output_torque_to_iq(total_output_torque);
+                self.set_iq_target(iq_target);
             }
             ControlMode::Velocity | ControlMode::Position => {
                 if self.last_rotor.is_some() {
@@ -511,11 +513,8 @@ where
                     let total_output_torque =
                         self.total_output_torque_command(self.output_torque_target);
 
-                    if let Some(iq_target) = self.output_torque_to_iq(total_output_torque) {
-                        self.set_iq_target(iq_target);
-                    } else {
-                        self.latch_error(Error::ConfigurationInvalid);
-                    }
+                    let iq_target = self.output_torque_to_iq(total_output_torque);
+                    self.set_iq_target(iq_target);
                 }
             }
         }
@@ -553,11 +552,10 @@ where
     #[inline]
     fn electrical_angle_from_mechanical(
         &self,
-        mechanical_angle: MechanicalAngle,
+        mechanical_angle: ContinuousMechanicalAngle,
     ) -> fluxkit_math::ElectricalAngle {
         let base = mechanical_to_electrical(mechanical_angle, self.motor.pole_pairs as u32);
         fluxkit_math::ElectricalAngle::new(base.get() + self.motor.electrical_angle_offset.get())
-            .wrapped_pm_pi()
     }
 
     fn set_pi_output_limits(&mut self, limit: f32) {
@@ -668,7 +666,6 @@ where
             measured_idq,
             commanded_vdq,
             saturated: self.status.last_saturated,
-            error: None,
         }
     }
 
@@ -682,11 +679,7 @@ where
         let resistance = self.motor.phase_resistance_ohm.get();
         let ld = self.motor.d_inductance_h.get();
         let lq = self.motor.q_inductance_h.get();
-        let flux_linkage = self
-            .motor
-            .flux_linkage_weber
-            .map(|value| value.get())
-            .unwrap_or(0.0);
+        let flux_linkage = self.motor.flux_linkage_weber.get();
         let id = current_ref.id.get();
         let iq = current_ref.iq.get();
 
@@ -723,11 +716,14 @@ where
         )
     }
 
-    fn unwrap_rotor_angle(&mut self, wrapped_angle: MechanicalAngle) -> MechanicalAngle {
+    fn unwrap_rotor_angle(
+        &mut self,
+        wrapped_angle: ContinuousMechanicalAngle,
+    ) -> ContinuousMechanicalAngle {
         let unwrapped = match self.last_wrapped_mechanical_angle {
             Some(previous_wrapped) => {
                 let delta = shortest_angle_delta(previous_wrapped.get(), wrapped_angle.get());
-                MechanicalAngle::new(
+                ContinuousMechanicalAngle::new(
                     self.status.last_unwrapped_rotor_mechanical_angle.get() + delta,
                 )
             }
@@ -738,11 +734,14 @@ where
         unwrapped
     }
 
-    fn unwrap_output_angle(&mut self, wrapped_angle: MechanicalAngle) -> MechanicalAngle {
+    fn unwrap_output_angle(
+        &mut self,
+        wrapped_angle: ContinuousMechanicalAngle,
+    ) -> ContinuousMechanicalAngle {
         let unwrapped = match self.last_wrapped_output_angle {
             Some(previous_wrapped) => {
                 let delta = shortest_angle_delta(previous_wrapped.get(), wrapped_angle.get());
-                MechanicalAngle::new(
+                ContinuousMechanicalAngle::new(
                     self.status.last_unwrapped_output_mechanical_angle.get() + delta,
                 )
             }
@@ -756,6 +755,7 @@ where
     fn clamp_output_torque(&self, torque: NewtonMeters) -> NewtonMeters {
         let limit = self
             .actuator
+            .limits
             .max_output_torque
             .map(|value| value.get())
             .unwrap_or(f32::INFINITY);
@@ -881,10 +881,10 @@ where
         }
     }
 
-    fn output_torque_to_iq(&self, output_torque: NewtonMeters) -> Option<Amps> {
-        let torque_constant = motor_torque_constant(self.motor)?;
+    fn output_torque_to_iq(&self, output_torque: NewtonMeters) -> Amps {
+        let torque_constant = motor_torque_constant(self.motor);
         let motor_torque = output_torque.get() / self.actuator.gear_ratio;
-        Some(Amps::new(motor_torque / torque_constant))
+        Amps::new(motor_torque / torque_constant)
     }
 
     fn clamp_phase_duty(
@@ -916,13 +916,12 @@ where
         self.status.last_actuator_compensation = ActuatorCompensationTelemetry::zero();
     }
 
-    fn neutral_output(&self, error: Error) -> FastLoopOutput {
+    fn neutral_output(&self, _error: Error) -> FastLoopOutput {
         FastLoopOutput {
             phase_duty: neutral_phase_duty(),
             measured_idq: self.status.last_measured_idq,
             commanded_vdq: zero_voltage_dq(),
             saturated: false,
-            error: Some(error),
         }
     }
 
@@ -941,6 +940,7 @@ fn current_limit(configured: Amps, motor_limit: Amps) -> f32 {
 #[inline]
 fn output_velocity_limit(configured: RadPerSec, actuator: ActuatorParams) -> f32 {
     actuator
+        .limits
         .max_output_velocity
         .map(|limit| configured.get().min(limit.get()))
         .unwrap_or(configured.get())
@@ -967,20 +967,18 @@ impl FrictionCompensationBreakdown {
 
 #[inline]
 fn output_torque_limit(max_iq_target: f32, motor: MotorParams, actuator: ActuatorParams) -> f32 {
-    let configured_limit = motor_torque_constant(motor)
-        .map(|torque_constant| max_iq_target * torque_constant * actuator.gear_ratio)
-        .unwrap_or(0.0);
+    let configured_limit = max_iq_target * motor_torque_constant(motor) * actuator.gear_ratio;
 
     actuator
+        .limits
         .max_output_torque
         .map(|limit| configured_limit.min(limit.get()))
         .unwrap_or(configured_limit)
 }
 
 #[inline]
-fn motor_torque_constant(motor: MotorParams) -> Option<f32> {
-    let flux_linkage = motor.flux_linkage_weber?;
-    Some(1.5 * motor.pole_pairs as f32 * flux_linkage.get())
+fn motor_torque_constant(motor: MotorParams) -> f32 {
+    1.5 * motor.pole_pairs as f32 * motor.flux_linkage_weber.get()
 }
 
 #[inline]
@@ -1015,41 +1013,48 @@ mod tests {
     use super::MotorController;
     use crate::{
         actuator::{
-            ActuatorCompensationConfig, ActuatorEstimate, ActuatorParams, FrictionCompensation,
+            ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
+            FrictionCompensation,
         },
         config::CurrentLoopConfig,
         error::Error,
         io::{FastLoopInput, RotorEstimate},
         mode::ControlMode,
-        params::{InverterParams, MotorParams},
+        params::{InverterParams, MotorLimits, MotorModel, MotorParams},
         state::MotorState,
     };
     use fluxkit_math::{
-        ElectricalAngle, MechanicalAngle, SinePwm, Svpwm,
+        ContinuousMechanicalAngle, ElectricalAngle, SinePwm, Svpwm,
         frame::{Abc, Dq},
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
     };
 
     fn test_motor() -> MotorParams {
-        MotorParams {
-            pole_pairs: 7,
-            phase_resistance_ohm: Ohms::new(0.12),
-            d_inductance_h: Henries::new(0.000_03),
-            q_inductance_h: Henries::new(0.000_03),
-            flux_linkage_weber: Some(Webers::new(0.005)),
-            electrical_angle_offset: ElectricalAngle::new(0.0),
-            max_phase_current: Amps::new(20.0),
-            max_mech_speed: Some(RadPerSec::new(100.0)),
-        }
+        MotorParams::from_model_and_limits(
+            MotorModel {
+                pole_pairs: 7,
+                phase_resistance_ohm: Ohms::new(0.12),
+                d_inductance_h: Henries::new(0.000_03),
+                q_inductance_h: Henries::new(0.000_03),
+                flux_linkage_weber: Webers::new(0.005),
+                electrical_angle_offset: ElectricalAngle::new(0.0),
+            },
+            MotorLimits {
+                max_phase_current: Amps::new(20.0),
+                max_mech_speed: Some(RadPerSec::new(100.0)),
+            },
+        )
     }
 
     fn test_actuator() -> ActuatorParams {
-        ActuatorParams {
-            gear_ratio: 5.0,
-            max_output_velocity: Some(RadPerSec::new(20.0)),
-            max_output_torque: Some(NewtonMeters::new(20.0)),
-            compensation: ActuatorCompensationConfig::disabled(),
-        }
+        ActuatorParams::from_model_limits_and_compensation(
+            crate::actuator::ActuatorModel { gear_ratio: 5.0 },
+            ActuatorLimits {
+                max_output_velocity: Some(RadPerSec::new(20.0)),
+                max_output_torque: Some(NewtonMeters::new(20.0)),
+            },
+            ActuatorCompensationConfig::disabled(),
+        )
     }
 
     fn test_inverter() -> InverterParams {
@@ -1088,11 +1093,11 @@ mod tests {
             phase_currents: Abc::new(Amps::ZERO, Amps::ZERO, Amps::ZERO),
             bus_voltage: Volts::new(24.0),
             rotor: RotorEstimate {
-                mechanical_angle: MechanicalAngle::new(0.0),
+                mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 mechanical_velocity: RadPerSec::ZERO,
             },
             actuator: ActuatorEstimate {
-                output_angle: MechanicalAngle::new(0.0),
+                output_angle: ContinuousMechanicalAngle::new(0.0),
                 output_velocity: RadPerSec::ZERO,
             },
             dt_seconds: 1.0 / 20_000.0,
@@ -1118,8 +1123,8 @@ mod tests {
         assert_eq!(output.measured_idq, Dq::new(Amps::ZERO, Amps::ZERO));
         assert_eq!(output.commanded_vdq, Dq::new(Volts::ZERO, Volts::ZERO));
         assert!(!output.saturated);
-        assert_eq!(output.error, None);
         assert_eq!(controller.status().state, MotorState::Running);
+        assert_eq!(controller.status().active_error, None);
     }
 
     #[test]
@@ -1137,7 +1142,6 @@ mod tests {
         input.bus_voltage = Volts::new(0.0);
         let output = controller.fast_tick(input);
 
-        assert_eq!(output.error, Some(Error::InvalidBusVoltage));
         assert_eq!(output.phase_duty.a.get(), 0.5);
         assert_eq!(controller.status().state, MotorState::Faulted);
         assert_eq!(
@@ -1158,11 +1162,14 @@ mod tests {
         controller.enable();
 
         let mut input = test_input();
-        input.rotor.mechanical_angle = MechanicalAngle::new(f32::NAN);
-        let output = controller.fast_tick(input);
+        input.rotor.mechanical_angle = ContinuousMechanicalAngle::new(f32::NAN);
+        let _output = controller.fast_tick(input);
 
-        assert_eq!(output.error, Some(Error::InvalidRotorAngle));
         assert_eq!(controller.status().state, MotorState::Faulted);
+        assert_eq!(
+            controller.status().active_error,
+            Some(Error::InvalidRotorAngle)
+        );
     }
 
     #[test]
@@ -1180,7 +1187,7 @@ mod tests {
         let output = controller.fast_tick(test_input());
 
         assert!(output.commanded_vdq.q.get() > 0.0);
-        assert_eq!(output.error, None);
+        assert_eq!(controller.status().active_error, None);
     }
 
     #[test]
@@ -1272,7 +1279,7 @@ mod tests {
 
         let output = controller.fast_tick(test_input());
 
-        assert_eq!(output.error, None);
+        assert_eq!(controller.status().active_error, None);
         for duty in [
             output.phase_duty.a,
             output.phase_duty.b,
@@ -1459,7 +1466,7 @@ mod tests {
             test_config(),
         );
         controller.set_mode(ControlMode::Position);
-        controller.set_position_target(MechanicalAngle::new(1.0));
+        controller.set_position_target(ContinuousMechanicalAngle::new(1.0));
         controller.enable();
         controller.fast_tick(test_input());
 
@@ -1481,11 +1488,11 @@ mod tests {
         controller.enable();
 
         let mut input = test_input();
-        input.actuator.output_angle = MechanicalAngle::new(6.0);
+        input.actuator.output_angle = ContinuousMechanicalAngle::new(6.0);
         controller.fast_tick(input);
 
         let mut wrapped_input = test_input();
-        wrapped_input.actuator.output_angle = MechanicalAngle::new(0.2);
+        wrapped_input.actuator.output_angle = ContinuousMechanicalAngle::new(0.2);
         controller.fast_tick(wrapped_input);
 
         assert!(

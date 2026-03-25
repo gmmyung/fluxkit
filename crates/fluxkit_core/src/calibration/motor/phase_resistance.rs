@@ -13,7 +13,7 @@ use fluxkit_math::{
     units::{Amps, Ohms, RadPerSec, Volts},
 };
 
-use super::error::CalibrationError;
+use crate::calibration::shared::{CalibrationError, timing::HoldTiming};
 
 /// Static configuration for phase-resistance calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,7 +39,7 @@ pub struct PhaseResistanceCalibrationConfig {
 impl PhaseResistanceCalibrationConfig {
     /// Returns a conservative default suitable for host-side bring-up and
     /// simulator-backed tests.
-    pub const fn default_for_hold() -> Self {
+    pub fn default_for_hold() -> Self {
         Self {
             align_voltage_mag: Volts::new(1.0),
             align_stator_angle: ElectricalAngle::new(0.0),
@@ -74,29 +74,13 @@ pub struct PhaseResistanceCalibrationResult {
     pub phase_resistance_ohm: Ohms,
 }
 
-/// Compact state of the phase-resistance calibration procedure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum PhaseResistanceCalibrationState {
-    /// The calibrator is holding the field and waiting for settle.
-    Aligning,
-    /// The calibrator is averaging steady-state current.
-    Sampling,
-    /// The procedure completed successfully.
-    Complete,
-    /// The procedure failed.
-    Failed(CalibrationError),
-}
-
 /// Pure state machine for phase-resistance calibration.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhaseResistanceCalibrator {
     config: PhaseResistanceCalibrationConfig,
-    elapsed_seconds: f32,
-    settled_seconds: f32,
+    timing: HoldTiming,
     sample_seconds: f32,
     projected_current_integral: f32,
     result: Option<PhaseResistanceCalibrationResult>,
@@ -112,27 +96,12 @@ impl PhaseResistanceCalibrator {
 
         Ok(Self {
             config,
-            elapsed_seconds: 0.0,
-            settled_seconds: 0.0,
+            timing: HoldTiming::new(),
             sample_seconds: 0.0,
             projected_current_integral: 0.0,
             result: None,
             error: None,
         })
-    }
-
-    /// Returns the current calibration state.
-    #[inline]
-    pub const fn state(&self) -> PhaseResistanceCalibrationState {
-        if let Some(error) = self.error {
-            PhaseResistanceCalibrationState::Failed(error)
-        } else if self.result.is_some() {
-            PhaseResistanceCalibrationState::Complete
-        } else if self.sample_seconds > 0.0 {
-            PhaseResistanceCalibrationState::Sampling
-        } else {
-            PhaseResistanceCalibrationState::Aligning
-        }
     }
 
     /// Returns the finished result when calibration has succeeded.
@@ -170,24 +139,27 @@ impl PhaseResistanceCalibrator {
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
 
-        self.elapsed_seconds += input.dt_seconds;
-        if self.elapsed_seconds >= self.config.timeout_seconds {
-            self.error = Some(CalibrationError::Timeout);
+        if let Some(error) = self
+            .timing
+            .advance_elapsed(input.dt_seconds, self.config.timeout_seconds)
+        {
+            self.error = Some(error);
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
 
         if input.mechanical_velocity.get().abs() > self.config.settle_velocity_threshold.get() {
-            self.settled_seconds = 0.0;
+            self.timing.reset_settle();
             self.sample_seconds = 0.0;
             self.projected_current_integral = 0.0;
             return self.commanded_voltage_alpha_beta();
         }
 
-        if self.sample_seconds == 0.0 {
-            self.settled_seconds += input.dt_seconds;
-            if self.settled_seconds < self.config.settle_time_seconds {
-                return self.commanded_voltage_alpha_beta();
-            }
+        if self.sample_seconds == 0.0
+            && !self
+                .timing
+                .settle_ready(true, input.dt_seconds, self.config.settle_time_seconds)
+        {
+            return self.commanded_voltage_alpha_beta();
         }
 
         let (s, c) = sin_cos(self.config.align_stator_angle.get());
@@ -253,7 +225,7 @@ mod tests {
 
     use super::{
         CalibrationError, PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
-        PhaseResistanceCalibrationState, PhaseResistanceCalibrator,
+        PhaseResistanceCalibrator,
     };
 
     #[test]
@@ -272,15 +244,12 @@ mod tests {
                 mechanical_velocity: fluxkit_math::units::RadPerSec::ZERO,
                 dt_seconds: 0.005,
             });
-            if calibrator.state() == PhaseResistanceCalibrationState::Complete {
+            if calibrator.result().is_some() {
                 break;
             }
         }
 
-        assert_eq!(
-            calibrator.state(),
-            PhaseResistanceCalibrationState::Complete
-        );
+        assert_eq!(calibrator.error(), None);
         let result = calibrator.result().unwrap();
         assert!((result.phase_resistance_ohm.get() - 0.5).abs() < 1.0e-6);
     }
@@ -304,9 +273,6 @@ mod tests {
             });
         }
 
-        assert_eq!(
-            calibrator.state(),
-            PhaseResistanceCalibrationState::Failed(CalibrationError::Timeout)
-        );
+        assert_eq!(calibrator.error(), Some(CalibrationError::Timeout));
     }
 }

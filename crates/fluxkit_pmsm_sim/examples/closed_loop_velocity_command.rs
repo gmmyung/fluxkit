@@ -1,12 +1,12 @@
 use std::{env, error::Error, fs};
 
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorParams, ControlMode, CurrentLoopConfig,
-    FastLoopInput, FrictionCompensation, InverterParams, MotorController, MotorParams,
-    RotorEstimate,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlMode,
+    CurrentLoopConfig, FastLoopInput, FrictionCompensation, InverterParams, MotorController,
+    MotorLimits, MotorParams, RotorEstimate,
 };
 use fluxkit_math::{
-    MechanicalAngle,
+    ContinuousMechanicalAngle,
     angle::mechanical_to_electrical,
     inverse_clarke, inverse_park,
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
@@ -140,13 +140,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
     let state = *plant.state();
-    let wrapped_mechanical_angle = state.mechanical_angle.wrapped_0_2pi();
-    let wrapped_output_angle =
-        MechanicalAngle::new(state.mechanical_angle.get() / plant.params().actuator.gear_ratio)
-            .wrapped_0_2pi();
-    let electrical_angle =
-        mechanical_to_electrical(wrapped_mechanical_angle, plant.params().pole_pairs as u32)
-            .wrapped_pm_pi();
+    let wrapped_mechanical_angle = state.mechanical_angle.wrapped();
+    let wrapped_output_angle = ContinuousMechanicalAngle::new(
+        state.mechanical_angle.get() / plant.params().actuator.gear_ratio,
+    )
+    .wrapped();
+    let electrical_angle = mechanical_to_electrical(
+        wrapped_mechanical_angle.into(),
+        plant.params().pole_pairs as u32,
+    );
     let phase_currents = inverse_clarke(inverse_park(
         state.current_dq.map(|current| current.get()),
         electrical_angle.get(),
@@ -157,11 +159,11 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
         phase_currents,
         bus_voltage,
         rotor: RotorEstimate {
-            mechanical_angle: wrapped_mechanical_angle,
+            mechanical_angle: wrapped_mechanical_angle.into(),
             mechanical_velocity: state.mechanical_velocity,
         },
         actuator: ActuatorEstimate {
-            output_angle: wrapped_output_angle,
+            output_angle: wrapped_output_angle.into(),
             output_velocity: RadPerSec::new(
                 state.mechanical_velocity.get() / plant.params().actuator.gear_ratio,
             ),
@@ -345,10 +347,12 @@ fn motor_params() -> MotorParams {
         phase_resistance_ohm: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
-        flux_linkage_weber: Some(Webers::new(0.005)),
+        flux_linkage_weber: Webers::new(0.005),
         electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
-        max_phase_current: Amps::new(10.0),
-        max_mech_speed: Some(RadPerSec::new(150.0)),
+        limits: MotorLimits {
+            max_phase_current: Amps::new(10.0),
+            max_mech_speed: Some(RadPerSec::new(150.0)),
+        },
     }
 }
 
@@ -386,17 +390,17 @@ fn config() -> CurrentLoopConfig {
 fn actuator_params_disabled() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig::disabled(),
+        limits: ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
+        },
     }
 }
 
 fn actuator_params_compensated() -> ActuatorParams {
     ActuatorParams {
         gear_ratio: GEAR_RATIO,
-        max_output_velocity: Some(RadPerSec::new(30.0)),
-        max_output_torque: Some(NewtonMeters::new(10.0)),
         compensation: ActuatorCompensationConfig {
             friction: FrictionCompensation {
                 enabled: true,
@@ -409,6 +413,10 @@ fn actuator_params_compensated() -> ActuatorParams {
                 zero_velocity_blend_band: RadPerSec::new(0.5),
             },
             max_total_torque: NewtonMeters::new(0.4),
+        },
+        limits: ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(30.0)),
+            max_output_torque: Some(NewtonMeters::new(10.0)),
         },
     }
 }

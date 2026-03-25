@@ -7,7 +7,7 @@ use fluxkit_math::{MechanicalAngle, units::RadPerSec};
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OutputReading {
-    /// Wrapped output-axis mechanical angle from the output encoder.
+    /// Wrapped output-axis mechanical angle from the output encoder in `[-pi, pi)`.
     pub mechanical_angle: MechanicalAngle,
     /// Output-axis mechanical speed derived from the output encoder path.
     pub mechanical_velocity: RadPerSec,

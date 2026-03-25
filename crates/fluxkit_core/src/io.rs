@@ -1,27 +1,26 @@
 //! Fast-loop input and output contracts.
 
 use fluxkit_math::{
-    MechanicalAngle,
+    ContinuousMechanicalAngle,
     frame::{Abc, Dq},
     modulation::PhaseDuty,
     units::{Amps, RadPerSec, Volts},
 };
 
 use crate::actuator::ActuatorEstimate;
-use crate::error::Error;
 
 /// Rotor angle and speed estimate supplied by platform code.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RotorEstimate {
-    /// Mechanical rotor angle from the absolute encoder.
+    /// Continuous mechanical rotor angle.
     ///
     /// The controller derives electrical angle internally from this value,
     /// `MotorParams::pole_pairs`, and `MotorParams::electrical_angle_offset`.
     ///
     /// This is required by `Position` mode.
-    pub mechanical_angle: MechanicalAngle,
+    pub mechanical_angle: ContinuousMechanicalAngle,
     /// Mechanical rotor velocity estimate derived from the encoder path.
     ///
     /// This is used by current-loop feedforward and the velocity loop.
@@ -58,6 +57,4 @@ pub struct FastLoopOutput {
     pub commanded_vdq: Dq<Volts>,
     /// `true` when the controller or modulator clipped the request.
     pub saturated: bool,
-    /// Error observed during this tick, if any.
-    pub error: Option<Error>,
 }

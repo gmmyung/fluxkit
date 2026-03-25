@@ -16,7 +16,7 @@ use fluxkit_math::{
     units::{RadPerSec, Volts},
 };
 
-use super::error::CalibrationError;
+use crate::calibration::shared::CalibrationError;
 
 /// Static configuration for slow-sweep pole-pair and offset calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,7 +47,7 @@ pub struct PolePairsAndOffsetCalibrationConfig {
 
 impl PolePairsAndOffsetCalibrationConfig {
     /// Returns a conservative default suitable for slow host-side testing.
-    pub const fn default_for_sweep() -> Self {
+    pub fn default_for_sweep() -> Self {
         Self {
             align_voltage_mag: Volts::new(1.0),
             align_stator_angle: ElectricalAngle::new(0.0),
@@ -87,23 +87,6 @@ pub struct PolePairsAndOffsetCalibrationResult {
     pub electrical_angle_offset: ElectricalAngle,
 }
 
-/// Compact state of the sweep procedure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum PolePairsAndOffsetCalibrationState {
-    /// Waiting for the rotor to settle to the initial hold vector.
-    InitialAlign,
-    /// Sweeping the commanded stator vector.
-    Sweeping,
-    /// Waiting for the rotor to settle at the sweep endpoint.
-    FinalAlign,
-    /// The procedure completed successfully.
-    Complete,
-    /// The procedure failed.
-    Failed(CalibrationError),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InternalState {
     InitialAlign,
@@ -120,7 +103,7 @@ pub struct PolePairsAndOffsetCalibrator {
     state: InternalState,
     elapsed_seconds: f32,
     settled_seconds: f32,
-    commanded_electrical_angle: ElectricalAngle,
+    commanded_electrical_angle: f32,
     start_unwrapped_mechanical_angle: Option<f32>,
     current_unwrapped_mechanical_angle: f32,
     last_wrapped_mechanical_angle: Option<MechanicalAngle>,
@@ -136,7 +119,7 @@ impl PolePairsAndOffsetCalibrator {
         }
 
         Ok(Self {
-            commanded_electrical_angle: config.align_stator_angle,
+            commanded_electrical_angle: config.align_stator_angle.get(),
             config,
             state: InternalState::InitialAlign,
             elapsed_seconds: 0.0,
@@ -147,22 +130,6 @@ impl PolePairsAndOffsetCalibrator {
             result: None,
             error: None,
         })
-    }
-
-    /// Returns the current procedure state.
-    #[inline]
-    pub const fn state(&self) -> PolePairsAndOffsetCalibrationState {
-        if let Some(error) = self.error {
-            PolePairsAndOffsetCalibrationState::Failed(error)
-        } else if self.result.is_some() {
-            PolePairsAndOffsetCalibrationState::Complete
-        } else {
-            match self.state {
-                InternalState::InitialAlign => PolePairsAndOffsetCalibrationState::InitialAlign,
-                InternalState::Sweeping => PolePairsAndOffsetCalibrationState::Sweeping,
-                InternalState::FinalAlign => PolePairsAndOffsetCalibrationState::FinalAlign,
-            }
-        }
     }
 
     /// Returns the finished result when calibration has succeeded.
@@ -183,7 +150,7 @@ impl PolePairsAndOffsetCalibrator {
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
 
-        let (s, c) = sin_cos(self.commanded_electrical_angle.get());
+        let (s, c) = sin_cos(self.commanded_electrical_angle);
         let mag = self.config.align_voltage_mag.get();
         AlphaBeta::new(Volts::new(mag * c), Volts::new(mag * s))
     }
@@ -219,17 +186,15 @@ impl PolePairsAndOffsetCalibrator {
             }
             InternalState::Sweeping => {
                 let advanced = self.config.sweep_electrical_velocity.get() * input.dt_seconds;
-                self.commanded_electrical_angle =
-                    ElectricalAngle::new(self.commanded_electrical_angle.get() + advanced);
+                self.commanded_electrical_angle += advanced;
 
                 let signed_target_travel =
                     self.config.sweep_electrical_cycles * self.config.sweep_direction() * TAU;
                 let swept_travel =
-                    self.commanded_electrical_angle.get() - self.config.align_stator_angle.get();
+                    self.commanded_electrical_angle - self.config.align_stator_angle.get();
                 if swept_travel.abs() >= signed_target_travel.abs() {
-                    self.commanded_electrical_angle = ElectricalAngle::new(
-                        self.config.align_stator_angle.get() + signed_target_travel,
-                    );
+                    self.commanded_electrical_angle =
+                        self.config.align_stator_angle.get() + signed_target_travel;
                     self.settled_seconds = 0.0;
                     self.state = InternalState::FinalAlign;
                 }
@@ -265,11 +230,10 @@ impl PolePairsAndOffsetCalibrator {
 
                     let pole_pairs = rounded as u8;
                     let measured_electrical =
-                        mechanical_to_electrical(input.mechanical_angle, pole_pairs as u32);
+                        mechanical_to_electrical(input.mechanical_angle.into(), pole_pairs as u32);
                     let offset = ElectricalAngle::new(
-                        self.commanded_electrical_angle.get() - measured_electrical.get(),
-                    )
-                    .wrapped_pm_pi();
+                        self.commanded_electrical_angle - measured_electrical.get(),
+                    );
                     self.result = Some(PolePairsAndOffsetCalibrationResult {
                         pole_pairs,
                         electrical_angle_offset: offset,
@@ -344,10 +308,10 @@ impl PolePairsAndOffsetCalibrationConfig {
 mod tests {
     use super::{
         PolePairsAndOffsetCalibrationConfig, PolePairsAndOffsetCalibrationInput,
-        PolePairsAndOffsetCalibrationState, PolePairsAndOffsetCalibrator,
+        PolePairsAndOffsetCalibrator,
     };
     use fluxkit_math::{
-        ElectricalAngle, MechanicalAngle, angle::wrap_0_2pi, scalar::TAU, units::RadPerSec,
+        ElectricalAngle, MechanicalAngle, angle::wrap, scalar::TAU, units::RadPerSec,
     };
 
     #[test]
@@ -379,9 +343,8 @@ mod tests {
                 0.0
             };
             commanded_electrical_angle += electrical_velocity * dt;
-            let mechanical_angle = MechanicalAngle::new(wrap_0_2pi(
-                commanded_electrical_angle / pole_pairs + encoder_bias,
-            ));
+            let mechanical_angle =
+                MechanicalAngle::new(wrap(commanded_electrical_angle / pole_pairs + encoder_bias));
             let velocity = RadPerSec::new(electrical_velocity / pole_pairs);
             let _ = calibrator.tick(PolePairsAndOffsetCalibrationInput {
                 mechanical_angle,
@@ -389,11 +352,12 @@ mod tests {
                 dt_seconds: dt,
             });
 
-            if calibrator.state() == PolePairsAndOffsetCalibrationState::Complete {
+            if calibrator.result().is_some() {
                 break;
             }
         }
 
+        assert_eq!(calibrator.error(), None);
         let result = calibrator.result().unwrap();
         assert_eq!(result.pole_pairs, 7);
     }

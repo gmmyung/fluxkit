@@ -11,7 +11,7 @@ use fluxkit_math::{MechanicalAngle, units::RadPerSec};
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RotorReading {
-    /// Mechanical rotor angle from the absolute encoder.
+    /// Wrapped mechanical rotor angle from the absolute encoder in `[-pi, pi)`.
     pub mechanical_angle: MechanicalAngle,
     /// Mechanical rotor speed derived from the encoder path.
     pub mechanical_velocity: RadPerSec,

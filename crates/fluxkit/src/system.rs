@@ -8,7 +8,10 @@ use fluxkit_core::{
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputSensor, PhasePwm, RotorSensor,
 };
-use fluxkit_math::{Modulator, Svpwm};
+use fluxkit_math::{
+    MechanicalMotionEstimate, MechanicalMotionSample, MechanicalMotionSeed, Modulator,
+    WrappedEstimator,
+};
 
 /// Concrete hardware handles required to run one motor-control loop.
 #[derive(Debug)]
@@ -86,25 +89,82 @@ where
 
 /// Encapsulated synchronous motor stack: hardware plus pure controller.
 #[derive(Debug)]
-pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD = Svpwm> {
+pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
     hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
     controller: MotorController<MOD>,
+    rotor_estimator: RotorEst,
+    output_estimator: OutputEst,
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT> MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, Svpwm> {
-    /// Creates a new motor system using the default SVPWM modulator.
+/// Helper trait for estimators that consume wrapped mechanical motion samples
+/// and produce continuous mechanical motion estimates.
+pub trait MechanicalMotionEstimator:
+    WrappedEstimator<
+        Input = MechanicalMotionSample,
+        Output = MechanicalMotionEstimate,
+        Seed = MechanicalMotionSeed,
+    >
+{
+}
+
+impl<T> MechanicalMotionEstimator for T where
+    T: WrappedEstimator<
+            Input = MechanicalMotionSample,
+            Output = MechanicalMotionEstimate,
+            Seed = MechanicalMotionSeed,
+        >
+{
+}
+
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+where
+    RotorEst: MechanicalMotionEstimator,
+    OutputEst: MechanicalMotionEstimator,
+{
+    /// Creates a new motor system with an explicit controller modulator and
+    /// explicit rotor/output estimators.
     pub fn new(
         hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
-        controller: MotorController<Svpwm>,
+        controller: MotorController<MOD>,
+        rotor_estimator: RotorEst,
+        output_estimator: OutputEst,
     ) -> Self {
         Self {
             hardware,
             controller,
+            rotor_estimator,
+            output_estimator,
         }
+    }
+
+    /// Returns shared access to the rotor-side motion estimator.
+    #[inline]
+    pub const fn rotor_estimator(&self) -> &RotorEst {
+        &self.rotor_estimator
+    }
+
+    /// Returns mutable access to the rotor-side motion estimator.
+    #[inline]
+    pub fn rotor_estimator_mut(&mut self) -> &mut RotorEst {
+        &mut self.rotor_estimator
+    }
+
+    /// Returns shared access to the output-side motion estimator.
+    #[inline]
+    pub const fn output_estimator(&self) -> &OutputEst {
+        &self.output_estimator
+    }
+
+    /// Returns mutable access to the output-side motion estimator.
+    #[inline]
+    pub fn output_estimator_mut(&mut self) -> &mut OutputEst {
+        &mut self.output_estimator
     }
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD> MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -112,18 +172,9 @@ where
     ROTOR: RotorSensor,
     OUTPUT: OutputSensor,
     MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
+    OutputEst: MechanicalMotionEstimator,
 {
-    /// Creates a new motor system with an explicit controller modulator.
-    pub fn new_with_controller(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
-        controller: MotorController<MOD>,
-    ) -> Self {
-        Self {
-            hardware,
-            controller,
-        }
-    }
-
     /// Returns shared access to the owned hardware handles.
     #[inline]
     pub const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
@@ -155,8 +206,15 @@ where
     ) -> (
         MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
         MotorController<MOD>,
+        RotorEst,
+        OutputEst,
     ) {
-        (self.hardware, self.controller)
+        (
+            self.hardware,
+            self.controller,
+            self.rotor_estimator,
+            self.output_estimator,
+        )
     }
 
     /// Enables the underlying PWM and then enables the controller.
@@ -231,18 +289,32 @@ where
             .output
             .read_output()
             .map_err(MotorSystemError::Output)?;
+        let rotor_motion = self.rotor_estimator.update(
+            MechanicalMotionSample {
+                wrapped_value: rotor.mechanical_angle,
+                measured_rate: rotor.mechanical_velocity,
+            },
+            dt_seconds,
+        );
+        let output_motion = self.output_estimator.update(
+            MechanicalMotionSample {
+                wrapped_value: output_axis.mechanical_angle,
+                measured_rate: output_axis.mechanical_velocity,
+            },
+            dt_seconds,
+        );
 
         let output = self.controller.tick(
             FastLoopInput {
                 phase_currents: current.currents,
                 bus_voltage,
                 rotor: RotorEstimate {
-                    mechanical_angle: rotor.mechanical_angle,
-                    mechanical_velocity: rotor.mechanical_velocity,
+                    mechanical_angle: rotor_motion.unwrapped(),
+                    mechanical_velocity: rotor_motion.velocity(),
                 },
                 actuator: ActuatorEstimate {
-                    output_angle: output_axis.mechanical_angle,
-                    output_velocity: output_axis.mechanical_velocity,
+                    output_angle: output_motion.unwrapped(),
+                    output_velocity: output_motion.velocity(),
                 },
                 dt_seconds,
             },
@@ -278,15 +350,19 @@ mod tests {
     use core::convert::Infallible;
 
     use fluxkit_core::{
-        ActuatorParams, ControlMode, CurrentLoopConfig, InverterParams, MotorParams, MotorState,
-        TickSchedule,
+        ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode, CurrentLoopConfig,
+        InverterParams, MotorLimits, MotorModel, MotorParams, MotorState, TickSchedule,
     };
     use fluxkit_hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
         PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
-        MechanicalAngle,
+        ContinuousMechanicalAngle, MechanicalAngle, WrappedEstimator,
+        estimation::{
+            AngularEstimate, EstimatorSeed, MechanicalMotionEstimate, MechanicalMotionSample,
+            MechanicalMotionSeed,
+        },
         frame::Abc,
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts},
     };
@@ -379,17 +455,69 @@ mod tests {
         }
     }
 
-    fn motor_params() -> MotorParams {
-        MotorParams {
-            pole_pairs: 7,
-            phase_resistance_ohm: Ohms::new(0.08),
-            d_inductance_h: Henries::new(0.00012),
-            q_inductance_h: Henries::new(0.00012),
-            flux_linkage_weber: Some(fluxkit_math::units::Webers::new(0.05)),
-            electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
-            max_phase_current: Amps::new(20.0),
-            max_mech_speed: None,
+    #[derive(Clone, Copy, Debug)]
+    struct FixedEstimator {
+        output: MechanicalMotionEstimate,
+    }
+
+    impl WrappedEstimator for FixedEstimator {
+        type Input = MechanicalMotionSample;
+        type Output = MechanicalMotionEstimate;
+        type Seed = MechanicalMotionSeed;
+
+        fn initialize(&mut self, seed: Self::Seed) {
+            match seed {
+                EstimatorSeed::Uninitialized => {
+                    self.output = AngularEstimate::new(
+                        MechanicalAngle::new(0.0),
+                        ContinuousMechanicalAngle::new(0.0),
+                        RadPerSec::ZERO,
+                    );
+                }
+                EstimatorSeed::Value(wrapped_value) => {
+                    self.output = AngularEstimate::new(
+                        wrapped_value.wrapped(),
+                        wrapped_value,
+                        RadPerSec::ZERO,
+                    );
+                }
+                EstimatorSeed::ValueRate {
+                    value: wrapped_value,
+                    rate: measured_rate,
+                } => {
+                    self.output =
+                        AngularEstimate::new(wrapped_value.wrapped(), wrapped_value, measured_rate);
+                }
+                EstimatorSeed::Estimate(estimate) => {
+                    self.output = estimate;
+                }
+            }
         }
+
+        fn output(&self) -> Self::Output {
+            self.output
+        }
+
+        fn update(&mut self, _sample: Self::Input, _dt: f32) -> Self::Output {
+            self.output
+        }
+    }
+
+    fn motor_params() -> MotorParams {
+        MotorParams::from_model_and_limits(
+            MotorModel {
+                pole_pairs: 7,
+                phase_resistance_ohm: Ohms::new(0.08),
+                d_inductance_h: Henries::new(0.00012),
+                q_inductance_h: Henries::new(0.00012),
+                flux_linkage_weber: fluxkit_math::units::Webers::new(0.05),
+                electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
+            },
+            MotorLimits {
+                max_phase_current: Amps::new(20.0),
+                max_mech_speed: None,
+            },
+        )
     }
 
     fn inverter_params() -> InverterParams {
@@ -404,12 +532,14 @@ mod tests {
     }
 
     fn actuator_params() -> ActuatorParams {
-        ActuatorParams {
-            gear_ratio: 5.0,
-            max_output_velocity: Some(RadPerSec::new(10.0)),
-            max_output_torque: Some(NewtonMeters::new(10.0)),
-            compensation: fluxkit_core::ActuatorCompensationConfig::disabled(),
-        }
+        ActuatorParams::from_model_limits_and_compensation(
+            ActuatorModel { gear_ratio: 5.0 },
+            ActuatorLimits {
+                max_output_velocity: Some(RadPerSec::new(10.0)),
+                max_output_torque: Some(NewtonMeters::new(10.0)),
+            },
+            fluxkit_core::ActuatorCompensationConfig::disabled(),
+        )
     }
 
     fn current_loop_config() -> CurrentLoopConfig {
@@ -448,13 +578,13 @@ mod tests {
             },
             rotor: FakeRotor {
                 reading: RotorReading {
-                    mechanical_angle: MechanicalAngle::new(0.0),
+                    mechanical_angle: fluxkit_math::MechanicalAngle::new(0.0),
                     mechanical_velocity: RadPerSec::new(0.0),
                 },
             },
             output: FakeOutput {
                 reading: OutputReading {
-                    mechanical_angle: MechanicalAngle::new(0.0),
+                    mechanical_angle: fluxkit_math::MechanicalAngle::new(0.0),
                     mechanical_velocity: RadPerSec::new(0.0),
                 },
             },
@@ -469,15 +599,20 @@ mod tests {
             actuator_params(),
             current_loop_config(),
         );
-        let mut system = MotorSystem::new(hardware(CurrentSampleValidity::Valid), controller);
+        let mut system = MotorSystem::new(
+            hardware(CurrentSampleValidity::Valid),
+            controller,
+            fluxkit_math::PassThroughEstimator::new(),
+            fluxkit_math::PassThroughEstimator::new(),
+        );
 
         system.enable().unwrap();
         system.controller_mut().set_mode(ControlMode::Current);
         system.controller_mut().set_iq_target(Amps::new(2.0));
 
-        let output = system.fast_tick(0.000_05).unwrap();
+        let _output = system.fast_tick(0.000_05).unwrap();
 
-        assert!(output.error.is_none());
+        assert_eq!(system.controller().status().active_error, None);
         assert!(system.hardware().pwm.enabled);
         assert_eq!(system.controller().status().state, MotorState::Running);
         assert!(system.hardware().pwm.duty.a.get() >= 0.0);
@@ -493,7 +628,12 @@ mod tests {
             actuator_params(),
             current_loop_config(),
         );
-        let mut system = MotorSystem::new(hardware(CurrentSampleValidity::Invalid), controller);
+        let mut system = MotorSystem::new(
+            hardware(CurrentSampleValidity::Invalid),
+            controller,
+            fluxkit_math::PassThroughEstimator::new(),
+            fluxkit_math::PassThroughEstimator::new(),
+        );
         system.hardware_mut().pwm.duty = Abc::new(Duty::new(0.2), Duty::new(0.7), Duty::new(0.6));
 
         let error = system.fast_tick(0.000_05).unwrap_err();
@@ -510,13 +650,18 @@ mod tests {
             actuator_params(),
             current_loop_config(),
         );
-        let mut system = MotorSystem::new(hardware(CurrentSampleValidity::Valid), controller);
+        let mut system = MotorSystem::new(
+            hardware(CurrentSampleValidity::Valid),
+            controller,
+            fluxkit_math::PassThroughEstimator::new(),
+            fluxkit_math::PassThroughEstimator::new(),
+        );
 
         system.enable().unwrap();
         system.controller_mut().set_mode(ControlMode::Position);
         system
             .controller_mut()
-            .set_position_target(MechanicalAngle::new(1.0));
+            .set_position_target(ContinuousMechanicalAngle::new(1.0));
 
         let first = system
             .tick(0.000_05, TickSchedule::with_medium(0.001))
@@ -534,5 +679,48 @@ mod tests {
                 .abs()
                 < 1.0e-6
         );
+    }
+
+    #[test]
+    fn explicit_estimators_drive_controller_side_motion_estimates() {
+        let controller = fluxkit_core::MotorController::new(
+            motor_params(),
+            inverter_params(),
+            actuator_params(),
+            current_loop_config(),
+        );
+        let mut system = MotorSystem::new(
+            hardware(CurrentSampleValidity::Valid),
+            controller,
+            FixedEstimator {
+                output: AngularEstimate::new(
+                    MechanicalAngle::new(0.3),
+                    ContinuousMechanicalAngle::new(1.3),
+                    RadPerSec::new(4.0),
+                ),
+            },
+            FixedEstimator {
+                output: AngularEstimate::new(
+                    MechanicalAngle::new(0.6),
+                    ContinuousMechanicalAngle::new(2.6),
+                    RadPerSec::new(1.5),
+                ),
+            },
+        );
+
+        system.enable().unwrap();
+        system.controller_mut().set_mode(ControlMode::Current);
+        let _ = system.fast_tick(0.000_05).unwrap();
+
+        let status = system.controller().status();
+        assert_eq!(
+            status.last_rotor_mechanical_angle,
+            ContinuousMechanicalAngle::new(1.3)
+        );
+        assert_eq!(
+            status.last_output_mechanical_angle,
+            ContinuousMechanicalAngle::new(2.6)
+        );
+        assert_eq!(status.last_output_mechanical_velocity, RadPerSec::new(1.5));
     }
 }

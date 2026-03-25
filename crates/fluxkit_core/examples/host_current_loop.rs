@@ -1,25 +1,30 @@
 use fluxkit_core::{
-    ActuatorEstimate, ActuatorParams, ControlMode, CurrentLoopConfig, FastLoopInput,
-    InverterParams, MotorController, MotorParams, RotorEstimate,
+    ActuatorEstimate, ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode,
+    CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorLimits, MotorModel,
+    MotorParams, RotorEstimate,
 };
 use fluxkit_math::{
-    MechanicalAngle,
+    ContinuousMechanicalAngle,
     frame::Dq,
     inverse_clarke, inverse_park,
     units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts, Webers},
 };
 
 fn main() {
-    let motor = MotorParams {
-        pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
-        d_inductance_h: Henries::new(0.000_03),
-        q_inductance_h: Henries::new(0.000_03),
-        flux_linkage_weber: Some(Webers::new(0.005)),
-        electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
-        max_phase_current: Amps::new(20.0),
-        max_mech_speed: Some(RadPerSec::new(500.0)),
-    };
+    let motor = MotorParams::from_model_and_limits(
+        MotorModel {
+            pole_pairs: 7,
+            phase_resistance_ohm: Ohms::new(0.12),
+            d_inductance_h: Henries::new(0.000_03),
+            q_inductance_h: Henries::new(0.000_03),
+            flux_linkage_weber: Webers::new(0.005),
+            electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
+        },
+        MotorLimits {
+            max_phase_current: Amps::new(20.0),
+            max_mech_speed: Some(RadPerSec::new(500.0)),
+        },
+    );
     let inverter = InverterParams {
         pwm_frequency_hz: Hertz::new(20_000.0),
         min_duty: Duty::new(0.0),
@@ -45,12 +50,14 @@ fn main() {
         max_current_ref_derivative_amps_per_sec: 10_000.0,
         enable_current_feedforward: true,
     };
-    let actuator = ActuatorParams {
-        gear_ratio: 5.0,
-        max_output_velocity: Some(RadPerSec::new(100.0)),
-        max_output_torque: Some(fluxkit_math::units::NewtonMeters::new(20.0)),
-        compensation: fluxkit_core::ActuatorCompensationConfig::disabled(),
-    };
+    let actuator = ActuatorParams::from_model_limits_and_compensation(
+        ActuatorModel { gear_ratio: 5.0 },
+        ActuatorLimits {
+            max_output_velocity: Some(RadPerSec::new(100.0)),
+            max_output_torque: Some(fluxkit_math::units::NewtonMeters::new(20.0)),
+        },
+        fluxkit_core::ActuatorCompensationConfig::disabled(),
+    );
 
     let mut controller = MotorController::new(motor, inverter, actuator, config);
     controller.set_mode(ControlMode::Current);
@@ -78,12 +85,20 @@ fn main() {
             phase_currents,
             bus_voltage: Volts::new(24.0),
             rotor: RotorEstimate {
-                mechanical_angle: MechanicalAngle::new(angle / motor.pole_pairs as f32),
-                mechanical_velocity: RadPerSec::new(electrical_speed / motor.pole_pairs as f32),
+                mechanical_angle: ContinuousMechanicalAngle::new(
+                    angle / motor.model().pole_pairs as f32,
+                ),
+                mechanical_velocity: RadPerSec::new(
+                    electrical_speed / motor.model().pole_pairs as f32,
+                ),
             },
             actuator: ActuatorEstimate {
-                output_angle: MechanicalAngle::new(angle / motor.pole_pairs as f32 / 5.0),
-                output_velocity: RadPerSec::new(electrical_speed / motor.pole_pairs as f32 / 5.0),
+                output_angle: ContinuousMechanicalAngle::new(
+                    angle / motor.model().pole_pairs as f32 / 5.0,
+                ),
+                output_velocity: RadPerSec::new(
+                    electrical_speed / motor.model().pole_pairs as f32 / 5.0,
+                ),
             },
             dt_seconds: dt,
         });
