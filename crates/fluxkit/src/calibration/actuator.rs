@@ -249,8 +249,17 @@ where
             config,
             modulator,
         );
-        let motor_system =
-            MotorSystem::new(hardware, controller, rotor_estimator, output_estimator);
+        let motor_system = MotorSystem::new(
+            hardware,
+            controller,
+            rotor_estimator,
+            output_estimator,
+            crate::MotorRuntimeConfig {
+                fast_dt_seconds: 0.0,
+                medium_divider: 0,
+                slow_divider: 0,
+            },
+        );
 
         let mut system = Self {
             motor_system,
@@ -715,7 +724,7 @@ where
         apply_command(&mut self.motor_system, command);
         let _ = self
             .motor_system
-            .tick(dt_seconds, schedule)
+            .run_cycle(dt_seconds, schedule)
             .map_err(ActuatorCalibrationSystemError::Motor)?;
 
         self.postflight(calibrator)

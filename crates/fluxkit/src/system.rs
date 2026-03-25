@@ -1,4 +1,4 @@
-//! Generic motor-control wrapper and runtime glue over Fluxkit core and HAL traits.
+//! Generic IRQ-driven motor-control runtime glue over Fluxkit core and HAL traits.
 
 use core::cell::RefCell;
 use core::fmt;
@@ -230,17 +230,29 @@ impl<'a> MotorHandle<'a> {
     }
 }
 
-/// Encapsulated synchronous motor stack: hardware plus pure controller.
 #[derive(Debug)]
-pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+struct MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
     hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
     controller: MotorController<MOD>,
     rotor_estimator: RotorEst,
     output_estimator: OutputEst,
     runtime_config: MotorRuntimeConfig,
-    shared: Mutex<RefCell<SharedRuntimeState>>,
     fast_cycle_count: u32,
     pwm_armed: bool,
+}
+
+/// IRQ/deferred runtime owner borrowed from a [`MotorSystem`].
+#[derive(Debug)]
+pub struct MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+    runtime: &'a mut MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+    shared: &'a Mutex<RefCell<SharedRuntimeState>>,
+}
+
+/// Owned motor runtime plus shared command/status state.
+#[derive(Debug)]
+pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+    runtime: MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+    shared: Mutex<RefCell<SharedRuntimeState>>,
 }
 
 /// Helper trait for estimators that consume wrapped mechanical motion samples
@@ -270,25 +282,9 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
-    /// Creates a new motor system with an explicit controller modulator and
-    /// explicit rotor/output estimators.
+    /// Creates a new motor system with explicit runtime scheduling config,
+    /// controller, and rotor/output estimators.
     pub fn new(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
-        controller: MotorController<MOD>,
-        rotor_estimator: RotorEst,
-        output_estimator: OutputEst,
-    ) -> Self {
-        Self::new_with_runtime(
-            hardware,
-            controller,
-            rotor_estimator,
-            output_estimator,
-            MotorRuntimeConfig::default(),
-        )
-    }
-
-    /// Creates a new motor system with explicit runtime scheduling config.
-    pub fn new_with_runtime(
         hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
         controller: MotorController<MOD>,
         rotor_estimator: RotorEst,
@@ -296,26 +292,28 @@ where
         runtime_config: MotorRuntimeConfig,
     ) -> Self {
         Self {
-            hardware,
             shared: Mutex::new(RefCell::new(SharedRuntimeState {
                 command: MotorCommand::default(),
                 command_dirty: false,
                 status: MotorRuntimeStatus {
                     controller: controller.status(),
                     last_fast_output: None,
-                    armed: true,
+                    armed: false,
                     fault_latched: false,
                 },
                 clear_fault_requested: false,
                 medium_pending: false,
                 slow_pending: false,
             })),
-            controller,
-            rotor_estimator,
-            output_estimator,
-            runtime_config,
-            fast_cycle_count: 0,
-            pwm_armed: false,
+            runtime: MotorRuntimeState {
+                hardware,
+                controller,
+                rotor_estimator,
+                output_estimator,
+                runtime_config,
+                fast_cycle_count: 0,
+                pwm_armed: false,
+            },
         }
     }
 
@@ -327,34 +325,52 @@ where
         }
     }
 
+    /// Splits the system into an IRQ/deferred runtime view and a non-ISR handle.
+    pub fn split(
+        &mut self,
+    ) -> (
+        MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+        MotorHandle<'_>,
+    ) {
+        (
+            MotorRuntime {
+                runtime: &mut self.runtime,
+                shared: &self.shared,
+            },
+            MotorHandle {
+                shared: &self.shared,
+            },
+        )
+    }
+
     /// Returns the configured runtime scheduling parameters.
     #[inline]
     pub const fn runtime_config(&self) -> &MotorRuntimeConfig {
-        &self.runtime_config
+        &self.runtime.runtime_config
     }
 
     /// Returns shared access to the rotor-side motion estimator.
     #[inline]
     pub const fn rotor_estimator(&self) -> &RotorEst {
-        &self.rotor_estimator
+        &self.runtime.rotor_estimator
     }
 
     /// Returns mutable access to the rotor-side motion estimator.
     #[inline]
     pub fn rotor_estimator_mut(&mut self) -> &mut RotorEst {
-        &mut self.rotor_estimator
+        &mut self.runtime.rotor_estimator
     }
 
     /// Returns shared access to the output-side motion estimator.
     #[inline]
     pub const fn output_estimator(&self) -> &OutputEst {
-        &self.output_estimator
+        &self.runtime.output_estimator
     }
 
     /// Returns mutable access to the output-side motion estimator.
     #[inline]
     pub fn output_estimator_mut(&mut self) -> &mut OutputEst {
-        &mut self.output_estimator
+        &mut self.runtime.output_estimator
     }
 }
 
@@ -370,28 +386,40 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
+    #[inline]
+    fn runtime(
+        &mut self,
+    ) -> MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+        MotorRuntime {
+            runtime: &mut self.runtime,
+            shared: &self.shared,
+        }
+    }
+
     /// Returns shared access to the owned hardware handles.
     #[inline]
-    pub const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
-        &self.hardware
+    #[cfg(test)]
+    pub(crate) const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
+        &self.runtime.hardware
     }
 
     /// Returns mutable access to the owned hardware handles.
     #[inline]
-    pub fn hardware_mut(&mut self) -> &mut MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
-        &mut self.hardware
+    #[cfg(test)]
+    pub(crate) fn hardware_mut(&mut self) -> &mut MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
+        &mut self.runtime.hardware
     }
 
     /// Returns shared access to the owned pure controller.
     #[inline]
-    pub const fn controller(&self) -> &MotorController<MOD> {
-        &self.controller
+    pub(crate) const fn controller(&self) -> &MotorController<MOD> {
+        &self.runtime.controller
     }
 
     /// Returns mutable access to the owned pure controller.
     #[inline]
-    pub fn controller_mut(&mut self) -> &mut MotorController<MOD> {
-        &mut self.controller
+    pub(crate) fn controller_mut(&mut self) -> &mut MotorController<MOD> {
+        &mut self.runtime.controller
     }
 
     /// Splits the system back into owned hardware and controller parts.
@@ -404,14 +432,95 @@ where
         RotorEst,
         OutputEst,
     ) {
-        (
-            self.hardware,
-            self.controller,
-            self.rotor_estimator,
-            self.output_estimator,
-        )
+        let MotorRuntimeState {
+            hardware,
+            controller,
+            rotor_estimator,
+            output_estimator,
+            ..
+        } = self.runtime;
+        (hardware, controller, rotor_estimator, output_estimator)
     }
 
+    /// Runs one fast IRQ-owned cycle using the configured runtime fast period.
+    #[inline]
+    pub fn on_pwm_interrupt(
+        &mut self,
+    ) -> Result<
+        FastLoopOutput,
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
+        self.runtime().on_pwm_interrupt()
+    }
+
+    /// Runs pending medium/slow work scheduled by [`Self::on_pwm_interrupt`].
+    #[inline]
+    pub fn run_deferred(
+        &mut self,
+    ) -> Result<
+        (),
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
+        self.runtime().run_deferred()
+    }
+
+    /// Enables the underlying PWM and then enables the controller.
+    #[inline]
+    pub(crate) fn enable(
+        &mut self,
+    ) -> Result<
+        (),
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
+        critical_section::with(|cs| {
+            self.shared.borrow(cs).borrow_mut().status.armed = true;
+        });
+        self.runtime().sync_runtime_requests()?;
+        self.runtime().publish_runtime_status(None);
+        Ok(())
+    }
+
+    /// Forces a neutral output, disables the controller, then disables the PWM.
+    #[inline]
+    pub(crate) fn disable(
+        &mut self,
+    ) -> Result<
+        (),
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
+        critical_section::with(|cs| {
+            self.shared.borrow(cs).borrow_mut().status.armed = false;
+        });
+        self.runtime().sync_runtime_requests()?;
+        self.runtime().publish_runtime_status(None);
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn run_cycle(
+        &mut self,
+        dt_seconds: f32,
+        schedule: TickSchedule,
+    ) -> Result<
+        FastLoopOutput,
+        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+    > {
+        self.runtime().run_cycle(dt_seconds, schedule)
+    }
+}
+
+impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+    MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+where
+    PWM: PhasePwm,
+    CURRENT: CurrentSampler,
+    BUS: BusVoltageSensor,
+    ROTOR: RotorSensor,
+    OUTPUT: OutputSensor,
+    MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
+    OutputEst: MechanicalMotionEstimator,
+{
     fn sync_runtime_requests(
         &mut self,
     ) -> Result<
@@ -436,43 +545,57 @@ where
             });
 
         if clear_fault_requested {
-            self.controller.clear_error();
+            self.runtime.controller.clear_error();
             critical_section::with(|cs| {
                 let mut shared = self.shared.borrow(cs).borrow_mut();
-                shared.status.fault_latched = self.controller.status().active_error.is_some();
+                shared.status.fault_latched =
+                    self.runtime.controller.status().active_error.is_some();
             });
         }
 
-        if armed_requested != self.pwm_armed {
+        if armed_requested != self.runtime.pwm_armed {
             if armed_requested {
-                self.hardware.pwm.enable().map_err(MotorSystemError::Pwm)?;
-                self.controller.enable();
+                self.runtime
+                    .hardware
+                    .pwm
+                    .enable()
+                    .map_err(MotorSystemError::Pwm)?;
+                self.runtime.controller.enable();
             } else {
-                self.controller.disable();
-                self.hardware
+                self.runtime.controller.disable();
+                self.runtime
+                    .hardware
                     .pwm
                     .set_neutral()
                     .map_err(MotorSystemError::Pwm)?;
-                self.hardware.pwm.disable().map_err(MotorSystemError::Pwm)?;
+                self.runtime
+                    .hardware
+                    .pwm
+                    .disable()
+                    .map_err(MotorSystemError::Pwm)?;
             }
-            self.pwm_armed = armed_requested;
+            self.runtime.pwm_armed = armed_requested;
         }
 
         if command_dirty {
-            self.controller.set_mode(command.mode);
-            self.controller.set_id_target(command.id_target);
-            self.controller.set_iq_target(command.iq_target);
-            self.controller
+            self.runtime.controller.set_mode(command.mode);
+            self.runtime.controller.set_id_target(command.id_target);
+            self.runtime.controller.set_iq_target(command.iq_target);
+            self.runtime
+                .controller
                 .set_torque_target(command.output_torque_target);
-            self.controller
+            self.runtime
+                .controller
                 .set_velocity_target(command.output_velocity_target);
-            self.controller
+            self.runtime
+                .controller
                 .set_position_target(command.output_position_target);
-            self.controller
+            self.runtime
+                .controller
                 .set_open_loop_voltage_target(command.open_loop_voltage_target);
         }
 
-        Ok(self.pwm_armed)
+        Ok(self.runtime.pwm_armed)
     }
 
     fn publish_runtime_status(&self, last_fast_output: Option<FastLoopOutput>) {
@@ -481,8 +604,8 @@ where
             if let Some(output) = last_fast_output {
                 shared.status.last_fast_output = Some(output);
             }
-            shared.status.controller = self.controller.status();
-            shared.status.fault_latched |= self.controller.status().active_error.is_some();
+            shared.status.controller = self.runtime.controller.status();
+            shared.status.fault_latched |= self.runtime.controller.status().active_error.is_some();
         });
     }
 
@@ -493,57 +616,54 @@ where
     }
 
     fn schedule_deferred_work(&mut self) {
-        self.fast_cycle_count = self.fast_cycle_count.wrapping_add(1);
+        self.runtime.fast_cycle_count = self.runtime.fast_cycle_count.wrapping_add(1);
         critical_section::with(|cs| {
             let mut shared = self.shared.borrow(cs).borrow_mut();
-            if self.runtime_config.medium_divider > 0
-                && self.fast_cycle_count % self.runtime_config.medium_divider == 0
+            if self.runtime.runtime_config.medium_divider > 0
+                && self.runtime.fast_cycle_count % self.runtime.runtime_config.medium_divider == 0
             {
                 shared.medium_pending = true;
             }
-            if self.runtime_config.slow_divider > 0
-                && self.fast_cycle_count % self.runtime_config.slow_divider == 0
+            if self.runtime.runtime_config.slow_divider > 0
+                && self.runtime.fast_cycle_count % self.runtime.runtime_config.slow_divider == 0
             {
                 shared.slow_pending = true;
             }
         });
     }
 
-    /// Enables the underlying PWM and then enables the controller.
-    pub fn enable(
+    fn fault_and_neutral(
         &mut self,
     ) -> Result<
         (),
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        self.handle().arm();
-        self.sync_runtime_requests()?;
-        self.publish_runtime_status(None);
-        Ok(())
-    }
-
-    /// Forces a neutral output, disables the controller, then disables the PWM.
-    pub fn disable(
-        &mut self,
-    ) -> Result<
-        (),
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
-    > {
-        self.handle().disarm();
-        self.sync_runtime_requests()?;
+        self.runtime
+            .hardware
+            .pwm
+            .set_neutral()
+            .map_err(MotorSystemError::Pwm)?;
+        self.mark_runtime_fault();
         self.publish_runtime_status(None);
         Ok(())
     }
 
     /// Runs one fast IRQ-owned cycle using the configured runtime fast period.
-    #[inline]
     pub fn on_pwm_interrupt(
         &mut self,
     ) -> Result<
         FastLoopOutput,
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        let output = self.fast_tick(self.runtime_config.fast_dt_seconds)?;
+        let output = match self.run_fast_cycle(self.runtime.runtime_config.fast_dt_seconds) {
+            Ok(output) => output,
+            Err(error) => {
+                if !matches!(error, MotorSystemError::InvalidCurrentSample) {
+                    let _ = self.fault_and_neutral();
+                }
+                return Err(error);
+            }
+        };
         self.schedule_deferred_work();
         Ok(output)
     }
@@ -565,27 +685,24 @@ where
         });
 
         let _ = self.sync_runtime_requests()?;
-        if run_medium && self.runtime_config.medium_divider > 0 {
-            self.controller.medium_tick(
-                self.runtime_config.fast_dt_seconds * self.runtime_config.medium_divider as f32,
+        if run_medium && self.runtime.runtime_config.medium_divider > 0 {
+            self.runtime.controller.medium_tick(
+                self.runtime.runtime_config.fast_dt_seconds
+                    * self.runtime.runtime_config.medium_divider as f32,
             );
         }
-        if run_slow && self.runtime_config.slow_divider > 0 {
-            self.controller.slow_tick(
-                self.runtime_config.fast_dt_seconds * self.runtime_config.slow_divider as f32,
+        if run_slow && self.runtime.runtime_config.slow_divider > 0 {
+            self.runtime.controller.slow_tick(
+                self.runtime.runtime_config.fast_dt_seconds
+                    * self.runtime.runtime_config.slow_divider as f32,
             );
         }
         self.publish_runtime_status(None);
         Ok(())
     }
 
-    /// Samples hardware, runs one scheduled controller cycle, and applies duty.
-    ///
-    /// This is the preferred entrypoint for multi-rate runtime integration:
-    /// call it from the fast-loop owner, and express lower-rate work through
-    /// `schedule` instead of calling separate controller hooks from other
-    /// interrupts.
-    pub fn tick(
+    /// Samples hardware, runs one owned controller cycle, and applies duty.
+    pub(crate) fn run_cycle(
         &mut self,
         dt_seconds: f32,
         schedule: TickSchedule,
@@ -606,45 +723,44 @@ where
         }
 
         let current = self
+            .runtime
             .hardware
             .current
             .sample_phase_currents()
             .map_err(MotorSystemError::Current)?;
 
         if current.validity == CurrentSampleValidity::Invalid {
-            self.hardware
-                .pwm
-                .set_neutral()
-                .map_err(MotorSystemError::Pwm)?;
-            self.mark_runtime_fault();
-            self.publish_runtime_status(None);
+            self.fault_and_neutral()?;
             return Err(MotorSystemError::InvalidCurrentSample);
         }
 
         let bus_voltage = self
+            .runtime
             .hardware
             .bus
             .sample_bus_voltage()
             .map_err(MotorSystemError::Bus)?;
 
         let rotor = self
+            .runtime
             .hardware
             .rotor
             .read_rotor()
             .map_err(MotorSystemError::Rotor)?;
         let output_axis = self
+            .runtime
             .hardware
             .output
             .read_output()
             .map_err(MotorSystemError::Output)?;
-        let rotor_motion = self.rotor_estimator.update(
+        let rotor_motion = self.runtime.rotor_estimator.update(
             MechanicalMotionSample {
                 wrapped_value: rotor.mechanical_angle,
                 measured_rate: rotor.mechanical_velocity,
             },
             dt_seconds,
         );
-        let output_motion = self.output_estimator.update(
+        let output_motion = self.runtime.output_estimator.update(
             MechanicalMotionSample {
                 wrapped_value: output_axis.mechanical_angle,
                 measured_rate: output_axis.mechanical_velocity,
@@ -652,7 +768,7 @@ where
             dt_seconds,
         );
 
-        let output = self.controller.tick(
+        let output = self.runtime.controller.tick(
             FastLoopInput {
                 phase_currents: current.currents,
                 bus_voltage,
@@ -669,7 +785,8 @@ where
             schedule,
         );
 
-        self.hardware
+        self.runtime
+            .hardware
             .pwm
             .set_phase_duty(output.phase_duty)
             .map_err(MotorSystemError::Pwm)?;
@@ -678,19 +795,15 @@ where
         Ok(output)
     }
 
-    /// Samples hardware, runs only the fast controller loop, and applies duty.
-    ///
-    /// This is a convenience wrapper around [`Self::tick`] with
-    /// [`TickSchedule::none`].
     #[inline]
-    pub fn fast_tick(
+    pub(crate) fn run_fast_cycle(
         &mut self,
         dt_seconds: f32,
     ) -> Result<
         FastLoopOutput,
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        self.tick(dt_seconds, TickSchedule::none())
+        self.run_cycle(dt_seconds, TickSchedule::none())
     }
 }
 
@@ -700,7 +813,7 @@ mod tests {
 
     use fluxkit_core::{
         ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode, CurrentLoopConfig,
-        InverterParams, MotorLimits, MotorModel, MotorParams, MotorState, TickSchedule,
+        InverterParams, MotorLimits, MotorModel, MotorParams, MotorState,
     };
     use fluxkit_hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
@@ -953,17 +1066,30 @@ mod tests {
             controller,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
+            super::MotorRuntimeConfig {
+                fast_dt_seconds: 0.000_05,
+                medium_divider: 0,
+                slow_divider: 0,
+            },
         );
+        {
+            let handle = system.handle();
+            handle.set_command(super::MotorCommand {
+                mode: ControlMode::Current,
+                iq_target: Amps::new(2.0),
+                ..super::MotorCommand::default()
+            });
+            handle.arm();
+        }
 
-        system.enable().unwrap();
-        system.controller_mut().set_mode(ControlMode::Current);
-        system.controller_mut().set_iq_target(Amps::new(2.0));
+        let _output = system.on_pwm_interrupt().unwrap();
 
-        let _output = system.fast_tick(0.000_05).unwrap();
-
-        assert_eq!(system.controller().status().active_error, None);
+        assert_eq!(system.handle().status().controller.active_error, None);
         assert!(system.hardware().pwm.enabled);
-        assert_eq!(system.controller().status().state, MotorState::Running);
+        assert_eq!(
+            system.handle().status().controller.state,
+            MotorState::Running
+        );
         assert!(system.hardware().pwm.duty.a.get() >= 0.0);
         assert!(system.hardware().pwm.duty.a.get() <= 1.0);
         assert_ne!(system.hardware().pwm.duty, centered_phase_duty());
@@ -982,17 +1108,23 @@ mod tests {
             controller,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
+            super::MotorRuntimeConfig {
+                fast_dt_seconds: 0.000_05,
+                medium_divider: 0,
+                slow_divider: 0,
+            },
         );
         system.hardware_mut().pwm.duty = Abc::new(Duty::new(0.2), Duty::new(0.7), Duty::new(0.6));
+        system.handle().arm();
 
-        let error = system.fast_tick(0.000_05).unwrap_err();
+        let error = system.on_pwm_interrupt().unwrap_err();
 
         assert!(matches!(error, MotorSystemError::InvalidCurrentSample));
         assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
     }
 
     #[test]
-    fn scheduled_tick_runs_supervisory_work_after_fast_cycle() {
+    fn deferred_work_runs_supervisory_updates_after_fast_cycle() {
         let controller = fluxkit_core::MotorController::new(
             motor_params(),
             inverter_params(),
@@ -1004,25 +1136,33 @@ mod tests {
             controller,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
+            super::MotorRuntimeConfig {
+                fast_dt_seconds: 0.000_05,
+                medium_divider: 1,
+                slow_divider: 0,
+            },
         );
+        {
+            let handle = system.handle();
+            handle.set_command(super::MotorCommand {
+                mode: ControlMode::Position,
+                output_position_target: ContinuousMechanicalAngle::new(1.0),
+                ..super::MotorCommand::default()
+            });
+            handle.arm();
+        }
 
-        system.enable().unwrap();
-        system.controller_mut().set_mode(ControlMode::Position);
-        system
-            .controller_mut()
-            .set_position_target(ContinuousMechanicalAngle::new(1.0));
-
-        let first = system
-            .tick(0.000_05, TickSchedule::with_medium(0.001))
-            .unwrap();
-        let second = system.fast_tick(0.000_05).unwrap();
+        let first = system.on_pwm_interrupt().unwrap();
+        system.run_deferred().unwrap();
+        let second = system.on_pwm_interrupt().unwrap();
 
         assert_eq!(first.phase_duty, centered_phase_duty());
         assert_ne!(second.phase_duty, centered_phase_duty());
         assert!(
             system
-                .controller()
+                .handle()
                 .status()
+                .controller
                 .last_output_mechanical_angle
                 .get()
                 .abs()
@@ -1055,13 +1195,23 @@ mod tests {
                     RadPerSec::new(1.5),
                 ),
             },
+            super::MotorRuntimeConfig {
+                fast_dt_seconds: 0.000_05,
+                medium_divider: 0,
+                slow_divider: 0,
+            },
         );
+        {
+            let handle = system.handle();
+            handle.set_command(super::MotorCommand {
+                mode: ControlMode::Current,
+                ..super::MotorCommand::default()
+            });
+            handle.arm();
+        }
+        let _ = system.on_pwm_interrupt().unwrap();
 
-        system.enable().unwrap();
-        system.controller_mut().set_mode(ControlMode::Current);
-        let _ = system.fast_tick(0.000_05).unwrap();
-
-        let status = system.controller().status();
+        let status = system.handle().status().controller;
         assert_eq!(
             status.last_rotor_mechanical_angle,
             ContinuousMechanicalAngle::new(1.3)
@@ -1081,7 +1231,7 @@ mod tests {
             actuator_params(),
             current_loop_config(),
         );
-        let mut system = MotorSystem::new_with_runtime(
+        let mut system = MotorSystem::new(
             hardware(CurrentSampleValidity::Valid),
             controller,
             fluxkit_math::PassThroughEstimator::new(),
@@ -1099,6 +1249,7 @@ mod tests {
                 iq_target: Amps::new(2.0),
                 ..super::MotorCommand::default()
             });
+            handle.arm();
         }
 
         let output = system.on_pwm_interrupt().unwrap();

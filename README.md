@@ -7,7 +7,7 @@ Current crates:
 - `fluxkit_math`: units, transforms, modulation, PI primitives
 - `fluxkit_core`: pure deterministic motor-control engine
 - `fluxkit_hal`: narrow motor-control HAL contracts
-- `fluxkit`: umbrella crate and generic `MotorSystem` wrapper
+- `fluxkit`: user-facing runtime and calibration crate
 - `fluxkit_pmsm_sim`: ideal PMSM plant emulator for integration tests
 
 ## Nix usage
@@ -153,7 +153,7 @@ Important boundaries:
 - `fluxkit_hal` is contracts only
 - generic controller + HAL orchestration lives in `fluxkit`
 - `fluxkit_pmsm_sim` is a separate plant-model crate for host-side and `no_std` integration tests
-- runtime / executor / MCU integration should live in a future integration crate
+- runtime ownership, scheduling, and command/status sharing live in `fluxkit`
 
 ## Current scope
 
@@ -169,14 +169,14 @@ Implemented today:
 - output-axis encoder path for supervisory control
 - internal multi-turn unwrapping for both rotor and output axes
 - `Disabled`, `Current`, `Torque`, `Velocity`, `Position`, and `OpenLoopVoltage` modes
-- synchronous current-loop `fast_tick()`
+- IRQ-driven `MotorSystem::on_pwm_interrupt()`
 - medium-rate supervisory loop in `medium_tick()`
 - position and velocity loops both run in the same `medium_tick()` when `Position` mode is active
-- single-owner scheduled entrypoint through `tick(..., TickSchedule)`
+- deferred medium/slow work through `MotorSystem::run_deferred()`
 - model-based current-loop feedforward
 - actuator-side compensation telemetry in controller status
 - configurable modulation through `MotorController<M>`
-- generic `MotorSystem` wrapper in `fluxkit`
+- shared command/status handle model in `fluxkit`
 - ideal PMSM plant simulation with `d/q`, `alpha/beta`, phase-voltage, and duty-driven stepping
 - simulator-side actuator parasitics and output-axis snapshots for integration tests
 
@@ -194,8 +194,8 @@ Not implemented:
 
 ## Calibration
 
-The repo now includes pure calibration procedures in `fluxkit_core` plus
-HAL-facing wrappers in `fluxkit`.
+The repo includes pure calibration procedures in `fluxkit_core` plus
+request-driven HAL-facing calibration systems in `fluxkit`.
 
 Recommended order:
 
@@ -216,44 +216,18 @@ Actuator calibration procedures:
 - breakaway torque from slow torque ramps
 - `zero_velocity_blend_band` from low-speed release ramps
 
-Persisted records:
-
-- `MotorCalibration`
-- `ActuatorCalibration`
-
 Typical flow:
 
-1. Run each pure procedure through `MotorCalibrationSystem` or `ActuatorCalibrationSystem`.
-2. Merge each completed result into the corresponding persisted record.
-3. Apply the merged record onto `MotorParams` or `ActuatorParams`.
-4. Persist those populated parameter structs in board/runtime code.
+1. Construct `MotorCalibrationSystem` with a `MotorCalibrationRequest` and `MotorCalibrationLimits`.
+2. Call `tick(dt_seconds)` until it returns `Some(MotorCalibrationResult)`.
+3. Build `MotorParams` directly from the result with `into_motor_params(...)`.
+4. Construct `ActuatorCalibrationSystem` with an `ActuatorCalibrationRequest` and `ActuatorCalibrationLimits`.
+5. Call `tick(dt_seconds, TickSchedule::with_medium(...))` until it returns `Some(ActuatorCalibrationResult)`.
+6. Build `ActuatorParams` directly from the result with `into_*_actuator_params(...)`.
 
-Minimal wrapper API:
-
-```rust
-let mut calibration = fluxkit::MotorCalibration::empty();
-let mut routine = fluxkit::MotorCalibrationRoutine::PhaseResistance(
-    fluxkit::PhaseResistanceCalibrator::new(
-        fluxkit::PhaseResistanceCalibrationConfig::default_for_hold(),
-    )?,
-);
-
-loop {
-    if let Some(delta) = system.tick(&mut routine, dt_seconds)? {
-        calibration = calibration.merge(delta);
-        break;
-    }
-}
-
-motor_params = motor_params.with_calibration(&calibration);
-```
-
-The actuator side follows the same pattern:
-
-- construct one `ActuatorCalibrationRoutine`
-- call `ActuatorCalibrationSystem::tick(...)` until it returns `Some(delta)`
-- merge into `ActuatorCalibration`
-- apply with `ActuatorParams::with_calibration(...)`
+Calibration remains a synchronous bring-up API on purpose. Runtime control is
+IRQ-driven through `MotorSystem`, while calibration uses dedicated systems that
+own the simpler step-by-step procedure flow.
 
 Current simulator-backed confidence:
 
@@ -306,7 +280,8 @@ switching simulation or high-fidelity electromagnetic analysis.
 
 ## Loop model
 
-`MotorController` uses an explicit multi-rate API:
+`MotorController` uses an explicit multi-rate API internally, and `fluxkit`
+wraps that in an IRQ/deferred runtime model:
 
 - `fast_tick()`
   - current control
@@ -317,11 +292,16 @@ switching simulation or high-fidelity electromagnetic analysis.
   - `Torque`, `Velocity`, and `Position` targets are expressed at the actuator output
   - rotor measurements remain motor-side for FOC transforms and feedforward
   - output-axis measurements drive the supervisory loops
-- `tick(input, TickSchedule)`
-  - preferred runtime entrypoint when fast/medium/slow timers exist
-  - runs the fast loop first
-  - then runs due medium/slow work in the same owner context
-  - avoids sharing the controller across concurrent interrupts
+- `MotorSystem::on_pwm_interrupt()`
+  - samples sensors
+  - runs the fast loop
+  - applies PWM duty
+  - schedules deferred work
+- `MotorSystem::run_deferred()`
+  - runs medium/slow work outside the PWM interrupt
+- `MotorHandle`
+  - owns non-ISR command and status access
+  - supports `set_command(...)`, `status()`, `arm()`, `disarm()`, and `clear_fault()`
 - `medium_tick()`
   - torque-to-current mapping
   - velocity PI

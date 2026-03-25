@@ -577,16 +577,9 @@ fn actuator_calibration_system_recovers_gear_ratio_through_public_wrapper() {
     };
 
     assert!((result.gear_ratio - GEAR_RATIO).abs() < 0.05);
-    assert!(
-        (system
-            .motor_system()
-            .controller()
-            .actuator_params()
-            .gear_ratio
-            - GEAR_RATIO)
-            .abs()
-            < 0.05
-    );
+    let motor_system = system.into_motor_system();
+    let (_, controller, _, _) = motor_system.into_parts();
+    assert!((controller.actuator_params().gear_ratio - GEAR_RATIO).abs() < 0.05);
 }
 
 #[test]
@@ -782,20 +775,11 @@ fn actuator_calibration_system_applies_provided_and_measured_values_through_live
     assert!((result.negative_coulomb_torque.get() - 0.05).abs() < 1.0e-6);
     assert!(result.positive_breakaway_torque.get().is_finite());
     assert!(result.zero_velocity_blend_band.get().is_finite());
+    let motor_system = system.into_motor_system();
+    let (_, controller, _, _) = motor_system.into_parts();
+    assert!((controller.actuator_params().gear_ratio - GEAR_RATIO).abs() < 1.0e-6);
     assert!(
-        (system
-            .motor_system()
-            .controller()
-            .actuator_params()
-            .gear_ratio
-            - GEAR_RATIO)
-            .abs()
-            < 1.0e-6
-    );
-    assert!(
-        (system
-            .motor_system()
-            .controller()
+        (controller
             .actuator_params()
             .compensation
             .friction

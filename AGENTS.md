@@ -11,7 +11,7 @@ This file summarizes the current architecture and the project-specific rules tha
 - `crates/fluxkit_hal`
   - narrow motor-control HAL traits
 - `crates/fluxkit`
-  - umbrella crate and generic integration wrapper
+  - user-facing runtime and calibration crate
 - `crates/fluxkit_pmsm_sim`
   - ideal PMSM plant emulator for integration tests
 
@@ -22,7 +22,8 @@ This file summarizes the current architecture and the project-specific rules tha
 - `fluxkit_hal` must not depend on `fluxkit_core`
 - generic glue between core and hal belongs in `fluxkit`
 - `fluxkit_pmsm_sim` may depend on `fluxkit_math`, but should remain independent from `fluxkit_core` and `fluxkit_hal`
-- runtime-, executor-, MCU-, DMA-, and Embassy-specific logic belongs in a future integration crate, not in `core`, `hal`, or the generic `fluxkit` wrapper
+- runtime ownership, IRQ scheduling, and command/status sharing belong in `fluxkit`
+- MCU-specific board support, DMA plumbing, and framework integration still do not belong in `core` or `hal`
 
 ## Current implemented scope
 
@@ -87,17 +88,22 @@ Implemented today:
 
 - re-exports of `core`, `hal`, and `math`
 - `MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>`
-- `MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD = Svpwm>`
+- `MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>`
+- `MotorHandle`
+- `MotorCommand`
+- `MotorRuntimeConfig`
+- `MotorRuntimeStatus`
 - `MotorSystemError<...>`
 
-`MotorSystem` is the generic synchronous wrapper that:
+`MotorSystem` is the IRQ/deferred runtime owner that:
 
-1. samples HAL inputs
+1. samples HAL inputs in `on_pwm_interrupt()`
 2. builds `FastLoopInput`
-3. runs `MotorController::tick(...)`
+3. runs `MotorController`
 4. writes phase duty back to PWM
+5. schedules medium/slow work for `run_deferred()`
 
-This is the preferred place for generic glue code between the controller and HAL traits.
+`MotorHandle` is the non-ISR command/status surface.
 
 ### `fluxkit_pmsm_sim`
 
@@ -140,8 +146,8 @@ Do not reintroduce Hall or sensorless-source abstractions unless there is a real
   - Coulomb and viscous drag transition onto measured output velocity once moving
 - `Torque`, `Velocity`, and `Position` are implemented through `medium_tick()`
 - `Position` mode runs both the position loop and velocity loop in the same `medium_tick()`
-- runtime integration should prefer `tick(..., TickSchedule)` over calling
-  `fast_tick()`, `medium_tick()`, and `slow_tick()` from separate interrupts
+- runtime integration should prefer `MotorSystem::on_pwm_interrupt()` plus
+  `MotorSystem::run_deferred()`
 - `OpenLoopVoltage` bypasses the current PI and modulates commanded `vdq` directly
 - neutral duty means centered PWM output, not hardware-off
 - fallback invalid-control output is neutral duty
@@ -199,7 +205,7 @@ Do not hardcode a new modulation strategy into the controller if it can be expre
 
 ## Current sample policy
 
-`MotorSystem::tick(...)` currently treats:
+`MotorSystem::on_pwm_interrupt()` currently treats:
 
 - `CurrentSampleValidity::Invalid` as an integration error and forces neutral PWM
 - `Valid`, `Estimated`, and `Saturated` as acceptable inputs to pass through to the controller
@@ -240,14 +246,14 @@ XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test -p fluxkit
 
 - preserve `no_std`
 - preserve allocation-free control-path behavior
-- keep `fast_tick()` synchronous
+- keep `fast_tick()` synchronous inside `fluxkit_core`
 - keep hardware ownership out of `fluxkit_core`
 - keep HAL traits narrow and synchronous
-- keep `fluxkit` as generic glue only
+- keep `fluxkit` as the user-facing IRQ runtime and calibration layer
 
 If you are unsure where code belongs:
 
 - pure math/control logic -> `fluxkit_core`
 - hardware contract -> `fluxkit_hal`
 - generic controller + HAL orchestration -> `fluxkit`
-- executor / board / Embassy / ISR ownership -> future integration crate
+- MCU-specific board support / framework glue -> board or integration crate

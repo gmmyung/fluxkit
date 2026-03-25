@@ -1,9 +1,12 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    sync::{Arc, Mutex},
+    thread,
+};
 
 use fluxkit::{
     ActuatorCompensationConfig, ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode,
-    CurrentLoopConfig, InverterParams, MotorController, MotorHardware, MotorLimits, MotorModel,
-    MotorParams, MotorSystem, centered_phase_duty,
+    CurrentLoopConfig, InverterParams, MotorCommand, MotorController, MotorHardware, MotorLimits,
+    MotorModel, MotorParams, MotorRuntimeConfig, MotorSystem, centered_phase_duty,
     hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
         PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
@@ -105,10 +108,10 @@ struct SimHarness {
     last_duty: fluxkit::math::frame::Abc<Duty>,
 }
 
-type SharedHarness = Rc<RefCell<SimHarness>>;
+type SharedHarness = Arc<Mutex<SimHarness>>;
 
 fn phase_currents(shared: &SharedHarness) -> fluxkit::math::frame::Abc<Amps> {
-    let harness = shared.borrow();
+    let harness = shared.lock().unwrap();
     let state = *harness.plant.state();
     let electrical_angle = fluxkit::math::angle::mechanical_to_electrical(
         state.mechanical_angle.wrapped().into(),
@@ -139,7 +142,7 @@ impl PhasePwm for SimPwm {
 
     fn set_duty(&mut self, a: Duty, b: Duty, c: Duty) -> Result<(), Self::Error> {
         let duty = fluxkit::math::frame::Abc::new(a, b, c);
-        let mut harness = self.shared.borrow_mut();
+        let mut harness = self.shared.lock().unwrap();
         harness.last_duty = duty;
         let bus_voltage = harness.bus_voltage;
         let load_torque = harness.load_torque;
@@ -176,7 +179,7 @@ impl BusVoltageSensor for SimBus {
     type Error = core::convert::Infallible;
 
     fn sample_bus_voltage(&mut self) -> Result<Volts, Self::Error> {
-        Ok(self.shared.borrow().bus_voltage)
+        Ok(self.shared.lock().unwrap().bus_voltage)
     }
 }
 
@@ -189,7 +192,7 @@ impl RotorSensor for SimRotor {
     type Error = core::convert::Infallible;
 
     fn read_rotor(&mut self) -> Result<RotorReading, Self::Error> {
-        let harness = self.shared.borrow();
+        let harness = self.shared.lock().unwrap();
         let state = *harness.plant.state();
         Ok(RotorReading {
             mechanical_angle: state.mechanical_angle.wrapped(),
@@ -207,7 +210,7 @@ impl OutputSensor for SimOutput {
     type Error = core::convert::Infallible;
 
     fn read_output(&mut self) -> Result<OutputReading, Self::Error> {
-        let harness = self.shared.borrow();
+        let harness = self.shared.lock().unwrap();
         let state = *harness.plant.state();
         Ok(OutputReading {
             mechanical_angle: ContinuousMechanicalAngle::new(
@@ -221,7 +224,7 @@ impl OutputSensor for SimOutput {
 
 #[test]
 fn motor_system_closes_current_loop_against_simulator() {
-    let shared = Rc::new(RefCell::new(SimHarness {
+    let shared = Arc::new(Mutex::new(SimHarness {
         plant: PmsmModel::new_zeroed(plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
         load_torque: NewtonMeters::ZERO,
@@ -230,19 +233,19 @@ fn motor_system_closes_current_loop_against_simulator() {
 
     let hardware = MotorHardware {
         pwm: SimPwm {
-            shared: Rc::clone(&shared),
+            shared: Arc::clone(&shared),
         },
         current: SimCurrent {
-            shared: Rc::clone(&shared),
+            shared: Arc::clone(&shared),
         },
         bus: SimBus {
-            shared: Rc::clone(&shared),
+            shared: Arc::clone(&shared),
         },
         rotor: SimRotor {
-            shared: Rc::clone(&shared),
+            shared: Arc::clone(&shared),
         },
         output: SimOutput {
-            shared: Rc::clone(&shared),
+            shared: Arc::clone(&shared),
         },
     };
     let controller = MotorController::new(
@@ -256,17 +259,128 @@ fn motor_system_closes_current_loop_against_simulator() {
         controller,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
+        MotorRuntimeConfig {
+            fast_dt_seconds: FAST_DT_SECONDS,
+            medium_divider: 20,
+            slow_divider: 0,
+        },
     );
-    system.controller_mut().set_mode(ControlMode::Current);
-    system.controller_mut().set_iq_target(Amps::new(3.0));
-    system.enable().unwrap();
-
-    for _ in 0..4_000 {
-        let _output = system.fast_tick(FAST_DT_SECONDS).unwrap();
-        assert_eq!(system.controller().status().active_error, None);
+    {
+        let handle = system.handle();
+        handle.set_command(MotorCommand {
+            mode: ControlMode::Current,
+            iq_target: Amps::new(3.0),
+            ..MotorCommand::default()
+        });
+        handle.arm();
     }
 
-    let status = system.controller().status();
+    for _ in 0..4_000 {
+        let _output = system.on_pwm_interrupt().unwrap();
+        system.run_deferred().unwrap();
+        assert_eq!(system.handle().status().controller.active_error, None);
+    }
+
+    let status = system.handle().status().controller;
     assert!((status.last_measured_idq.q.get() - 3.0).abs() < 0.05);
-    assert!(shared.borrow().plant.state().mechanical_velocity.get() > 100.0);
+    assert!(
+        shared
+            .lock()
+            .unwrap()
+            .plant
+            .state()
+            .mechanical_velocity
+            .get()
+            > 100.0
+    );
+}
+
+#[test]
+fn motor_system_supports_scoped_irq_thread_runtime() {
+    let shared = Arc::new(Mutex::new(SimHarness {
+        plant: PmsmModel::new_zeroed(plant_params()).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+    }));
+
+    let hardware = MotorHardware {
+        pwm: SimPwm {
+            shared: Arc::clone(&shared),
+        },
+        current: SimCurrent {
+            shared: Arc::clone(&shared),
+        },
+        bus: SimBus {
+            shared: Arc::clone(&shared),
+        },
+        rotor: SimRotor {
+            shared: Arc::clone(&shared),
+        },
+        output: SimOutput {
+            shared: Arc::clone(&shared),
+        },
+    };
+    let controller = MotorController::new(
+        motor_params(),
+        inverter_params(),
+        actuator_params(),
+        current_loop_config(),
+    );
+    let mut system = MotorSystem::new(
+        hardware,
+        controller,
+        fluxkit::PassThroughEstimator::new(),
+        fluxkit::PassThroughEstimator::new(),
+        MotorRuntimeConfig {
+            fast_dt_seconds: FAST_DT_SECONDS,
+            medium_divider: 20,
+            slow_divider: 0,
+        },
+    );
+
+    thread::scope(|scope| {
+        let (mut runtime, handle) = system.split();
+
+        let control_thread = scope.spawn(move || {
+            handle.set_command(MotorCommand {
+                mode: ControlMode::Current,
+                iq_target: Amps::new(3.0),
+                ..MotorCommand::default()
+            });
+            handle.arm();
+
+            for _ in 0..200 {
+                let status = handle.status();
+                if status.controller.last_measured_idq.q.get() > 2.5 {
+                    break;
+                }
+                thread::yield_now();
+            }
+        });
+
+        let irq_thread = scope.spawn(move || {
+            for _ in 0..4_000 {
+                let _ = runtime.on_pwm_interrupt().unwrap();
+                runtime.run_deferred().unwrap();
+            }
+        });
+
+        control_thread.join().unwrap();
+        irq_thread.join().unwrap();
+    });
+
+    let status = system.handle().status().controller;
+    assert_eq!(status.active_error, None);
+    assert!((status.last_measured_idq.q.get() - 3.0).abs() < 0.05);
+    assert!(
+        shared
+            .lock()
+            .unwrap()
+            .plant
+            .state()
+            .mechanical_velocity
+            .get()
+            > 100.0
+    );
 }

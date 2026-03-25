@@ -1,4 +1,5 @@
-//! Generic synchronous HAL wrappers for calibration procedures.
+//! Request-driven calibration systems kept intentionally separate from the
+//! IRQ-driven runtime control surface.
 //!
 //! `fluxkit_core` owns the pure calibration state machines. This module owns
 //! the generic glue needed to:
@@ -7,6 +8,10 @@
 //! - feed those samples into the pure calibrators
 //! - apply the returned drive requests through PWM or `MotorSystem`
 //! - neutral or disable the drive path on completion and failure
+//!
+//! Calibration remains synchronous on purpose. Runtime control in `fluxkit`
+//! is IRQ-driven through [`crate::MotorSystem`], while these systems own the
+//! simpler step-by-step bring-up flow.
 //!
 //! Recommended bring-up order:
 //!
@@ -146,10 +151,23 @@
 //!     controller,
 //!     PassThroughEstimator::new(),
 //!     PassThroughEstimator::new(),
+//!     fluxkit::MotorRuntimeConfig {
+//!         fast_dt_seconds: DT,
+//!         medium_divider: 20,
+//!         slow_divider: 0,
+//!     },
 //! );
+//! let handle = runtime.handle();
+//! handle.set_command(fluxkit::MotorCommand {
+//!     mode: fluxkit::ControlMode::Velocity,
+//!     output_velocity_target: RadPerSec::new(2.0),
+//!     ..fluxkit::MotorCommand::default()
+//! });
+//! handle.arm();
 //!
 //! loop {
-//!     let _output = runtime.tick(DT, TickSchedule::with_medium(DT))?;
+//!     let _output = runtime.on_pwm_interrupt()?;
+//!     runtime.run_deferred()?;
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
