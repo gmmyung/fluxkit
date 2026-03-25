@@ -442,18 +442,18 @@ where
         (hardware, controller, rotor_estimator, output_estimator)
     }
 
-    /// Runs one fast IRQ-owned cycle using the configured runtime fast period.
+    /// Runs one fast control cycle using the configured runtime fast period.
     #[inline]
-    pub fn on_pwm_interrupt(
+    pub fn run_fast_cycle(
         &mut self,
     ) -> Result<
         FastLoopOutput,
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        self.runtime().on_pwm_interrupt()
+        self.runtime().run_fast_cycle()
     }
 
-    /// Runs pending medium/slow work scheduled by [`Self::on_pwm_interrupt`].
+    /// Runs pending medium/slow work scheduled by [`Self::run_fast_cycle`].
     #[inline]
     pub fn run_deferred(
         &mut self,
@@ -649,13 +649,14 @@ where
     }
 
     /// Runs one fast IRQ-owned cycle using the configured runtime fast period.
-    pub fn on_pwm_interrupt(
+    /// Runs one fast control cycle using the configured runtime fast period.
+    pub fn run_fast_cycle(
         &mut self,
     ) -> Result<
         FastLoopOutput,
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        let output = match self.run_fast_cycle(self.runtime.runtime_config.fast_dt_seconds) {
+        let output = match self.execute_fast_cycle(self.runtime.runtime_config.fast_dt_seconds) {
             Ok(output) => output,
             Err(error) => {
                 if !matches!(error, MotorSystemError::InvalidCurrentSample) {
@@ -668,7 +669,7 @@ where
         Ok(output)
     }
 
-    /// Runs pending medium/slow work scheduled by [`Self::on_pwm_interrupt`].
+    /// Runs pending medium/slow work scheduled by [`Self::run_fast_cycle`].
     pub fn run_deferred(
         &mut self,
     ) -> Result<
@@ -796,7 +797,7 @@ where
     }
 
     #[inline]
-    pub(crate) fn run_fast_cycle(
+    pub(crate) fn execute_fast_cycle(
         &mut self,
         dt_seconds: f32,
     ) -> Result<
@@ -1082,7 +1083,7 @@ mod tests {
             handle.arm();
         }
 
-        let _output = system.on_pwm_interrupt().unwrap();
+        let _output = system.run_fast_cycle().unwrap();
 
         assert_eq!(system.handle().status().controller.active_error, None);
         assert!(system.hardware().pwm.enabled);
@@ -1117,7 +1118,7 @@ mod tests {
         system.hardware_mut().pwm.duty = Abc::new(Duty::new(0.2), Duty::new(0.7), Duty::new(0.6));
         system.handle().arm();
 
-        let error = system.on_pwm_interrupt().unwrap_err();
+        let error = system.run_fast_cycle().unwrap_err();
 
         assert!(matches!(error, MotorSystemError::InvalidCurrentSample));
         assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
@@ -1152,9 +1153,9 @@ mod tests {
             handle.arm();
         }
 
-        let first = system.on_pwm_interrupt().unwrap();
+        let first = system.run_fast_cycle().unwrap();
         system.run_deferred().unwrap();
-        let second = system.on_pwm_interrupt().unwrap();
+        let second = system.run_fast_cycle().unwrap();
 
         assert_eq!(first.phase_duty, centered_phase_duty());
         assert_ne!(second.phase_duty, centered_phase_duty());
@@ -1209,7 +1210,7 @@ mod tests {
             });
             handle.arm();
         }
-        let _ = system.on_pwm_interrupt().unwrap();
+        let _ = system.run_fast_cycle().unwrap();
 
         let status = system.handle().status().controller;
         assert_eq!(
@@ -1252,7 +1253,7 @@ mod tests {
             handle.arm();
         }
 
-        let output = system.on_pwm_interrupt().unwrap();
+        let output = system.run_fast_cycle().unwrap();
         let handle = system.handle();
         let status = handle.status();
 

@@ -166,7 +166,7 @@
 //! handle.arm();
 //!
 //! loop {
-//!     let _output = runtime.on_pwm_interrupt()?;
+//!     let _output = runtime.run_fast_cycle()?;
 //!     runtime.run_deferred()?;
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())

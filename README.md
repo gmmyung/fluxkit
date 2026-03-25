@@ -169,7 +169,7 @@ Implemented today:
 - output-axis encoder path for supervisory control
 - internal multi-turn unwrapping for both rotor and output axes
 - `Disabled`, `Current`, `Torque`, `Velocity`, `Position`, and `OpenLoopVoltage` modes
-- IRQ-driven `MotorSystem::on_pwm_interrupt()`
+- IRQ-driven `MotorSystem::run_fast_cycle()`
 - medium-rate supervisory loop in `medium_tick()`
 - position and velocity loops both run in the same `medium_tick()` when `Position` mode is active
 - deferred medium/slow work through `MotorSystem::run_deferred()`
@@ -292,7 +292,7 @@ wraps that in an IRQ/deferred runtime model:
   - `Torque`, `Velocity`, and `Position` targets are expressed at the actuator output
   - rotor measurements remain motor-side for FOC transforms and feedforward
   - output-axis measurements drive the supervisory loops
-- `MotorSystem::on_pwm_interrupt()`
+- `MotorSystem::run_fast_cycle()`
   - samples sensors
   - runs the fast loop
   - applies PWM duty

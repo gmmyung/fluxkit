@@ -276,7 +276,7 @@ fn motor_system_closes_current_loop_against_simulator() {
     }
 
     for _ in 0..4_000 {
-        let _output = system.on_pwm_interrupt().unwrap();
+        let _output = system.run_fast_cycle().unwrap();
         system.run_deferred().unwrap();
         assert_eq!(system.handle().status().controller.active_error, None);
     }
@@ -361,7 +361,7 @@ fn motor_system_supports_scoped_irq_thread_runtime() {
 
         let irq_thread = scope.spawn(move || {
             for _ in 0..4_000 {
-                let _ = runtime.on_pwm_interrupt().unwrap();
+                let _ = runtime.run_fast_cycle().unwrap();
                 runtime.run_deferred().unwrap();
             }
         });

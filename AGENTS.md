@@ -97,7 +97,7 @@ Implemented today:
 
 `MotorSystem` is the IRQ/deferred runtime owner that:
 
-1. samples HAL inputs in `on_pwm_interrupt()`
+1. samples HAL inputs in `run_fast_cycle()`
 2. builds `FastLoopInput`
 3. runs `MotorController`
 4. writes phase duty back to PWM
@@ -146,7 +146,7 @@ Do not reintroduce Hall or sensorless-source abstractions unless there is a real
   - Coulomb and viscous drag transition onto measured output velocity once moving
 - `Torque`, `Velocity`, and `Position` are implemented through `medium_tick()`
 - `Position` mode runs both the position loop and velocity loop in the same `medium_tick()`
-- runtime integration should prefer `MotorSystem::on_pwm_interrupt()` plus
+- runtime integration should prefer `MotorSystem::run_fast_cycle()` plus
   `MotorSystem::run_deferred()`
 - `OpenLoopVoltage` bypasses the current PI and modulates commanded `vdq` directly
 - neutral duty means centered PWM output, not hardware-off
@@ -205,7 +205,7 @@ Do not hardcode a new modulation strategy into the controller if it can be expre
 
 ## Current sample policy
 
-`MotorSystem::on_pwm_interrupt()` currently treats:
+`MotorSystem::run_fast_cycle()` currently treats:
 
 - `CurrentSampleValidity::Invalid` as an integration error and forces neutral PWM
 - `Valid`, `Estimated`, and `Saturated` as acceptable inputs to pass through to the controller
