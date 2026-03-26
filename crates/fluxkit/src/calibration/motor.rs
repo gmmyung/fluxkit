@@ -8,7 +8,7 @@ use fluxkit_core::{
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, PhaseCurrentSample, PhasePwm,
-    RotorReading, RotorSensor,
+    RotorReading, RotorSensor, TemperatureSensor,
 };
 use fluxkit_math::{
     AlphaBeta, ElectricalAngle, Modulator, Volts,
@@ -19,7 +19,7 @@ use super::shared::RoutineState;
 
 /// HAL and integration failures that can occur outside the pure calibration procedures.
 #[derive(Debug)]
-pub enum MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE> {
+pub enum MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, TempE> {
     /// PWM output operation failed.
     Pwm(PwmE),
     /// Phase-current acquisition failed.
@@ -28,19 +28,22 @@ pub enum MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE> {
     Bus(BusE),
     /// Rotor-sensor acquisition failed.
     Rotor(RotorE),
+    /// Temperature-sensor acquisition failed.
+    Temp(TempE),
     /// The current sample was explicitly marked invalid for calibration use.
     InvalidCurrentSample,
     /// The pure core calibration procedure failed.
     Calibration(CalibrationError),
 }
 
-impl<PwmE, CurrentE, BusE, RotorE> fmt::Display
-    for MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE>
+impl<PwmE, CurrentE, BusE, RotorE, TempE> fmt::Display
+    for MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, TempE>
 where
     PwmE: fmt::Display,
     CurrentE: fmt::Display,
     BusE: fmt::Display,
     RotorE: fmt::Display,
+    TempE: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -48,19 +51,21 @@ where
             Self::Current(error) => write!(f, "current-sensor error: {error}"),
             Self::Bus(error) => write!(f, "bus-voltage error: {error}"),
             Self::Rotor(error) => write!(f, "rotor-sensor error: {error}"),
+            Self::Temp(error) => write!(f, "temperature-sensor error: {error}"),
             Self::InvalidCurrentSample => f.write_str("invalid current sample"),
             Self::Calibration(error) => write!(f, "calibration error: {error}"),
         }
     }
 }
 
-impl<PwmE, CurrentE, BusE, RotorE> core::error::Error
-    for MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE>
+impl<PwmE, CurrentE, BusE, RotorE, TempE> core::error::Error
+    for MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, TempE>
 where
     PwmE: core::error::Error + 'static,
     CurrentE: core::error::Error + 'static,
     BusE: core::error::Error + 'static,
     RotorE: core::error::Error + 'static,
+    TempE: core::error::Error + 'static,
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -68,6 +73,7 @@ where
             Self::Current(error) => Some(error),
             Self::Bus(error) => Some(error),
             Self::Rotor(error) => Some(error),
+            Self::Temp(error) => Some(error),
             Self::Calibration(error) => Some(error),
             Self::InvalidCurrentSample => None,
         }
@@ -89,8 +95,11 @@ pub struct MotorCalibrationRequest {
     /// This must be supplied together with `pole_pairs` if you want to skip
     /// electrical-mapping calibration.
     pub electrical_angle_offset: Option<ElectricalAngle>,
-    /// Provided phase resistance. When absent, phase resistance is calibrated.
-    pub phase_resistance_ohm: Option<Ohms>,
+    /// Provided phase resistance normalized to `25°C`.
+    ///
+    /// When absent, phase resistance is calibrated and normalized from the
+    /// required winding-temperature sample.
+    pub phase_resistance_ohm_ref: Option<Ohms>,
     /// Provided common phase inductance. When absent, phase inductance is calibrated.
     pub phase_inductance_h: Option<Henries>,
     /// Provided flux linkage. When absent, flux linkage is calibrated.
@@ -137,8 +146,8 @@ pub struct MotorCalibrationResult {
     pub pole_pairs: u8,
     /// Electrical zero offset after mechanical-to-electrical conversion.
     pub electrical_angle_offset: ElectricalAngle,
-    /// Estimated phase resistance.
-    pub phase_resistance_ohm: Ohms,
+    /// Estimated phase resistance normalized to `25°C`.
+    pub phase_resistance_ohm_ref: Ohms,
     /// Estimated common phase inductance applied to both `d` and `q` axes.
     pub phase_inductance_h: Henries,
     /// Estimated flux linkage.
@@ -156,7 +165,7 @@ impl MotorCalibrationResult {
         fluxkit_core::MotorParams::from_model_and_limits(
             fluxkit_core::MotorModel {
                 pole_pairs: self.pole_pairs,
-                phase_resistance_ohm: self.phase_resistance_ohm,
+                phase_resistance_ohm_ref: self.phase_resistance_ohm_ref,
                 d_inductance_h: self.phase_inductance_h,
                 q_inductance_h: self.phase_inductance_h,
                 flux_linkage_weber: self.flux_linkage_weber,
@@ -171,7 +180,7 @@ impl MotorCalibrationResult {
     pub fn apply_to_motor_params(&self, motor: &mut fluxkit_core::MotorParams) {
         motor.pole_pairs = self.pole_pairs;
         motor.electrical_angle_offset = self.electrical_angle_offset;
-        motor.phase_resistance_ohm = self.phase_resistance_ohm;
+        motor.phase_resistance_ohm_ref = self.phase_resistance_ohm_ref;
         motor.d_inductance_h = self.phase_inductance_h;
         motor.q_inductance_h = self.phase_inductance_h;
         motor.flux_linkage_weber = self.flux_linkage_weber;
@@ -180,28 +189,31 @@ impl MotorCalibrationResult {
 
 /// Encapsulated synchronous calibration stack: hardware plus a modulation strategy.
 #[derive(Debug)]
-pub struct MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, MOD> {
+pub struct MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, TEMP, MOD> {
     pwm: PWM,
     current: CURRENT,
     bus: BUS,
     rotor: ROTOR,
+    temp: TEMP,
     modulator: MOD,
     limits: MotorCalibrationLimits,
     dt_seconds: f32,
     pole_pairs: Option<u8>,
     electrical_angle_offset: Option<ElectricalAngle>,
-    phase_resistance_ohm: Option<Ohms>,
+    phase_resistance_ohm_ref: Option<Ohms>,
     phase_inductance_h: Option<Henries>,
     flux_linkage_weber: Option<Webers>,
     active_routine: Option<MotorCalibrationRoutine>,
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, MOD> MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, MOD>
+impl<PWM, CURRENT, BUS, ROTOR, TEMP, MOD>
+    MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, TEMP, MOD>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
     BUS: BusVoltageSensor,
     ROTOR: RotorSensor,
+    TEMP: TemperatureSensor,
     MOD: Modulator,
 {
     /// Creates a new request-driven motor-calibration system.
@@ -210,6 +222,7 @@ where
         current: CURRENT,
         bus: BUS,
         rotor: ROTOR,
+        temp: TEMP,
         modulator: MOD,
         request: MotorCalibrationRequest,
         limits: MotorCalibrationLimits,
@@ -227,12 +240,13 @@ where
             current,
             bus,
             rotor,
+            temp,
             modulator,
             limits,
             dt_seconds,
             pole_pairs: request.pole_pairs,
             electrical_angle_offset: request.electrical_angle_offset,
-            phase_resistance_ohm: request.phase_resistance_ohm,
+            phase_resistance_ohm_ref: request.phase_resistance_ohm_ref,
             phase_inductance_h: request.phase_inductance_h,
             flux_linkage_weber: request.flux_linkage_weber,
             active_routine: None,
@@ -287,10 +301,29 @@ where
         &mut self.rotor
     }
 
+    /// Returns shared access to the owned temperature-sensor handle.
+    #[inline]
+    pub const fn temp(&self) -> &TEMP {
+        &self.temp
+    }
+
+    /// Returns mutable access to the owned temperature-sensor handle.
+    #[inline]
+    pub fn temp_mut(&mut self) -> &mut TEMP {
+        &mut self.temp
+    }
+
     /// Splits the system back into owned parts.
     #[inline]
-    pub fn into_parts(self) -> (PWM, CURRENT, BUS, ROTOR, MOD) {
-        (self.pwm, self.current, self.bus, self.rotor, self.modulator)
+    pub fn into_parts(self) -> (PWM, CURRENT, BUS, ROTOR, TEMP, MOD) {
+        (
+            self.pwm,
+            self.current,
+            self.bus,
+            self.rotor,
+            self.temp,
+            self.modulator,
+        )
     }
 
     /// Returns the current or next calibration phase, if the campaign is not complete.
@@ -305,8 +338,16 @@ where
     /// Drives neutral PWM immediately.
     pub fn set_neutral(
         &mut self,
-    ) -> Result<(), MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>>
-    {
+    ) -> Result<
+        (),
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
+    > {
         self.pwm
             .set_neutral()
             .map_err(MotorCalibrationSystemError::Pwm)
@@ -317,7 +358,13 @@ where
         &mut self,
     ) -> Result<
         Option<MotorCalibrationResult>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     > {
         if self.active_routine.is_none() {
             self.active_routine = self
@@ -360,7 +407,13 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     > {
         match routine {
             MotorCalibrationRoutine::PolePairsAndOffset(calibrator) => {
@@ -394,7 +447,7 @@ where
                 .map(Some);
         }
 
-        if self.phase_resistance_ohm.is_none() {
+        if self.phase_resistance_ohm_ref.is_none() {
             let mut cfg = fluxkit_core::PhaseResistanceCalibrationConfig::default_for_hold();
             cfg.align_voltage_mag = min_volts(cfg.align_voltage_mag, limits.max_align_voltage_mag);
             cfg.timeout_seconds = cfg.timeout_seconds.min(limits.timeout_seconds);
@@ -406,7 +459,7 @@ where
         if self.phase_inductance_h.is_none() {
             let mut cfg = fluxkit_core::PhaseInductanceCalibrationConfig::default_for_hold();
             cfg.phase_resistance_ohm = self
-                .phase_resistance_ohm
+                .phase_resistance_ohm_ref
                 .expect("phase resistance resolved before inductance");
             cfg.hold_voltage_mag = min_volts(cfg.hold_voltage_mag, limits.max_align_voltage_mag);
             cfg.step_voltage_mag = min_volts(cfg.step_voltage_mag, limits.max_align_voltage_mag);
@@ -419,7 +472,7 @@ where
         if self.flux_linkage_weber.is_none() {
             let mut cfg = fluxkit_core::FluxLinkageCalibrationConfig::default_for_spin();
             cfg.phase_resistance_ohm = self
-                .phase_resistance_ohm
+                .phase_resistance_ohm_ref
                 .expect("phase resistance resolved before flux linkage");
             cfg.phase_inductance_h = self
                 .phase_inductance_h
@@ -447,7 +500,7 @@ where
         if self.pole_pairs.is_none() || self.electrical_angle_offset.is_none() {
             return Some(MotorCalibrationPhase::PolePairsAndOffset);
         }
-        if self.phase_resistance_ohm.is_none() {
+        if self.phase_resistance_ohm_ref.is_none() {
             return Some(MotorCalibrationPhase::PhaseResistance);
         }
         if self.phase_inductance_h.is_none() {
@@ -470,9 +523,9 @@ where
                 self.electrical_angle_offset = Some(value);
             }
         }
-        if self.phase_resistance_ohm.is_none() {
-            if let Some(value) = delta.phase_resistance_ohm {
-                self.phase_resistance_ohm = Some(value);
+        if self.phase_resistance_ohm_ref.is_none() {
+            if let Some(value) = delta.phase_resistance_ohm_ref {
+                self.phase_resistance_ohm_ref = Some(value);
             }
         }
         if self.phase_inductance_h.is_none() {
@@ -495,8 +548,8 @@ where
             electrical_angle_offset: self
                 .electrical_angle_offset
                 .ok_or(CalibrationError::InvalidConfiguration)?,
-            phase_resistance_ohm: self
-                .phase_resistance_ohm
+            phase_resistance_ohm_ref: self
+                .phase_resistance_ohm_ref
                 .ok_or(CalibrationError::InvalidConfiguration)?,
             phase_inductance_h: self
                 .phase_inductance_h
@@ -513,7 +566,13 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     > {
         self.tick_alpha_beta_routine(calibrator, dt_seconds, false, |calibrator, rotor, _, dt| {
             calibrator.tick(PolePairsAndOffsetCalibrationInput {
@@ -530,8 +589,18 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     > {
+        let winding_temperature_c = self
+            .temp
+            .sample_temperature_c()
+            .map_err(MotorCalibrationSystemError::Temp)?;
         self.tick_alpha_beta_routine(
             calibrator,
             dt_seconds,
@@ -540,6 +609,7 @@ where
                 calibrator.tick(PhaseResistanceCalibrationInput {
                     phase_currents: current.expect("phase current required").currents,
                     mechanical_velocity: rotor.mechanical_velocity,
+                    winding_temperature_c,
                     dt_seconds: dt,
                 })
             },
@@ -552,7 +622,13 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     > {
         self.tick_alpha_beta_routine(
             calibrator,
@@ -574,7 +650,13 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     > {
         self.tick_alpha_beta_routine(
             calibrator,
@@ -599,7 +681,13 @@ where
         build_command: Build,
     ) -> Result<
         Option<R>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     >
     where
         Cal: RoutineState<R>,
@@ -632,7 +720,13 @@ where
         &mut self,
     ) -> Result<
         PhaseCurrentSample,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     > {
         let current = self
             .current
@@ -649,8 +743,16 @@ where
         &mut self,
         command: AlphaBeta<Volts>,
         bus_voltage: Volts,
-    ) -> Result<(), MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>>
-    {
+    ) -> Result<
+        (),
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
+    > {
         if command == AlphaBeta::new(Volts::ZERO, Volts::ZERO) {
             return self.set_neutral();
         }
@@ -668,7 +770,13 @@ where
         calibrator: &Cal,
     ) -> Result<
         Option<Option<R>>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     >
     where
         Cal: RoutineState<R>,
@@ -689,7 +797,13 @@ where
         calibrator: &Cal,
     ) -> Result<
         Option<R>,
-        MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
+        MotorCalibrationSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
     >
     where
         Cal: RoutineState<R>,
@@ -764,7 +878,7 @@ mod tests {
     };
     use fluxkit_hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, PhaseCurrentSample, PhasePwm,
-        RotorReading, RotorSensor, centered_phase_duty,
+        RotorReading, RotorSensor, TemperatureSensor, centered_phase_duty,
     };
     use fluxkit_math::{
         frame::Abc,
@@ -842,7 +956,26 @@ mod tests {
         }
     }
 
-    fn hardware() -> (FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor) {
+    #[derive(Debug)]
+    struct FakeTempSensor {
+        winding_temperature_c: f32,
+    }
+
+    impl TemperatureSensor for FakeTempSensor {
+        type Error = Infallible;
+
+        fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
+            Ok(self.winding_temperature_c)
+        }
+    }
+
+    fn hardware() -> (
+        FakePwm,
+        FakeCurrentSensor,
+        FakeBusSensor,
+        FakeRotor,
+        FakeTempSensor,
+    ) {
         (
             FakePwm::default(),
             FakeCurrentSensor {
@@ -860,6 +993,9 @@ mod tests {
                     mechanical_velocity: RadPerSec::ZERO,
                 },
             },
+            FakeTempSensor {
+                winding_temperature_c: 25.0,
+            },
         )
     }
 
@@ -868,17 +1004,26 @@ mod tests {
         current: FakeCurrentSensor,
         bus: FakeBusSensor,
         rotor: FakeRotor,
-    ) -> MotorCalibrationSystem<FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor, Svpwm> {
+        temp: FakeTempSensor,
+    ) -> MotorCalibrationSystem<
+        FakePwm,
+        FakeCurrentSensor,
+        FakeBusSensor,
+        FakeRotor,
+        FakeTempSensor,
+        Svpwm,
+    > {
         MotorCalibrationSystem::new(
             pwm,
             current,
             bus,
             rotor,
+            temp,
             Svpwm,
             super::MotorCalibrationRequest {
                 pole_pairs: Some(7),
                 electrical_angle_offset: Some(fluxkit_math::ElectricalAngle::new(0.0)),
-                phase_resistance_ohm: Some(fluxkit_math::units::Ohms::new(0.12)),
+                phase_resistance_ohm_ref: Some(fluxkit_math::units::Ohms::new(0.12)),
                 phase_inductance_h: Some(fluxkit_math::units::Henries::new(30.0e-6)),
                 flux_linkage_weber: Some(fluxkit_math::units::Webers::new(0.005)),
             },
@@ -895,9 +1040,9 @@ mod tests {
 
     #[test]
     fn resistance_wrapper_rejects_invalid_current_sample() {
-        let (pwm, mut current, bus, rotor) = hardware();
+        let (pwm, mut current, bus, rotor, temp) = hardware();
         current.sample.validity = CurrentSampleValidity::Invalid;
-        let mut system = system(pwm, current, bus, rotor);
+        let mut system = system(pwm, current, bus, rotor, temp);
         let calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
             settle_time_seconds: 0.01,
             sample_time_seconds: 0.01,
@@ -922,17 +1067,18 @@ mod tests {
 
     #[test]
     fn phase_reports_next_unresolved_step() {
-        let (pwm, current, bus, rotor) = hardware();
+        let (pwm, current, bus, rotor, temp) = hardware();
         let mut system = MotorCalibrationSystem::new(
             pwm,
             current,
             bus,
             rotor,
+            temp,
             Svpwm,
             super::MotorCalibrationRequest {
                 pole_pairs: None,
                 electrical_angle_offset: None,
-                phase_resistance_ohm: Some(fluxkit_math::units::Ohms::new(0.12)),
+                phase_resistance_ohm_ref: Some(fluxkit_math::units::Ohms::new(0.12)),
                 phase_inductance_h: Some(fluxkit_math::units::Henries::new(30.0e-6)),
                 flux_linkage_weber: Some(fluxkit_math::units::Webers::new(0.005)),
             },
@@ -959,9 +1105,9 @@ mod tests {
 
     #[test]
     fn inductance_wrapper_rejects_invalid_current_sample() {
-        let (pwm, mut current, bus, rotor) = hardware();
+        let (pwm, mut current, bus, rotor, temp) = hardware();
         current.sample.validity = CurrentSampleValidity::Invalid;
-        let mut system = system(pwm, current, bus, rotor);
+        let mut system = system(pwm, current, bus, rotor, temp);
         let calibrator = PhaseInductanceCalibrator::new(PhaseInductanceCalibrationConfig {
             phase_resistance_ohm: fluxkit_math::units::Ohms::new(0.12),
             settle_time_seconds: 0.01,
@@ -987,9 +1133,9 @@ mod tests {
 
     #[test]
     fn flux_linkage_wrapper_rejects_invalid_current_sample() {
-        let (pwm, mut current, bus, rotor) = hardware();
+        let (pwm, mut current, bus, rotor, temp) = hardware();
         current.sample.validity = CurrentSampleValidity::Invalid;
-        let mut system = system(pwm, current, bus, rotor);
+        let mut system = system(pwm, current, bus, rotor, temp);
         let calibrator = FluxLinkageCalibrator::new(FluxLinkageCalibrationConfig {
             phase_resistance_ohm: fluxkit_math::units::Ohms::new(0.12),
             phase_inductance_h: fluxkit_math::units::Henries::new(30.0e-6),

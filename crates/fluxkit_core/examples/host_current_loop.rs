@@ -14,7 +14,7 @@ fn main() {
     let motor = MotorParams::from_model_and_limits(
         MotorModel {
             pole_pairs: 7,
-            phase_resistance_ohm: Ohms::new(0.12),
+            phase_resistance_ohm_ref: Ohms::new(0.12),
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
@@ -84,6 +84,7 @@ fn main() {
         let output = controller.fast_tick(FastLoopInput {
             phase_currents,
             bus_voltage: Volts::new(24.0),
+            winding_temperature_c: 25.0,
             rotor: RotorEstimate {
                 mechanical_angle: ContinuousMechanicalAngle::new(
                     angle / motor.model().pole_pairs as f32,

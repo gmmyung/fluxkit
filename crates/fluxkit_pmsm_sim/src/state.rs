@@ -18,6 +18,8 @@ pub struct PmsmState {
     pub mechanical_velocity: RadPerSec,
     /// `d/q` current state.
     pub current_dq: Dq<Amps>,
+    /// Winding temperature in `°C`.
+    pub winding_temperature_c: f32,
 }
 
 /// Snapshot produced after one plant integration step.

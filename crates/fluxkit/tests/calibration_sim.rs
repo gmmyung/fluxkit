@@ -15,25 +15,27 @@ use fluxkit::{
     centered_phase_duty,
     hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
+        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
     },
     math::{
         inverse_clarke, inverse_park,
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
     },
 };
-use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState};
+use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState, ThermalPlantParams};
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
 const GEAR_RATIO: f32 = 2.0;
+const WINDING_TEMP_C: f32 = 25.0;
 
 fn plant_params() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             output_inertia_kg_m2: 0.0002,
             positive_coulomb_torque: NewtonMeters::new(0.02),
@@ -49,10 +51,11 @@ fn plant_params() -> PmsmParams {
 fn actuator_friction_plant_params() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0208,
@@ -71,10 +74,11 @@ fn actuator_friction_plant_params() -> PmsmParams {
 fn actuator_breakaway_plant_params() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0208,
@@ -94,7 +98,7 @@ fn controller_motor_params() -> MotorParams {
     MotorParams::from_model_and_limits(
         MotorModel {
             pole_pairs: 7,
-            phase_resistance_ohm: Ohms::new(0.12),
+            phase_resistance_ohm_ref: Ohms::new(0.12),
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
@@ -257,6 +261,19 @@ impl RotorSensor for SimRotor {
 }
 
 #[derive(Clone, Debug)]
+struct SimTemp {
+    shared: SharedHarness,
+}
+
+impl TemperatureSensor for SimTemp {
+    type Error = core::convert::Infallible;
+
+    fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
+        Ok(self.shared.borrow().plant.winding_temperature_c())
+    }
+}
+
+#[derive(Clone, Debug)]
 struct ThreadedSimPwm {
     shared: SharedThreadHarness,
 }
@@ -337,6 +354,19 @@ impl RotorSensor for ThreadedSimRotor {
 }
 
 #[derive(Clone, Debug)]
+struct ThreadedSimTemp {
+    shared: SharedThreadHarness,
+}
+
+impl TemperatureSensor for ThreadedSimTemp {
+    type Error = core::convert::Infallible;
+
+    fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
+        Ok(self.shared.lock().unwrap().plant.winding_temperature_c())
+    }
+}
+
+#[derive(Clone, Debug)]
 struct SimOutput {
     shared: SharedHarness,
 }
@@ -357,7 +387,7 @@ impl OutputSensor for SimOutput {
     }
 }
 
-fn calibration_hardware(shared: &SharedHarness) -> (SimPwm, SimCurrent, SimBus, SimRotor) {
+fn calibration_hardware(shared: &SharedHarness) -> (SimPwm, SimCurrent, SimBus, SimRotor, SimTemp) {
     (
         SimPwm {
             shared: Rc::clone(shared),
@@ -371,6 +401,9 @@ fn calibration_hardware(shared: &SharedHarness) -> (SimPwm, SimCurrent, SimBus, 
         SimRotor {
             shared: Rc::clone(shared),
         },
+        SimTemp {
+            shared: Rc::clone(shared),
+        },
     )
 }
 
@@ -381,6 +414,7 @@ fn threaded_calibration_hardware(
     ThreadedSimCurrent,
     ThreadedSimBus,
     ThreadedSimRotor,
+    ThreadedSimTemp,
 ) {
     (
         ThreadedSimPwm {
@@ -395,12 +429,15 @@ fn threaded_calibration_hardware(
         ThreadedSimRotor {
             shared: Arc::clone(shared),
         },
+        ThreadedSimTemp {
+            shared: Arc::clone(shared),
+        },
     )
 }
 
 fn motor_hardware(
     shared: &SharedHarness,
-) -> MotorHardware<SimPwm, SimCurrent, SimBus, SimRotor, SimOutput> {
+) -> MotorHardware<SimPwm, SimCurrent, SimBus, SimRotor, SimOutput, SimTemp> {
     MotorHardware {
         pwm: SimPwm {
             shared: Rc::clone(shared),
@@ -417,6 +454,9 @@ fn motor_hardware(
         output: SimOutput {
             shared: Rc::clone(shared),
         },
+        temp: SimTemp {
+            shared: Rc::clone(shared),
+        },
     }
 }
 
@@ -429,6 +469,7 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
                 mechanical_angle: ContinuousMechanicalAngle::new(0.4),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: fluxkit::Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: WINDING_TEMP_C,
             },
         )
         .unwrap(),
@@ -437,18 +478,19 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
         last_duty: centered_phase_duty(),
         rotor_bias: 0.0,
     }));
-    let (pwm, current, bus, rotor) = calibration_hardware(&shared);
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let params = plant_params();
     let mut system = MotorCalibrationSystem::new(
         pwm,
         current,
         bus,
         rotor,
+        temp,
         fluxkit::math::Svpwm,
         MotorCalibrationRequest {
             pole_pairs: Some(params.pole_pairs),
             electrical_angle_offset: Some(ElectricalAngle::new(0.0)),
-            phase_resistance_ohm: None,
+            phase_resistance_ohm_ref: None,
             phase_inductance_h: None,
             flux_linkage_weber: Some(params.flux_linkage_weber),
         },
@@ -468,7 +510,10 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
         }
     };
 
-    assert!((result.phase_resistance_ohm.get() - params.phase_resistance_ohm.get()).abs() < 0.01);
+    assert!(
+        (result.phase_resistance_ohm_ref.get() - params.phase_resistance_ohm_ref.get()).abs()
+            < 0.01
+    );
     assert!((result.phase_inductance_h.get() - params.d_inductance_h.get()).abs() < 3.0e-6);
 }
 
@@ -479,7 +524,7 @@ fn motor_calibration_results_apply_through_public_record() {
         electrical_angle_offset: ElectricalAngle::new(0.15),
     };
     let resistance_result = fluxkit::core::PhaseResistanceCalibrationResult {
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
     };
     let inductance_result = fluxkit::core::PhaseInductanceCalibrationResult {
         phase_inductance_h: Henries::new(30.0e-6),
@@ -497,7 +542,7 @@ fn motor_calibration_results_apply_through_public_record() {
     let mut motor = MotorParams::from_model_and_limits(
         MotorModel {
             pole_pairs: 1,
-            phase_resistance_ohm: Ohms::new(0.5),
+            phase_resistance_ohm_ref: Ohms::new(0.5),
             d_inductance_h: Henries::new(1.0e-3),
             q_inductance_h: Henries::new(1.0e-3),
             flux_linkage_weber: Webers::new(0.001),
@@ -512,7 +557,7 @@ fn motor_calibration_results_apply_through_public_record() {
 
     assert_eq!(motor.pole_pairs, 7);
     assert_eq!(motor.electrical_angle_offset, ElectricalAngle::new(0.15));
-    assert_eq!(motor.phase_resistance_ohm, Ohms::new(0.12));
+    assert_eq!(motor.phase_resistance_ohm_ref, Ohms::new(0.12));
     assert_eq!(motor.d_inductance_h, Henries::new(30.0e-6));
     assert_eq!(motor.q_inductance_h, Henries::new(30.0e-6));
     assert_eq!(motor.flux_linkage_weber, Webers::new(0.005));
@@ -523,7 +568,7 @@ fn motor_calibration_builds_params_from_limits() {
     let calibration = fluxkit::MotorCalibrationResult {
         pole_pairs: 7,
         electrical_angle_offset: ElectricalAngle::new(0.15),
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         phase_inductance_h: Henries::new(30.0e-6),
         flux_linkage_weber: Webers::new(0.005),
     };
@@ -535,7 +580,7 @@ fn motor_calibration_builds_params_from_limits() {
 
     assert_eq!(motor.pole_pairs, 7);
     assert_eq!(motor.electrical_angle_offset, ElectricalAngle::new(0.15));
-    assert_eq!(motor.phase_resistance_ohm, Ohms::new(0.12));
+    assert_eq!(motor.phase_resistance_ohm_ref, Ohms::new(0.12));
     assert_eq!(motor.d_inductance_h, Henries::new(30.0e-6));
     assert_eq!(motor.q_inductance_h, Henries::new(30.0e-6));
     assert_eq!(motor.flux_linkage_weber, Webers::new(0.005));
@@ -552,6 +597,7 @@ fn motor_calibration_system_recovers_pole_pairs_and_offset_through_public_wrappe
                 mechanical_angle: ContinuousMechanicalAngle::new(0.9),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: fluxkit::Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: WINDING_TEMP_C,
             },
         )
         .unwrap(),
@@ -560,17 +606,18 @@ fn motor_calibration_system_recovers_pole_pairs_and_offset_through_public_wrappe
         last_duty: centered_phase_duty(),
         rotor_bias: -0.11,
     }));
-    let (pwm, current, bus, rotor) = calibration_hardware(&shared);
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let mut system = MotorCalibrationSystem::new(
         pwm,
         current,
         bus,
         rotor,
+        temp,
         fluxkit::math::Svpwm,
         MotorCalibrationRequest {
             pole_pairs: None,
             electrical_angle_offset: None,
-            phase_resistance_ohm: Some(params.phase_resistance_ohm),
+            phase_resistance_ohm_ref: Some(params.phase_resistance_ohm_ref),
             phase_inductance_h: Some(params.d_inductance_h),
             flux_linkage_weber: Some(params.flux_linkage_weber),
         },
@@ -619,17 +666,18 @@ fn calibration_systems_report_current_or_next_phase() {
         rotor_bias: 0.0,
     }));
 
-    let (pwm, current, bus, rotor) = calibration_hardware(&shared);
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let motor = MotorCalibrationSystem::new(
         pwm,
         current,
         bus,
         rotor,
+        temp,
         fluxkit::math::Svpwm,
         MotorCalibrationRequest {
             pole_pairs: None,
             electrical_angle_offset: None,
-            phase_resistance_ohm: Some(Ohms::new(0.12)),
+            phase_resistance_ohm_ref: Some(Ohms::new(0.12)),
             phase_inductance_h: Some(Henries::new(0.000_03)),
             flux_linkage_weber: Some(Webers::new(0.005)),
         },
@@ -686,6 +734,7 @@ fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
                 mechanical_angle: ContinuousMechanicalAngle::new(0.4),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: fluxkit::Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: WINDING_TEMP_C,
             },
         )
         .unwrap(),
@@ -694,17 +743,18 @@ fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
         last_duty: centered_phase_duty(),
         rotor_bias: 0.0,
     }));
-    let (pwm, current, bus, rotor) = calibration_hardware(&shared);
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let mut system = MotorCalibrationSystem::new(
         pwm,
         current,
         bus,
         rotor,
+        temp,
         fluxkit::math::Svpwm,
         MotorCalibrationRequest {
             pole_pairs: Some(params.pole_pairs),
             electrical_angle_offset: Some(ElectricalAngle::new(0.0)),
-            phase_resistance_ohm: Some(params.phase_resistance_ohm),
+            phase_resistance_ohm_ref: Some(params.phase_resistance_ohm_ref),
             phase_inductance_h: Some(params.d_inductance_h),
             flux_linkage_weber: None,
         },
@@ -877,6 +927,7 @@ fn motor_calibration_system_runs_request_driven_campaign() {
                 mechanical_angle: ContinuousMechanicalAngle::new(0.4),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: fluxkit::Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: WINDING_TEMP_C,
             },
         )
         .unwrap(),
@@ -885,12 +936,13 @@ fn motor_calibration_system_runs_request_driven_campaign() {
         last_duty: centered_phase_duty(),
         rotor_bias: 0.21,
     }));
-    let (pwm, current, bus, rotor) = calibration_hardware(&shared);
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let mut system = MotorCalibrationSystem::new(
         pwm,
         current,
         bus,
         rotor,
+        temp,
         fluxkit::math::Svpwm,
         MotorCalibrationRequest::default(),
         MotorCalibrationLimits {
@@ -910,7 +962,10 @@ fn motor_calibration_system_runs_request_driven_campaign() {
     };
 
     assert_eq!(result.pole_pairs, params.pole_pairs);
-    assert!((result.phase_resistance_ohm.get() - params.phase_resistance_ohm.get()).abs() < 0.01);
+    assert!(
+        (result.phase_resistance_ohm_ref.get() - params.phase_resistance_ohm_ref.get()).abs()
+            < 0.01
+    );
     assert!((result.phase_inductance_h.get() - params.d_inductance_h.get()).abs() < 3.0e-6);
     assert!((result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 1.0e-4);
     assert!(result.electrical_angle_offset.get().is_finite());
@@ -926,6 +981,7 @@ fn motor_calibration_result_can_be_sent_from_irq_thread_to_main_context() {
                 mechanical_angle: ContinuousMechanicalAngle::new(0.4),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: fluxkit::Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: WINDING_TEMP_C,
             },
         )
         .unwrap(),
@@ -940,12 +996,13 @@ fn motor_calibration_result_can_be_sent_from_irq_thread_to_main_context() {
 
     thread::scope(|scope| {
         scope.spawn(move || {
-            let (pwm, current, bus, rotor) = threaded_calibration_hardware(&shared_for_irq);
+            let (pwm, current, bus, rotor, temp) = threaded_calibration_hardware(&shared_for_irq);
             let mut system = MotorCalibrationSystem::new(
                 pwm,
                 current,
                 bus,
                 rotor,
+                temp,
                 fluxkit::math::Svpwm,
                 MotorCalibrationRequest::default(),
                 MotorCalibrationLimits {
@@ -975,7 +1032,8 @@ fn motor_calibration_result_can_be_sent_from_irq_thread_to_main_context() {
 
         assert_eq!(motor_params.pole_pairs, params.pole_pairs);
         assert!(
-            (motor_params.phase_resistance_ohm.get() - params.phase_resistance_ohm.get()).abs()
+            (motor_params.phase_resistance_ohm_ref.get() - params.phase_resistance_ohm_ref.get())
+                .abs()
                 < 0.01
         );
         assert!((motor_params.d_inductance_h.get() - params.d_inductance_h.get()).abs() < 3.0e-6);
@@ -1104,10 +1162,11 @@ fn actuator_calibration_builds_compensated_params_from_limits() {
 fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity_target() {
     let params = PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0208,
@@ -1128,6 +1187,7 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
                 mechanical_angle: ContinuousMechanicalAngle::new(0.4),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: fluxkit::Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: WINDING_TEMP_C,
             },
         )
         .unwrap(),
@@ -1137,12 +1197,13 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
         rotor_bias: 0.18,
     }));
 
-    let (pwm, current, bus, rotor) = calibration_hardware(&shared);
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let mut motor_calibration = MotorCalibrationSystem::new(
         pwm,
         current,
         bus,
         rotor,
+        temp,
         fluxkit::math::Svpwm,
         MotorCalibrationRequest::default(),
         MotorCalibrationLimits {
@@ -1163,7 +1224,8 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
 
     assert_eq!(motor_result.pole_pairs, params.pole_pairs);
     assert!(
-        (motor_result.phase_resistance_ohm.get() - params.phase_resistance_ohm.get()).abs() < 0.01
+        (motor_result.phase_resistance_ohm_ref.get() - params.phase_resistance_ohm_ref.get()).abs()
+            < 0.01
     );
     assert!((motor_result.phase_inductance_h.get() - params.d_inductance_h.get()).abs() < 4.0e-6);
     assert!(

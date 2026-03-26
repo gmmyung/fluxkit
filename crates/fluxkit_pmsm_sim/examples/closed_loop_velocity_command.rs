@@ -11,7 +11,7 @@ use fluxkit_math::{
     inverse_clarke, inverse_park,
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
 };
-use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams};
+use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, ThermalPlantParams};
 use plotters::prelude::*;
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
@@ -158,6 +158,7 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
     FastLoopInput {
         phase_currents,
         bus_voltage,
+        winding_temperature_c: state.winding_temperature_c,
         rotor: RotorEstimate {
             mechanical_angle: wrapped_mechanical_angle.into(),
             mechanical_velocity: state.mechanical_velocity,
@@ -344,7 +345,7 @@ fn draw_plot(path: &str, samples: &[Sample]) -> Result<(), Box<dyn Error>> {
 fn motor_params() -> MotorParams {
     MotorParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
@@ -424,10 +425,11 @@ fn actuator_params_compensated() -> ActuatorParams {
 fn plant_params() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0208,

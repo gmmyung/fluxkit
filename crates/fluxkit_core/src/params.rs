@@ -5,6 +5,12 @@ use fluxkit_math::{
     units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts, Webers},
 };
 
+/// Fixed reference temperature used to normalize calibrated winding resistance.
+pub const PHASE_RESISTANCE_REFERENCE_TEMP_C: f32 = 25.0;
+
+/// Default copper-like winding resistance temperature coefficient in `1 / °C`.
+pub const PHASE_RESISTANCE_TEMP_COEFF_PER_C: f32 = 0.00393;
+
 /// Electrical motor model used by the controller.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -12,8 +18,8 @@ use fluxkit_math::{
 pub struct MotorModel {
     /// Number of electrical pole pairs.
     pub pole_pairs: u8,
-    /// Phase resistance.
-    pub phase_resistance_ohm: Ohms,
+    /// Phase resistance normalized to [`PHASE_RESISTANCE_REFERENCE_TEMP_C`].
+    pub phase_resistance_ohm_ref: Ohms,
     /// `d`-axis inductance.
     pub d_inductance_h: Henries,
     /// `q`-axis inductance.
@@ -32,8 +38,8 @@ pub struct MotorModel {
 pub struct MotorParams {
     /// Number of electrical pole pairs.
     pub pole_pairs: u8,
-    /// Phase resistance.
-    pub phase_resistance_ohm: Ohms,
+    /// Phase resistance normalized to [`PHASE_RESISTANCE_REFERENCE_TEMP_C`].
+    pub phase_resistance_ohm_ref: Ohms,
     /// `d`-axis inductance.
     pub d_inductance_h: Henries,
     /// `q`-axis inductance.
@@ -83,7 +89,7 @@ impl MotorParams {
     pub const fn from_model_and_limits(model: MotorModel, limits: MotorLimits) -> Self {
         Self {
             pole_pairs: model.pole_pairs,
-            phase_resistance_ohm: model.phase_resistance_ohm,
+            phase_resistance_ohm_ref: model.phase_resistance_ohm_ref,
             d_inductance_h: model.d_inductance_h,
             q_inductance_h: model.q_inductance_h,
             flux_linkage_weber: model.flux_linkage_weber,
@@ -97,7 +103,7 @@ impl MotorParams {
     pub const fn model(&self) -> MotorModel {
         MotorModel {
             pole_pairs: self.pole_pairs,
-            phase_resistance_ohm: self.phase_resistance_ohm,
+            phase_resistance_ohm_ref: self.phase_resistance_ohm_ref,
             d_inductance_h: self.d_inductance_h,
             q_inductance_h: self.q_inductance_h,
             flux_linkage_weber: self.flux_linkage_weber,

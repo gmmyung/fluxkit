@@ -11,10 +11,13 @@
 //! $$v_q = R i_q + L_q \frac{d i_q}{dt} + \omega_e (L_d i_d + \psi_m)$$
 //! $$\tau_e = \frac{3}{2} p \left(\psi_m i_q + (L_d - L_q) i_d i_q \right)$$
 //! $$J_{eq} \frac{d \omega_m}{dt} = \tau_e - \tau_{load} - \tau_{mech} - \tau_{actuator,ref}$$
+//! $$C_{th} \frac{dT}{dt} = P_{cu} - G_{th}(T - T_{amb})$$
 //!
 //! Here \(J_{eq}\) and \(\tau_{mech}\) come from the actuator/drivetrain model,
 //! which owns the combined equivalent output-side inertia and unified friction
-//! reflected through the gear ratio.
+//! reflected through the gear ratio. The electrical model also tracks a lumped
+//! winding temperature state, using copper loss \(P_{cu}\) and a first-order
+//! thermal conductance back to ambient.
 //!
 //! Phase-domain excitation is supported too, but at the averaged plant-input
 //! level:
@@ -46,8 +49,11 @@ use fluxkit_math::{
 };
 
 pub use error::Error;
-pub use params::{ActuatorPlantParams, PmsmParams};
+pub use params::{ActuatorPlantParams, PmsmParams, ThermalPlantParams};
 pub use state::{PmsmSnapshot, PmsmState};
+
+const PHASE_RESISTANCE_REFERENCE_TEMP_C: f32 = 25.0;
+const PHASE_RESISTANCE_TEMP_COEFF_PER_C: f32 = 0.00393;
 
 /// Ideal PMSM plant model with rigid-shaft mechanical dynamics.
 #[derive(Clone, Debug)]
@@ -70,12 +76,14 @@ impl PmsmModel {
 
     /// Creates a plant model with zero current, angle, and velocity.
     pub fn new_zeroed(params: PmsmParams) -> Result<Self, Error> {
+        let initial_winding_temperature_c = params.thermal.ambient_temperature_c;
         Self::new(
             params,
             PmsmState {
                 mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: initial_winding_temperature_c,
             },
         )
     }
@@ -90,6 +98,12 @@ impl PmsmModel {
     #[inline]
     pub const fn state(&self) -> &PmsmState {
         &self.state
+    }
+
+    /// Returns the current winding temperature in `°C`.
+    #[inline]
+    pub const fn winding_temperature_c(&self) -> f32 {
+        self.state.winding_temperature_c
     }
 
     /// Steps the plant using a rotating-frame `d/q` voltage input held constant over the step.
@@ -265,7 +279,7 @@ impl PmsmModel {
     ) -> PlantDerivative {
         let params = &self.params;
         let pole_pairs = params.pole_pairs as f32;
-        let resistance = params.phase_resistance_ohm.get();
+        let resistance = phase_resistance_ohm(params, state.winding_temperature_c);
         let ld = params.d_inductance_h.get();
         let lq = params.q_inductance_h.get();
         let flux = params.flux_linkage_weber.get();
@@ -286,12 +300,17 @@ impl PmsmModel {
         let total_motor_side_inertia = params.actuator.reflected_inertia_kg_m2();
         let domega = (torque - load_torque - reflected_actuator_friction)
             / total_motor_side_inertia.max(f32::EPSILON);
+        let copper_loss_w = 1.5 * resistance * (state.id * state.id + state.iq * state.iq);
+        let cooling_w = params.thermal.winding_thermal_conductance_w_per_c
+            * (state.winding_temperature_c - params.thermal.ambient_temperature_c);
+        let dtemp = (copper_loss_w - cooling_w) / params.thermal.winding_thermal_capacity_j_per_c;
 
         PlantDerivative {
             did,
             diq,
             domega,
             dtheta: state.omega_mech,
+            dtemp,
         }
     }
 
@@ -401,6 +420,7 @@ struct PlantState {
     iq: f32,
     omega_mech: f32,
     theta_mech: f32,
+    winding_temperature_c: f32,
 }
 
 impl PlantState {
@@ -410,6 +430,7 @@ impl PlantState {
             iq: self.iq + rhs.diq * scale,
             omega_mech: self.omega_mech + rhs.domega * scale,
             theta_mech: self.theta_mech + rhs.dtheta * scale,
+            winding_temperature_c: self.winding_temperature_c + rhs.dtemp * scale,
         }
     }
 
@@ -429,6 +450,8 @@ impl PlantState {
                 + scale * (k1.domega + 2.0 * k2.domega + 2.0 * k3.domega + k4.domega),
             theta_mech: self.theta_mech
                 + scale * (k1.dtheta + 2.0 * k2.dtheta + 2.0 * k3.dtheta + k4.dtheta),
+            winding_temperature_c: self.winding_temperature_c
+                + scale * (k1.dtemp + 2.0 * k2.dtemp + 2.0 * k3.dtemp + k4.dtemp),
         }
     }
 }
@@ -440,6 +463,7 @@ impl From<PmsmState> for PlantState {
             iq: value.current_dq.q.get(),
             omega_mech: value.mechanical_velocity.get(),
             theta_mech: value.mechanical_angle.get(),
+            winding_temperature_c: value.winding_temperature_c,
         }
     }
 }
@@ -450,6 +474,7 @@ impl From<PlantState> for PmsmState {
             mechanical_angle: ContinuousMechanicalAngle::new(value.theta_mech),
             mechanical_velocity: RadPerSec::new(value.omega_mech),
             current_dq: Dq::new(Amps::new(value.id), Amps::new(value.iq)),
+            winding_temperature_c: value.winding_temperature_c,
         }
     }
 }
@@ -460,6 +485,7 @@ struct PlantDerivative {
     diq: f32,
     domega: f32,
     dtheta: f32,
+    dtemp: f32,
 }
 
 fn electromagnetic_torque(params: &PmsmParams, id: f32, iq: f32) -> f32 {
@@ -467,6 +493,11 @@ fn electromagnetic_torque(params: &PmsmParams, id: f32, iq: f32) -> f32 {
     1.5 * pole_pairs
         * (params.flux_linkage_weber.get() * iq
             + (params.d_inductance_h.get() - params.q_inductance_h.get()) * id * iq)
+}
+
+fn phase_resistance_ohm(params: &PmsmParams, winding_temperature_c: f32) -> f32 {
+    let delta_temp_c = winding_temperature_c - PHASE_RESISTANCE_REFERENCE_TEMP_C;
+    params.phase_resistance_ohm_ref.get() * (1.0 + PHASE_RESISTANCE_TEMP_COEFF_PER_C * delta_temp_c)
 }
 
 fn actuator_friction_torque(
@@ -541,10 +572,13 @@ fn phase_voltage_from_duty(phase_duty: PhaseDuty, bus_voltage: Volts) -> Abc<Vol
 
 fn validate_params(params: &PmsmParams) -> bool {
     params.pole_pairs > 0
-        && finite_positive(params.phase_resistance_ohm.get())
+        && finite_positive(params.phase_resistance_ohm_ref.get())
         && finite_positive(params.d_inductance_h.get())
         && finite_positive(params.q_inductance_h.get())
         && finite_positive(params.flux_linkage_weber.get())
+        && params.thermal.ambient_temperature_c.is_finite()
+        && finite_positive(params.thermal.winding_thermal_capacity_j_per_c)
+        && finite_non_negative(params.thermal.winding_thermal_conductance_w_per_c)
         && finite_positive(params.actuator.gear_ratio)
         && finite_positive(params.actuator.output_inertia_kg_m2)
         && finite_non_negative(params.actuator.positive_breakaway_torque.get())
@@ -565,6 +599,7 @@ fn validate_state(state: &PmsmState) -> bool {
         && state.mechanical_velocity.get().is_finite()
         && state.current_dq.d.get().is_finite()
         && state.current_dq.q.get().is_finite()
+        && state.winding_temperature_c.is_finite()
 }
 
 fn validate_step_input(applied_vdq: Dq<f32>, load_torque: NewtonMeters, dt_seconds: f32) -> bool {
@@ -621,10 +656,11 @@ mod tests {
     fn test_params() -> PmsmParams {
         PmsmParams {
             pole_pairs: 7,
-            phase_resistance_ohm: Ohms::new(0.12),
+            phase_resistance_ohm_ref: Ohms::new(0.12),
             d_inductance_h: Henries::new(0.00003),
             q_inductance_h: Henries::new(0.00003),
             flux_linkage_weber: Webers::new(0.005),
+            thermal: crate::ThermalPlantParams::default_for_ambient(25.0),
             actuator: crate::ActuatorPlantParams {
                 output_inertia_kg_m2: 0.0002,
                 positive_viscous_coefficient: 0.0001,
@@ -682,6 +718,66 @@ mod tests {
     }
 
     #[test]
+    fn hotter_winding_reduces_current_buildup_for_same_voltage() {
+        let mut cool_params = test_params();
+        cool_params.thermal.ambient_temperature_c = 25.0;
+        let mut hot_params = test_params();
+        hot_params.thermal.ambient_temperature_c = 125.0;
+
+        let mut cool_plant = PmsmModel::new_zeroed(cool_params).unwrap();
+        let mut hot_plant = PmsmModel::new_zeroed(hot_params).unwrap();
+
+        for _ in 0..200 {
+            cool_plant
+                .step_vdq(
+                    Dq::new(Volts::ZERO, Volts::new(3.0)),
+                    NewtonMeters::ZERO,
+                    1.0 / 20_000.0,
+                )
+                .unwrap();
+            hot_plant
+                .step_vdq(
+                    Dq::new(Volts::ZERO, Volts::new(3.0)),
+                    NewtonMeters::ZERO,
+                    1.0 / 20_000.0,
+                )
+                .unwrap();
+        }
+
+        assert!(
+            hot_plant.state().current_dq.q.get() < cool_plant.state().current_dq.q.get(),
+            "hot q current = {}, cool q current = {}",
+            hot_plant.state().current_dq.q.get(),
+            cool_plant.state().current_dq.q.get()
+        );
+    }
+
+    #[test]
+    fn winding_temperature_rises_under_sustained_current() {
+        let mut params = test_params();
+        params.thermal.winding_thermal_capacity_j_per_c = 5.0;
+        let mut plant = PmsmModel::new_zeroed(params).unwrap();
+        let initial_temp_c = plant.winding_temperature_c();
+
+        for _ in 0..20_000 {
+            plant
+                .step_vdq(
+                    Dq::new(Volts::ZERO, Volts::new(3.0)),
+                    NewtonMeters::ZERO,
+                    1.0 / 20_000.0,
+                )
+                .unwrap();
+        }
+
+        assert!(
+            plant.winding_temperature_c() > initial_temp_c,
+            "final temperature = {}, initial temperature = {}",
+            plant.winding_temperature_c(),
+            initial_temp_c
+        );
+    }
+
+    #[test]
     fn duty_helper_removes_common_mode() {
         let mut plant = PmsmModel::new_zeroed(test_params()).unwrap();
         let snapshot = plant
@@ -734,6 +830,7 @@ mod tests {
                 mechanical_angle: ContinuousMechanicalAngle::new(core::f32::consts::TAU + 0.25),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: 25.0,
             },
         )
         .unwrap();
@@ -801,6 +898,7 @@ mod tests {
                 mechanical_angle: ContinuousMechanicalAngle::new(1.0),
                 mechanical_velocity: RadPerSec::new(2.0),
                 current_dq: Dq::new(Amps::new(0.5), Amps::new(-0.25)),
+                winding_temperature_c: 25.0,
             },
         )
         .unwrap();

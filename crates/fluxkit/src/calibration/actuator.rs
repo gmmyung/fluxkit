@@ -9,7 +9,9 @@ use fluxkit_core::{
     ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig, InverterParams, MotorParams,
     MotorState, MotorStatus,
 };
-use fluxkit_hal::{BusVoltageSensor, CurrentSampler, OutputSensor, PhasePwm, RotorSensor};
+use fluxkit_hal::{
+    BusVoltageSensor, CurrentSampler, OutputSensor, PhasePwm, RotorSensor, TemperatureSensor,
+};
 use fluxkit_math::{
     Modulator,
     units::{NewtonMeters, RadPerSec},
@@ -21,21 +23,22 @@ use crate::{MotorHardware, MotorSystem, MotorSystemError, system::MechanicalMoti
 /// HAL and integration failures that can occur while running actuator-side
 /// calibration through the full public motor-system wrapper.
 #[derive(Debug)]
-pub enum ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE> {
+pub enum ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> {
     /// Underlying motor-system operation failed.
-    Motor(MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE>),
+    Motor(MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>),
     /// The pure core calibration procedure failed.
     Calibration(CalibrationError),
 }
 
-impl<PwmE, CurrentE, BusE, RotorE, OutputE> fmt::Display
-    for ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE>
+impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> fmt::Display
+    for ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: fmt::Display,
     CurrentE: fmt::Display,
     BusE: fmt::Display,
     RotorE: fmt::Display,
     OutputE: fmt::Display,
+    TempE: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -45,14 +48,15 @@ where
     }
 }
 
-impl<PwmE, CurrentE, BusE, RotorE, OutputE> core::error::Error
-    for ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE>
+impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> core::error::Error
+    for ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: core::error::Error + 'static,
     CurrentE: core::error::Error + 'static,
     BusE: core::error::Error + 'static,
     RotorE: core::error::Error + 'static,
     OutputE: core::error::Error + 'static,
+    TempE: core::error::Error + 'static,
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -203,8 +207,18 @@ impl ActuatorCalibrationResult {
 /// Encapsulated synchronous actuator-calibration stack built on the public
 /// `MotorSystem` wrapper.
 #[derive(Debug)]
-pub struct ActuatorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
-    motor_system: MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+pub struct ActuatorCalibrationSystem<
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    RotorEst,
+    OutputEst,
+> {
+    motor_system: MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
     limits: ActuatorCalibrationLimits,
     dt_seconds: f32,
     gear_ratio: Option<f32>,
@@ -218,14 +232,15 @@ pub struct ActuatorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, Roto
     active_routine: Option<ActuatorCalibrationRoutine>,
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
-    ActuatorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    ActuatorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
     BUS: BusVoltageSensor,
     ROTOR: RotorSensor,
     OUTPUT: OutputSensor,
+    TEMP: TemperatureSensor,
     MOD: Modulator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
@@ -244,7 +259,7 @@ where
     /// then let subsequent completed actuator-calibration deltas patch the live
     /// controller parameters automatically.
     pub fn new(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
+        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
         motor: MotorParams,
         inverter: InverterParams,
         config: CurrentLoopConfig,
@@ -297,7 +312,7 @@ where
     #[inline]
     pub const fn motor_system(
         &self,
-    ) -> &MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+    ) -> &MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
         &self.motor_system
     }
 
@@ -305,7 +320,7 @@ where
     #[inline]
     pub fn motor_system_mut(
         &mut self,
-    ) -> &mut MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+    ) -> &mut MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
         &mut self.motor_system
     }
 
@@ -313,7 +328,7 @@ where
     #[inline]
     pub fn into_motor_system(
         self,
-    ) -> MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+    ) -> MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
         self.motor_system
     }
 
@@ -337,6 +352,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         let partial = self.partial_calibration();
@@ -408,6 +424,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         match routine {
@@ -577,6 +594,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         self.tick_calibrator(
@@ -610,6 +628,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         self.tick_calibrator(
@@ -644,6 +663,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         self.tick_calibrator(
@@ -678,6 +698,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         self.tick_calibrator(
@@ -716,6 +737,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     >
     where
@@ -723,7 +745,7 @@ where
         R: Into<PartialActuatorCalibration>,
         Build: FnOnce(&mut Cal, MotorStatus, f32) -> Command,
         Apply: FnOnce(
-            &mut MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+            &mut MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
             Command,
         ),
     {
@@ -755,6 +777,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         if require_friction_disabled
@@ -792,6 +815,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     >
     where
@@ -822,6 +846,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     >
     where
@@ -851,6 +876,7 @@ where
             BUS::Error,
             ROTOR::Error,
             OUTPUT::Error,
+            TEMP::Error,
         >,
     > {
         self.motor_system

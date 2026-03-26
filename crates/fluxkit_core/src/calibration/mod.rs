@@ -8,7 +8,7 @@
 //!
 //! - motor electrical:
 //!   - pole pairs + electrical angle offset
-//!   - phase resistance
+//!   - phase resistance normalized to `25°C`
 //!   - phase inductance
 //!   - flux linkage
 //! - actuator friction:

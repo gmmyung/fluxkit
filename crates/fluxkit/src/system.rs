@@ -11,6 +11,7 @@
 //! Each call to [`MotorSystem::tick`] performs one full control step:
 //!
 //! - sample hardware
+//! - sample winding temperature
 //! - update motion estimators
 //! - run the controller
 //! - apply PWM duty
@@ -53,6 +54,7 @@ use fluxkit_core::{
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputSensor, PhasePwm, RotorSensor,
+    TemperatureSensor,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle, MechanicalMotionEstimate, MechanicalMotionSample,
@@ -63,7 +65,7 @@ use fluxkit_math::{
 
 /// Concrete hardware handles required to run one motor-control loop.
 #[derive(Debug)]
-pub struct MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
+pub struct MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP> {
     /// Three-phase PWM output stage.
     pub pwm: PWM,
     /// Phase-current acquisition path.
@@ -74,11 +76,13 @@ pub struct MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
     pub rotor: ROTOR,
     /// Output-axis sensing path.
     pub output: OUTPUT,
+    /// Motor winding temperature sensing path.
+    pub temp: TEMP,
 }
 
 /// HAL and integration failures that can occur outside the pure controller.
 #[derive(Debug)]
-pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE> {
+pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> {
     /// PWM output operation failed.
     Pwm(PwmE),
     /// Phase-current acquisition failed.
@@ -89,18 +93,21 @@ pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE> {
     Rotor(RotorE),
     /// Output-sensor acquisition failed.
     Output(OutputE),
+    /// Temperature-sensor acquisition failed.
+    Temp(TempE),
     /// The current sample was explicitly marked invalid for control use.
     InvalidCurrentSample,
 }
 
-impl<PwmE, CurrentE, BusE, RotorE, OutputE> fmt::Display
-    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE>
+impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> fmt::Display
+    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: fmt::Display,
     CurrentE: fmt::Display,
     BusE: fmt::Display,
     RotorE: fmt::Display,
     OutputE: fmt::Display,
+    TempE: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -109,19 +116,21 @@ where
             Self::Bus(error) => write!(f, "bus-voltage error: {error}"),
             Self::Rotor(error) => write!(f, "rotor-sensor error: {error}"),
             Self::Output(error) => write!(f, "output-sensor error: {error}"),
+            Self::Temp(error) => write!(f, "temperature-sensor error: {error}"),
             Self::InvalidCurrentSample => f.write_str("invalid current sample"),
         }
     }
 }
 
-impl<PwmE, CurrentE, BusE, RotorE, OutputE> core::error::Error
-    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE>
+impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> core::error::Error
+    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: core::error::Error + 'static,
     CurrentE: core::error::Error + 'static,
     BusE: core::error::Error + 'static,
     RotorE: core::error::Error + 'static,
     OutputE: core::error::Error + 'static,
+    TempE: core::error::Error + 'static,
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -130,6 +139,7 @@ where
             Self::Bus(error) => Some(error),
             Self::Rotor(error) => Some(error),
             Self::Output(error) => Some(error),
+            Self::Temp(error) => Some(error),
             Self::InvalidCurrentSample => None,
         }
     }
@@ -249,8 +259,8 @@ impl<'a> MotorHandle<'a> {
 }
 
 #[derive(Debug)]
-struct MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
-    hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
+struct MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
     controller: MotorController<MOD>,
     rotor_estimator: RotorEst,
     output_estimator: OutputEst,
@@ -263,15 +273,16 @@ struct MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, Output
 /// This is useful when one context owns loop execution and another only needs
 /// the shared [`MotorHandle`] view.
 #[derive(Debug)]
-pub struct MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
-    runtime: &'a mut MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+pub struct MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    runtime:
+        &'a mut MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
     shared: &'a Mutex<RefCell<SharedRuntimeState>>,
 }
 
 /// Owned motor runtime plus shared command/status state.
 #[derive(Debug)]
-pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
-    runtime: MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    runtime: MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
     shared: Mutex<RefCell<SharedRuntimeState>>,
 }
 
@@ -295,8 +306,8 @@ impl<T> MechanicalMotionEstimator for T where
 {
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
-    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     MOD: Modulator,
     RotorEst: MechanicalMotionEstimator,
@@ -305,7 +316,7 @@ where
     /// Creates a new motor system with an explicit loop period,
     /// controller, and rotor/output estimators.
     pub fn new(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
+        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
         controller: MotorController<MOD>,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
@@ -346,7 +357,7 @@ where
     pub fn split(
         &mut self,
     ) -> (
-        MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
+        MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
         MotorHandle<'_>,
     ) {
         (
@@ -385,14 +396,15 @@ where
     }
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
-    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
     BUS: BusVoltageSensor,
     ROTOR: RotorSensor,
     OUTPUT: OutputSensor,
+    TEMP: TemperatureSensor,
     MOD: Modulator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
@@ -400,7 +412,7 @@ where
     #[inline]
     fn runtime(
         &mut self,
-    ) -> MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
+    ) -> MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
         MotorRuntime {
             runtime: &mut self.runtime,
             shared: &self.shared,
@@ -410,14 +422,16 @@ where
     /// Returns shared access to the owned hardware handles.
     #[inline]
     #[cfg(test)]
-    pub(crate) const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
+    pub(crate) const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP> {
         &self.runtime.hardware
     }
 
     /// Returns mutable access to the owned hardware handles.
     #[inline]
     #[cfg(test)]
-    pub(crate) fn hardware_mut(&mut self) -> &mut MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT> {
+    pub(crate) fn hardware_mut(
+        &mut self,
+    ) -> &mut MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP> {
         &mut self.runtime.hardware
     }
 
@@ -438,7 +452,7 @@ where
     pub fn into_parts(
         self,
     ) -> (
-        MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
+        MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
         MotorController<MOD>,
         RotorEst,
         OutputEst,
@@ -459,7 +473,14 @@ where
         &mut self,
     ) -> Result<
         FastLoopOutput,
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         self.runtime().tick()
     }
@@ -470,7 +491,14 @@ where
         &mut self,
     ) -> Result<
         (),
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         critical_section::with(|cs| {
             self.shared.borrow(cs).borrow_mut().status.armed = true;
@@ -486,7 +514,14 @@ where
         &mut self,
     ) -> Result<
         (),
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         critical_section::with(|cs| {
             self.shared.borrow(cs).borrow_mut().status.armed = false;
@@ -497,14 +532,15 @@ where
     }
 }
 
-impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
-    MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>
+impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
     BUS: BusVoltageSensor,
     ROTOR: RotorSensor,
     OUTPUT: OutputSensor,
+    TEMP: TemperatureSensor,
     MOD: Modulator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
@@ -513,7 +549,14 @@ where
         &mut self,
     ) -> Result<
         bool,
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         let (command, command_dirty, clear_fault_requested, armed_requested) =
             critical_section::with(|cs| {
@@ -607,7 +650,14 @@ where
         &mut self,
     ) -> Result<
         (),
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         self.runtime
             .hardware
@@ -635,7 +685,14 @@ where
         &mut self,
     ) -> Result<
         FastLoopOutput,
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         let output = match self.execute_fast_cycle(self.runtime.dt_seconds) {
             Ok(output) => output,
@@ -656,7 +713,14 @@ where
         schedule: TickSchedule,
     ) -> Result<
         FastLoopOutput,
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         let armed = self.sync_runtime_requests()?;
         if !armed {
@@ -688,6 +752,12 @@ where
             .bus
             .sample_bus_voltage()
             .map_err(MotorSystemError::Bus)?;
+        let winding_temperature_c = self
+            .runtime
+            .hardware
+            .temp
+            .sample_temperature_c()
+            .map_err(MotorSystemError::Temp)?;
 
         let rotor = self
             .runtime
@@ -720,6 +790,7 @@ where
             FastLoopInput {
                 phase_currents: current.currents,
                 bus_voltage,
+                winding_temperature_c,
                 rotor: RotorEstimate {
                     mechanical_angle: rotor_motion.unwrapped(),
                     mechanical_velocity: rotor_motion.velocity(),
@@ -749,7 +820,14 @@ where
         dt_seconds: f32,
     ) -> Result<
         FastLoopOutput,
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
+        MotorSystemError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
     > {
         self.run_cycle(
             dt_seconds,
@@ -768,7 +846,8 @@ mod tests {
     };
     use fluxkit_hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
+        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
+        centered_phase_duty,
     };
     use fluxkit_math::{
         ContinuousMechanicalAngle, MechanicalAngle, WrappedEstimator,
@@ -839,6 +918,19 @@ mod tests {
 
         fn sample_bus_voltage(&mut self) -> Result<Volts, Self::Error> {
             Ok(self.voltage)
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeTempSensor {
+        winding_temperature_c: f32,
+    }
+
+    impl TemperatureSensor for FakeTempSensor {
+        type Error = Infallible;
+
+        fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
+            Ok(self.winding_temperature_c)
         }
     }
 
@@ -920,7 +1012,7 @@ mod tests {
         MotorParams::from_model_and_limits(
             MotorModel {
                 pole_pairs: 7,
-                phase_resistance_ohm: Ohms::new(0.08),
+                phase_resistance_ohm_ref: Ohms::new(0.08),
                 d_inductance_h: Henries::new(0.00012),
                 q_inductance_h: Henries::new(0.00012),
                 flux_linkage_weber: fluxkit_math::units::Webers::new(0.05),
@@ -977,7 +1069,14 @@ mod tests {
 
     fn hardware(
         validity: CurrentSampleValidity,
-    ) -> MotorHardware<FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor, FakeOutput> {
+    ) -> MotorHardware<
+        FakePwm,
+        FakeCurrentSensor,
+        FakeBusSensor,
+        FakeRotor,
+        FakeOutput,
+        FakeTempSensor,
+    > {
         MotorHardware {
             pwm: FakePwm::default(),
             current: FakeCurrentSensor {
@@ -1000,6 +1099,9 @@ mod tests {
                     mechanical_angle: fluxkit_math::MechanicalAngle::new(0.0),
                     mechanical_velocity: RadPerSec::new(0.0),
                 },
+            },
+            temp: FakeTempSensor {
+                winding_temperature_c: 25.0,
             },
         }
     }

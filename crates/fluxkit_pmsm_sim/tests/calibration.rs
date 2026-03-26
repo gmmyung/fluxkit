@@ -18,7 +18,7 @@ use fluxkit_math::{
     inverse_clarke, inverse_park,
     units::{Henries, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
 };
-use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState};
+use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState, ThermalPlantParams};
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
 const GEAR_RATIO: f32 = 2.0;
@@ -26,10 +26,11 @@ const GEAR_RATIO: f32 = 2.0;
 fn motor_params() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             output_inertia_kg_m2: 0.0002,
             positive_coulomb_torque: NewtonMeters::new(0.02),
@@ -46,7 +47,7 @@ fn controller_motor_params() -> fluxkit_core::MotorParams {
     fluxkit_core::MotorParams::from_model_and_limits(
         MotorModel {
             pole_pairs: 7,
-            phase_resistance_ohm: Ohms::new(0.12),
+            phase_resistance_ohm_ref: Ohms::new(0.12),
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
@@ -117,10 +118,11 @@ fn actuator_params_unknown_ratio() -> ActuatorParams {
 fn plant_params_with_asymmetric_friction() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0208,
@@ -139,10 +141,11 @@ fn plant_params_with_asymmetric_friction() -> PmsmParams {
 fn plant_params_with_breakaway() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0208,
@@ -174,6 +177,7 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
     FastLoopInput {
         phase_currents,
         bus_voltage,
+        winding_temperature_c: state.winding_temperature_c,
         rotor: RotorEstimate {
             mechanical_angle: wrapped_mechanical_angle.into(),
             mechanical_velocity: state.mechanical_velocity,
@@ -197,6 +201,7 @@ fn magnetic_hold_recovers_phase_resistance() {
             mechanical_angle: ContinuousMechanicalAngle::new(0.4),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
+            winding_temperature_c: 25.0,
         },
     )
     .unwrap();
@@ -220,6 +225,7 @@ fn magnetic_hold_recovers_phase_resistance() {
         let command = calibrator.tick(PhaseResistanceCalibrationInput {
             phase_currents,
             mechanical_velocity: plant.state().mechanical_velocity,
+            winding_temperature_c: plant.state().winding_temperature_c,
             dt_seconds: FAST_DT_SECONDS,
         });
 
@@ -236,10 +242,11 @@ fn magnetic_hold_recovers_phase_resistance() {
     assert_eq!(calibrator.error(), None);
     let result = calibrator.result().unwrap();
     assert!(
-        (result.phase_resistance_ohm.get() - params.phase_resistance_ohm.get()).abs() < 0.01,
+        (result.phase_resistance_ohm_ref.get() - params.phase_resistance_ohm_ref.get()).abs()
+            < 0.01,
         "estimated R = {}, actual R = {}",
-        result.phase_resistance_ohm.get(),
-        params.phase_resistance_ohm.get()
+        result.phase_resistance_ohm_ref.get(),
+        params.phase_resistance_ohm_ref.get()
     );
 }
 
@@ -252,11 +259,12 @@ fn magnetic_hold_recovers_phase_inductance() {
             mechanical_angle: ContinuousMechanicalAngle::new(0.4),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
+            winding_temperature_c: 25.0,
         },
     )
     .unwrap();
     let mut calibrator = PhaseInductanceCalibrator::new(PhaseInductanceCalibrationConfig {
-        phase_resistance_ohm: params.phase_resistance_ohm,
+        phase_resistance_ohm: params.phase_resistance_ohm_ref,
         hold_voltage_mag: Volts::new(1.0),
         step_voltage_mag: Volts::new(0.5),
         align_stator_angle: ElectricalAngle::new(0.0),
@@ -309,6 +317,7 @@ fn slow_sweep_recovers_pole_pairs_and_offset() {
             mechanical_angle: ContinuousMechanicalAngle::new(0.9),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
+            winding_temperature_c: 25.0,
         },
     )
     .unwrap();
@@ -371,11 +380,12 @@ fn controlled_spin_recovers_flux_linkage() {
             mechanical_angle: ContinuousMechanicalAngle::new(0.4),
             mechanical_velocity: RadPerSec::ZERO,
             current_dq: fluxkit_math::Dq::new(fluxkit_math::Amps::ZERO, fluxkit_math::Amps::ZERO),
+            winding_temperature_c: 25.0,
         },
     )
     .unwrap();
     let mut calibrator = FluxLinkageCalibrator::new(FluxLinkageCalibrationConfig {
-        phase_resistance_ohm: params.phase_resistance_ohm,
+        phase_resistance_ohm: params.phase_resistance_ohm_ref,
         phase_inductance_h: params.d_inductance_h,
         pole_pairs: params.pole_pairs,
         electrical_angle_offset: ElectricalAngle::new(0.0),

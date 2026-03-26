@@ -1,6 +1,6 @@
-//! Optional temperature-sensing traits.
+//! Synchronous winding-temperature sensing traits.
 
-/// Optional synchronous temperature sensor.
+/// Synchronous temperature sensor.
 pub trait TemperatureSensor {
     /// Platform-specific error type.
     type Error: core::error::Error;

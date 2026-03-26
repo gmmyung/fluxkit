@@ -10,20 +10,21 @@ use fluxkit::{
     PassThroughEstimator, centered_phase_duty,
     hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
+        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
     },
     math::{
         Dq, inverse_clarke, inverse_park,
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
     },
 };
-use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState};
+use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState, ThermalPlantParams};
 use plotters::prelude::*;
 use static_cell::StaticCell;
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
 const GEAR_RATIO: f32 = 2.0;
 const RUNTIME_FAST_CYCLES: u32 = 100_000;
+const WINDING_TEMP_C: f32 = 25.0;
 
 #[derive(Debug)]
 struct SharedCell<T> {
@@ -92,10 +93,11 @@ struct SimHarness {
 fn plant_params() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0208,
@@ -261,26 +263,50 @@ impl OutputSensor for SimOutput<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SimTemp<'a> {
+    shared: &'a SharedCell<SimHarness>,
+}
+
+impl TemperatureSensor for SimTemp<'_> {
+    type Error = Infallible;
+
+    fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
+        Ok(self
+            .shared
+            .with(|harness| harness.plant.winding_temperature_c()))
+    }
+}
+
 fn calibration_hardware<'a>(
     shared: &'a SharedCell<SimHarness>,
-) -> (SimPwm<'a>, SimCurrent<'a>, SimBus<'a>, SimRotor<'a>) {
+) -> (
+    SimPwm<'a>,
+    SimCurrent<'a>,
+    SimBus<'a>,
+    SimRotor<'a>,
+    SimTemp<'a>,
+) {
     (
         SimPwm { shared },
         SimCurrent { shared },
         SimBus { shared },
         SimRotor { shared },
+        SimTemp { shared },
     )
 }
 
 fn runtime_hardware<'a>(
     shared: &'a SharedCell<SimHarness>,
-) -> MotorHardware<SimPwm<'a>, SimCurrent<'a>, SimBus<'a>, SimRotor<'a>, SimOutput<'a>> {
+) -> MotorHardware<SimPwm<'a>, SimCurrent<'a>, SimBus<'a>, SimRotor<'a>, SimOutput<'a>, SimTemp<'a>>
+{
     MotorHardware {
         pwm: SimPwm { shared },
         current: SimCurrent { shared },
         bus: SimBus { shared },
         rotor: SimRotor { shared },
         output: SimOutput { shared },
+        temp: SimTemp { shared },
     }
 }
 
@@ -293,6 +319,7 @@ type ExampleMotorCalibrationSystem<'a> = MotorCalibrationSystem<
     SimCurrent<'a>,
     SimBus<'a>,
     SimRotor<'a>,
+    SimTemp<'a>,
     fluxkit::math::Svpwm,
 >;
 type ExampleActuatorCalibrationSystem<'a> = ActuatorCalibrationSystem<
@@ -301,6 +328,7 @@ type ExampleActuatorCalibrationSystem<'a> = ActuatorCalibrationSystem<
     SimBus<'a>,
     SimRotor<'a>,
     SimOutput<'a>,
+    SimTemp<'a>,
     fluxkit::math::Svpwm,
     PassThroughEstimator,
     PassThroughEstimator,
@@ -311,6 +339,7 @@ type ExampleMotorSystem<'a> = MotorSystem<
     SimBus<'a>,
     SimRotor<'a>,
     SimOutput<'a>,
+    SimTemp<'a>,
     fluxkit::math::Svpwm,
     PassThroughEstimator,
     PassThroughEstimator,
@@ -520,6 +549,7 @@ fn init_globals() -> GlobalRefs {
                 mechanical_angle: ContinuousMechanicalAngle::new(0.4),
                 mechanical_velocity: RadPerSec::ZERO,
                 current_dq: Dq::new(Amps::ZERO, Amps::ZERO),
+                winding_temperature_c: WINDING_TEMP_C,
             },
         )
         .unwrap(),
@@ -565,12 +595,13 @@ fn main_context_loop(plot_path: &str) {
     let mut runtime_target_reported = false;
 
     println!("phase 1: motor calibration");
-    let (pwm, current, bus, rotor) = calibration_hardware(shared);
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(shared);
     let motor_calibration = MotorCalibrationSystem::new(
         pwm,
         current,
         bus,
         rotor,
+        temp,
         fluxkit::math::Svpwm,
         MotorCalibrationRequest::default(),
         MotorCalibrationLimits {
@@ -592,7 +623,7 @@ fn main_context_loop(plot_path: &str) {
                 println!(
                     "main: received motor calibration result: pole_pairs={}, R={:.4} ohm, L={:.8} H, psi={:.6} Wb, offset={:.4} rad",
                     result.pole_pairs,
-                    result.phase_resistance_ohm.get(),
+                    result.phase_resistance_ohm_ref.get(),
                     result.phase_inductance_h.get(),
                     result.flux_linkage_weber.get(),
                     result.electrical_angle_offset.get(),

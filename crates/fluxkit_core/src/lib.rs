@@ -59,7 +59,10 @@ pub use error::Error;
 pub use io::{FastLoopInput, FastLoopOutput, RotorEstimate};
 pub use mode::ControlMode;
 pub use motor::MotorController;
-pub use params::{InverterParams, MotorLimits, MotorModel, MotorParams};
+pub use params::{
+    InverterParams, MotorLimits, MotorModel, MotorParams, PHASE_RESISTANCE_REFERENCE_TEMP_C,
+    PHASE_RESISTANCE_TEMP_COEFF_PER_C,
+};
 pub use schedule::TickSchedule;
 pub use state::MotorState;
 pub use status::MotorStatus;

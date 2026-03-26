@@ -21,7 +21,7 @@
 //!
 //! 1. `MotorCalibrationSystem`
 //!    - pole pairs + electrical offset
-//!    - phase resistance
+//!    - phase resistance normalized to `25°C`
 //!    - phase inductance
 //!    - flux linkage
 //! 2. `ActuatorCalibrationSystem`
@@ -56,6 +56,7 @@
 //! #     impl fluxkit::CurrentSampler,
 //! #     impl fluxkit::BusVoltageSensor,
 //! #     impl fluxkit::RotorSensor,
+//! #     impl fluxkit::TemperatureSensor,
 //! # ) { todo!() }
 //! # fn take_runtime_hardware() -> MotorHardware<
 //! #     impl fluxkit::PhasePwm,
@@ -63,22 +64,24 @@
 //! #     impl fluxkit::BusVoltageSensor,
 //! #     impl fluxkit::RotorSensor,
 //! #     impl fluxkit::OutputSensor,
+//! #     impl fluxkit::TemperatureSensor,
 //! # > { todo!() }
 //! # fn inverter_params() -> fluxkit::InverterParams { todo!() }
 //! # fn current_loop_config() -> fluxkit::CurrentLoopConfig { todo!() }
 //! const DT: f32 = 1.0 / 20_000.0;
 //!
-//! let (pwm, current, bus, rotor) = take_motor_calibration_handles();
+//! let (pwm, current, bus, rotor, temp) = take_motor_calibration_handles();
 //! let mut motor_calibration_system = MotorCalibrationSystem::new(
 //!     pwm,
 //!     current,
 //!     bus,
 //!     rotor,
+//!     temp,
 //!     Svpwm,
 //!     MotorCalibrationRequest {
 //!         pole_pairs: None,
 //!         electrical_angle_offset: None,
-//!         phase_resistance_ohm: None,
+//!         phase_resistance_ohm_ref: None,
 //!         phase_inductance_h: None,
 //!         flux_linkage_weber: None,
 //!     },

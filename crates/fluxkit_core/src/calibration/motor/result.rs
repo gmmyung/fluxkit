@@ -19,8 +19,8 @@ pub struct MotorCalibration {
     pub pole_pairs: Option<u8>,
     /// Electrical zero offset after mechanical-to-electrical conversion.
     pub electrical_angle_offset: Option<ElectricalAngle>,
-    /// Estimated phase resistance.
-    pub phase_resistance_ohm: Option<Ohms>,
+    /// Estimated phase resistance normalized to `25°C`.
+    pub phase_resistance_ohm_ref: Option<Ohms>,
     /// Estimated phase inductance applied to both `d` and `q` axes.
     pub phase_inductance_h: Option<Henries>,
     /// Estimated flux linkage.
@@ -34,7 +34,7 @@ impl MotorCalibration {
         Self {
             pole_pairs: None,
             electrical_angle_offset: None,
-            phase_resistance_ohm: None,
+            phase_resistance_ohm_ref: None,
             phase_inductance_h: None,
             flux_linkage_weber: None,
         }
@@ -54,10 +54,10 @@ impl MotorCalibration {
             } else {
                 self.electrical_angle_offset
             },
-            phase_resistance_ohm: if newer.phase_resistance_ohm.is_some() {
-                newer.phase_resistance_ohm
+            phase_resistance_ohm_ref: if newer.phase_resistance_ohm_ref.is_some() {
+                newer.phase_resistance_ohm_ref
             } else {
-                self.phase_resistance_ohm
+                self.phase_resistance_ohm_ref
             },
             phase_inductance_h: if newer.phase_inductance_h.is_some() {
                 newer.phase_inductance_h
@@ -80,8 +80,8 @@ impl MotorCalibration {
         if let Some(offset) = self.electrical_angle_offset {
             motor.electrical_angle_offset = offset;
         }
-        if let Some(resistance) = self.phase_resistance_ohm {
-            motor.phase_resistance_ohm = resistance;
+        if let Some(resistance) = self.phase_resistance_ohm_ref {
+            motor.phase_resistance_ohm_ref = resistance;
         }
         if let Some(inductance) = self.phase_inductance_h {
             motor.d_inductance_h = inductance;
@@ -117,7 +117,7 @@ impl From<motor::PhaseResistanceCalibrationResult> for MotorCalibration {
     #[inline]
     fn from(result: motor::PhaseResistanceCalibrationResult) -> Self {
         Self {
-            phase_resistance_ohm: Some(result.phase_resistance_ohm),
+            phase_resistance_ohm_ref: Some(result.phase_resistance_ohm_ref),
             ..Self::empty()
         }
     }
@@ -160,18 +160,18 @@ mod tests {
     fn merge_prefers_newer_populated_fields() {
         let older = MotorCalibration {
             pole_pairs: Some(7),
-            phase_resistance_ohm: Some(Ohms::new(0.2)),
+            phase_resistance_ohm_ref: Some(Ohms::new(0.2)),
             ..MotorCalibration::empty()
         };
         let newer = MotorCalibration {
-            phase_resistance_ohm: Some(Ohms::new(0.12)),
+            phase_resistance_ohm_ref: Some(Ohms::new(0.12)),
             electrical_angle_offset: Some(ElectricalAngle::new(0.4)),
             ..MotorCalibration::empty()
         };
 
         let merged = older.merge(newer);
         assert_eq!(merged.pole_pairs, Some(7));
-        assert_eq!(merged.phase_resistance_ohm, Some(Ohms::new(0.12)));
+        assert_eq!(merged.phase_resistance_ohm_ref, Some(Ohms::new(0.12)));
         assert_eq!(
             merged.electrical_angle_offset,
             Some(ElectricalAngle::new(0.4))
@@ -183,7 +183,7 @@ mod tests {
         let mut params = MotorParams::from_model_and_limits(
             crate::params::MotorModel {
                 pole_pairs: 4,
-                phase_resistance_ohm: Ohms::new(0.2),
+                phase_resistance_ohm_ref: Ohms::new(0.2),
                 d_inductance_h: fluxkit_math::units::Henries::new(0.001),
                 q_inductance_h: fluxkit_math::units::Henries::new(0.001),
                 flux_linkage_weber: Webers::new(0.001),
@@ -198,14 +198,14 @@ mod tests {
         MotorCalibration {
             pole_pairs: Some(7),
             electrical_angle_offset: Some(ElectricalAngle::new(0.3)),
-            phase_resistance_ohm: Some(Ohms::new(0.12)),
+            phase_resistance_ohm_ref: Some(Ohms::new(0.12)),
             ..MotorCalibration::empty()
         }
         .apply_to_motor_params(&mut params);
 
         assert_eq!(params.pole_pairs, 7);
         assert_eq!(params.electrical_angle_offset, ElectricalAngle::new(0.3));
-        assert_eq!(params.phase_resistance_ohm, Ohms::new(0.12));
+        assert_eq!(params.phase_resistance_ohm_ref, Ohms::new(0.12));
     }
 
     #[test]

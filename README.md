@@ -11,6 +11,7 @@ The current project direction is intentionally pragmatic. Fluxkit is aimed at
 real motor projects that have:
 
 - absolute rotor sensing
+- winding temperature sensing
 - explicit output/actuator sensing
 - a fixed-period control interrupt
 - a main-context bring-up flow that calibrates first and then runs closed-loop control
@@ -26,6 +27,7 @@ The intended user flow is:
    - phase PWM
    - current sampling
    - bus voltage sensing
+   - winding temperature sensing
    - rotor sensing
    - output sensing
 2. Run motor electrical calibration.
@@ -211,6 +213,7 @@ Current confidence level:
 
 - pole pairs are recovered exactly
 - electrical offset is within about `0.03 rad` in the current setup
+- phase resistance is normalized to `25°C` from the sampled winding temperature
 - phase inductance and flux linkage are within about `1%`
 - Coulomb and viscous friction fits are close
 - breakaway and blend-band calibration are usable, but less trustworthy than the motor electrical terms

@@ -33,7 +33,9 @@ pub use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorLimits,
     ActuatorModel, ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig, Error,
     FastLoopInput, FastLoopOutput, FrictionCompensation, InverterParams, MotorController,
-    MotorLimits, MotorModel, MotorParams, MotorState, MotorStatus, RotorEstimate, TickSchedule,
+    MotorLimits, MotorModel, MotorParams, MotorState, MotorStatus,
+    PHASE_RESISTANCE_REFERENCE_TEMP_C, PHASE_RESISTANCE_TEMP_COEFF_PER_C, RotorEstimate,
+    TickSchedule,
 };
 pub use fluxkit_hal as hal;
 pub use fluxkit_hal::{

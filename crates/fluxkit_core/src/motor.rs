@@ -14,7 +14,10 @@ use crate::{
     error::Error,
     io::{FastLoopInput, FastLoopOutput, RotorEstimate},
     mode::ControlMode,
-    params::{InverterParams, MotorParams},
+    params::{
+        InverterParams, MotorParams, PHASE_RESISTANCE_REFERENCE_TEMP_C,
+        PHASE_RESISTANCE_TEMP_COEFF_PER_C,
+    },
     schedule::TickSchedule,
     state::MotorState,
     status::MotorStatus,
@@ -199,6 +202,7 @@ where
                 mode: ControlMode::Disabled,
                 active_error: None,
                 last_bus_voltage: Volts::ZERO,
+                last_winding_temperature_c: PHASE_RESISTANCE_REFERENCE_TEMP_C,
                 last_measured_idq: zero_current_dq(),
                 last_commanded_vdq: zero_voltage_dq(),
                 last_rotor_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
@@ -363,6 +367,7 @@ where
     /// 7. Return bounded duty plus telemetry and error state.
     pub fn fast_tick(&mut self, input: FastLoopInput) -> FastLoopOutput {
         self.status.last_bus_voltage = input.bus_voltage;
+        self.status.last_winding_temperature_c = input.winding_temperature_c;
         self.status.last_rotor_mechanical_angle = input.rotor.mechanical_angle;
         self.status.last_unwrapped_rotor_mechanical_angle =
             self.unwrap_rotor_angle(input.rotor.mechanical_angle);
@@ -419,6 +424,7 @@ where
                 measured_idq,
                 electrical_angle.get(),
                 input.bus_voltage,
+                input.winding_temperature_c,
                 input.rotor.mechanical_velocity,
                 input.dt_seconds,
                 voltage_limit,
@@ -571,6 +577,7 @@ where
         measured_idq: fluxkit_math::frame::Dq<Amps>,
         electrical_angle: f32,
         bus_voltage: Volts,
+        winding_temperature_c: f32,
         mechanical_velocity: RadPerSec,
         dt_seconds: f32,
         voltage_limit: f32,
@@ -583,7 +590,12 @@ where
 
         let feedforward = if self.config.enable_current_feedforward {
             let current_ref_derivative = self.current_reference_derivative(current_ref, dt_seconds);
-            self.current_feedforward(current_ref, current_ref_derivative, mechanical_velocity)
+            self.current_feedforward(
+                current_ref,
+                current_ref_derivative,
+                mechanical_velocity,
+                winding_temperature_c,
+            )
         } else {
             fluxkit_math::frame::Dq::new(0.0, 0.0)
         };
@@ -674,9 +686,10 @@ where
         current_ref: CurrentReference,
         current_ref_derivative: fluxkit_math::frame::Dq<f32>,
         mechanical_velocity: RadPerSec,
+        winding_temperature_c: f32,
     ) -> fluxkit_math::frame::Dq<f32> {
         let omega_e = mechanical_velocity.get() * self.motor.pole_pairs as f32;
-        let resistance = self.motor.phase_resistance_ohm.get();
+        let resistance = self.temperature_compensated_phase_resistance_ohm(winding_temperature_c);
         let ld = self.motor.d_inductance_h.get();
         let lq = self.motor.q_inductance_h.get();
         let flux_linkage = self.motor.flux_linkage_weber.get();
@@ -687,6 +700,18 @@ where
             resistance * id + ld * current_ref_derivative.d - omega_e * lq * iq,
             resistance * iq + lq * current_ref_derivative.q + omega_e * (ld * id + flux_linkage),
         )
+    }
+
+    fn temperature_compensated_phase_resistance_ohm(&self, winding_temperature_c: f32) -> f32 {
+        let scale = 1.0
+            + PHASE_RESISTANCE_TEMP_COEFF_PER_C
+                * (winding_temperature_c - PHASE_RESISTANCE_REFERENCE_TEMP_C);
+        let scale = if scale.is_finite() {
+            scale.max(0.0)
+        } else {
+            0.0
+        };
+        self.motor.phase_resistance_ohm_ref.get() * scale
     }
 
     fn current_reference_derivative(
@@ -1033,7 +1058,7 @@ mod tests {
         MotorParams::from_model_and_limits(
             MotorModel {
                 pole_pairs: 7,
-                phase_resistance_ohm: Ohms::new(0.12),
+                phase_resistance_ohm_ref: Ohms::new(0.12),
                 d_inductance_h: Henries::new(0.000_03),
                 q_inductance_h: Henries::new(0.000_03),
                 flux_linkage_weber: Webers::new(0.005),
@@ -1092,6 +1117,7 @@ mod tests {
         FastLoopInput {
             phase_currents: Abc::new(Amps::ZERO, Amps::ZERO, Amps::ZERO),
             bus_voltage: Volts::new(24.0),
+            winding_temperature_c: 25.0,
             rotor: RotorEstimate {
                 mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 mechanical_velocity: RadPerSec::ZERO,
@@ -1585,7 +1611,7 @@ mod tests {
         controller.set_iq_target(Amps::new(10.0));
         let output = controller.fast_tick(test_input());
 
-        let expected_q = motor.phase_resistance_ohm.get() * 10.0
+        let expected_q = motor.phase_resistance_ohm_ref.get() * 10.0
             + motor.q_inductance_h.get() * config.max_current_ref_derivative_amps_per_sec;
         assert!((output.commanded_vdq.q.get() - expected_q).abs() < 1.0e-5);
     }

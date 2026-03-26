@@ -9,14 +9,17 @@ use fluxkit_math::units::{Henries, NewtonMeters, Ohms, RadPerSec, Volts, Webers}
 pub struct PmsmParams {
     /// Number of electrical pole pairs.
     pub pole_pairs: u8,
-    /// Phase resistance.
-    pub phase_resistance_ohm: Ohms,
+    /// Phase resistance normalized to the winding reference temperature of
+    /// `25°C`.
+    pub phase_resistance_ohm_ref: Ohms,
     /// `d`-axis inductance.
     pub d_inductance_h: Henries,
     /// `q`-axis inductance.
     pub q_inductance_h: Henries,
     /// Permanent-magnet flux linkage.
     pub flux_linkage_weber: Webers,
+    /// Lumped winding thermal model.
+    pub thermal: ThermalPlantParams,
     /// Combined mechanical drivetrain model, including rotor-side and
     /// output-side dynamics.
     pub actuator: ActuatorPlantParams,
@@ -26,6 +29,31 @@ pub struct PmsmParams {
     /// frame, regardless of whether the caller steps the model with `d/q`,
     /// `alpha/beta`, phase voltage, or duty input.
     pub max_voltage_mag: Option<Volts>,
+}
+
+/// Lumped winding thermal model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ThermalPlantParams {
+    /// Ambient temperature in `°C`.
+    pub ambient_temperature_c: f32,
+    /// Lumped winding heat capacity in `J / °C`.
+    pub winding_thermal_capacity_j_per_c: f32,
+    /// Lumped thermal conductance from winding to ambient in `W / °C`.
+    pub winding_thermal_conductance_w_per_c: f32,
+}
+
+impl ThermalPlantParams {
+    /// Returns a simple passive winding thermal model initialized at the given
+    /// ambient temperature.
+    pub const fn default_for_ambient(ambient_temperature_c: f32) -> Self {
+        Self {
+            ambient_temperature_c,
+            winding_thermal_capacity_j_per_c: 100.0,
+            winding_thermal_conductance_w_per_c: 0.1,
+        }
+    }
 }
 
 /// Output-side actuator reduction, inertia, and friction model.

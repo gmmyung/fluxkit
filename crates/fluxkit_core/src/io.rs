@@ -36,6 +36,8 @@ pub struct FastLoopInput {
     pub phase_currents: Abc<Amps>,
     /// Measured DC bus voltage.
     pub bus_voltage: Volts,
+    /// Measured motor winding temperature in degrees Celsius.
+    pub winding_temperature_c: f32,
     /// Rotor estimate used for the Park transforms.
     pub rotor: RotorEstimate,
     /// Output-axis estimate used by actuator-side supervisory loops.

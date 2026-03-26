@@ -9,23 +9,24 @@ use fluxkit::{
     MotorModel, MotorParams, MotorSystem, centered_phase_duty,
     hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
+        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
     },
     math::{
         ContinuousMechanicalAngle, inverse_clarke, inverse_park,
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
     },
 };
-use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams};
+use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, ThermalPlantParams};
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
 const GEAR_RATIO: f32 = 2.0;
+const WINDING_TEMP_C: f32 = 25.0;
 
 fn motor_params() -> MotorParams {
     MotorParams::from_model_and_limits(
         MotorModel {
             pole_pairs: 7,
-            phase_resistance_ohm: Ohms::new(0.12),
+            phase_resistance_ohm_ref: Ohms::new(0.12),
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
@@ -85,10 +86,11 @@ fn actuator_params() -> ActuatorParams {
 fn plant_params() -> PmsmParams {
     PmsmParams {
         pole_pairs: 7,
-        phase_resistance_ohm: Ohms::new(0.12),
+        phase_resistance_ohm_ref: Ohms::new(0.12),
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
             output_inertia_kg_m2: 0.0008,
@@ -222,6 +224,19 @@ impl OutputSensor for SimOutput {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SimTemp {
+    shared: SharedHarness,
+}
+
+impl TemperatureSensor for SimTemp {
+    type Error = core::convert::Infallible;
+
+    fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
+        Ok(self.shared.lock().unwrap().plant.winding_temperature_c())
+    }
+}
+
 #[test]
 fn motor_system_closes_current_loop_against_simulator() {
     let shared = Arc::new(Mutex::new(SimHarness {
@@ -245,6 +260,9 @@ fn motor_system_closes_current_loop_against_simulator() {
             shared: Arc::clone(&shared),
         },
         output: SimOutput {
+            shared: Arc::clone(&shared),
+        },
+        temp: SimTemp {
             shared: Arc::clone(&shared),
         },
     };
@@ -313,6 +331,9 @@ fn motor_system_supports_scoped_irq_thread_runtime() {
             shared: Arc::clone(&shared),
         },
         output: SimOutput {
+            shared: Arc::clone(&shared),
+        },
+        temp: SimTemp {
             shared: Arc::clone(&shared),
         },
     };

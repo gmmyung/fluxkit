@@ -9,6 +9,8 @@ use core::fmt;
 pub enum Error {
     /// The measured DC bus voltage was invalid for control.
     InvalidBusVoltage,
+    /// The measured winding temperature was invalid for control.
+    InvalidTemperature,
     /// The phase-current measurement was not finite.
     InvalidPhaseCurrent,
     /// The rotor angle estimate was not finite.
@@ -25,6 +27,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidBusVoltage => "invalid bus voltage",
+            Self::InvalidTemperature => "invalid winding temperature",
             Self::InvalidPhaseCurrent => "invalid phase current",
             Self::InvalidRotorAngle => "invalid rotor angle",
             Self::NonFiniteComputation => "non-finite computation",

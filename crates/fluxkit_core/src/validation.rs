@@ -18,7 +18,7 @@ pub fn validate_controller_config(
     config: &CurrentLoopConfig,
 ) -> bool {
     motor.pole_pairs > 0
-        && finite_positive(motor.phase_resistance_ohm.get())
+        && finite_positive(motor.phase_resistance_ohm_ref.get())
         && finite_positive(motor.d_inductance_h.get())
         && finite_positive(motor.q_inductance_h.get())
         && finite_positive(motor.flux_linkage_weber.get())
@@ -123,6 +123,10 @@ pub fn validate_fast_loop_input(
         || bus_voltage > inverter.max_bus_voltage.get()
     {
         return Err(Error::InvalidBusVoltage);
+    }
+
+    if !input.winding_temperature_c.is_finite() {
+        return Err(Error::InvalidTemperature);
     }
 
     if !input.dt_seconds.is_finite() || input.dt_seconds <= 0.0 {

@@ -23,6 +23,8 @@ pub struct MotorStatus {
     pub active_error: Option<Error>,
     /// Most recent measured DC bus voltage.
     pub last_bus_voltage: Volts,
+    /// Most recent measured motor winding temperature in degrees Celsius.
+    pub last_winding_temperature_c: f32,
     /// Most recent measured `d/q` current vector.
     pub last_measured_idq: Dq<Amps>,
     /// Most recent limited `d/q` voltage command.

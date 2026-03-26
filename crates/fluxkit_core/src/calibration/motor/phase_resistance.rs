@@ -13,7 +13,10 @@ use fluxkit_math::{
     units::{Amps, Ohms, RadPerSec, Volts},
 };
 
-use crate::calibration::shared::{CalibrationError, timing::HoldTiming};
+use crate::{
+    calibration::shared::{CalibrationError, timing::HoldTiming},
+    params::{PHASE_RESISTANCE_REFERENCE_TEMP_C, PHASE_RESISTANCE_TEMP_COEFF_PER_C},
+};
 
 /// Static configuration for phase-resistance calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,6 +64,8 @@ pub struct PhaseResistanceCalibrationInput {
     pub phase_currents: Abc<Amps>,
     /// Mechanical rotor velocity reported by the encoder path.
     pub mechanical_velocity: RadPerSec,
+    /// Measured winding temperature in degrees Celsius.
+    pub winding_temperature_c: f32,
     /// Time since the previous calibration tick.
     pub dt_seconds: f32,
 }
@@ -70,8 +75,9 @@ pub struct PhaseResistanceCalibrationInput {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhaseResistanceCalibrationResult {
-    /// Calibrated phase resistance to store in `MotorParams`.
-    pub phase_resistance_ohm: Ohms,
+    /// Calibrated phase resistance normalized to
+    /// [`PHASE_RESISTANCE_REFERENCE_TEMP_C`].
+    pub phase_resistance_ohm_ref: Ohms,
 }
 
 /// Pure state machine for phase-resistance calibration.
@@ -177,10 +183,18 @@ impl PhaseResistanceCalibrator {
                 return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
             }
 
+            let measured_resistance =
+                self.config.align_voltage_mag.get().abs() / mean_current.abs();
+            let reference_scale = 1.0
+                + PHASE_RESISTANCE_TEMP_COEFF_PER_C
+                    * (input.winding_temperature_c - PHASE_RESISTANCE_REFERENCE_TEMP_C);
+            if !reference_scale.is_finite() || reference_scale <= 0.0 {
+                self.error = Some(CalibrationError::IndeterminateEstimate);
+                return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
+            }
+
             self.result = Some(PhaseResistanceCalibrationResult {
-                phase_resistance_ohm: Ohms::new(
-                    self.config.align_voltage_mag.get().abs() / mean_current.abs(),
-                ),
+                phase_resistance_ohm_ref: Ohms::new(measured_resistance / reference_scale),
             });
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
@@ -215,6 +229,7 @@ fn validate_input(input: PhaseResistanceCalibrationInput) -> bool {
         && input.phase_currents.b.get().is_finite()
         && input.phase_currents.c.get().is_finite()
         && input.mechanical_velocity.get().is_finite()
+        && input.winding_temperature_c.is_finite()
         && input.dt_seconds.is_finite()
         && input.dt_seconds > 0.0
 }
@@ -242,6 +257,7 @@ mod tests {
             let _ = calibrator.tick(PhaseResistanceCalibrationInput {
                 phase_currents: Abc::new(Amps::new(2.0), Amps::new(-1.0), Amps::new(-1.0)),
                 mechanical_velocity: fluxkit_math::units::RadPerSec::ZERO,
+                winding_temperature_c: 25.0,
                 dt_seconds: 0.005,
             });
             if calibrator.result().is_some() {
@@ -251,7 +267,7 @@ mod tests {
 
         assert_eq!(calibrator.error(), None);
         let result = calibrator.result().unwrap();
-        assert!((result.phase_resistance_ohm.get() - 0.5).abs() < 1.0e-6);
+        assert!((result.phase_resistance_ohm_ref.get() - 0.5).abs() < 1.0e-6);
     }
 
     #[test]
@@ -269,6 +285,7 @@ mod tests {
             let _ = calibrator.tick(PhaseResistanceCalibrationInput {
                 phase_currents: Abc::new(Amps::ZERO, Amps::ZERO, Amps::ZERO),
                 mechanical_velocity: fluxkit_math::units::RadPerSec::new(1.0),
+                winding_temperature_c: 25.0,
                 dt_seconds: 0.005,
             });
         }
