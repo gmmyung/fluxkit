@@ -91,17 +91,16 @@ Implemented today:
 - `MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>`
 - `MotorHandle`
 - `MotorCommand`
-- `MotorRuntimeConfig`
 - `MotorRuntimeStatus`
 - `MotorSystemError<...>`
 
-`MotorSystem` is the IRQ/deferred runtime owner that:
+`MotorSystem` is the runtime owner that:
 
-1. samples HAL inputs in `run_fast_cycle()`
+1. samples HAL inputs in `tick()`
 2. builds `FastLoopInput`
 3. runs `MotorController`
-4. writes phase duty back to PWM
-5. schedules medium/slow work for `run_deferred()`
+4. runs medium/slow supervisory work in the same cycle
+5. writes phase duty back to PWM
 
 `MotorHandle` is the non-ISR command/status surface.
 
@@ -146,8 +145,7 @@ Do not reintroduce Hall or sensorless-source abstractions unless there is a real
   - Coulomb and viscous drag transition onto measured output velocity once moving
 - `Torque`, `Velocity`, and `Position` are implemented through `medium_tick()`
 - `Position` mode runs both the position loop and velocity loop in the same `medium_tick()`
-- runtime integration should prefer `MotorSystem::run_fast_cycle()` plus
-  `MotorSystem::run_deferred()`
+- runtime integration should prefer `MotorSystem::tick()`
 - `OpenLoopVoltage` bypasses the current PI and modulates commanded `vdq` directly
 - neutral duty means centered PWM output, not hardware-off
 - fallback invalid-control output is neutral duty
@@ -205,7 +203,7 @@ Do not hardcode a new modulation strategy into the controller if it can be expre
 
 ## Current sample policy
 
-`MotorSystem::run_fast_cycle()` currently treats:
+`MotorSystem::tick()` currently treats:
 
 - `CurrentSampleValidity::Invalid` as an integration error and forces neutral PWM
 - `Valid`, `Estimated`, and `Saturated` as acceptable inputs to pass through to the controller

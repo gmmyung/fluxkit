@@ -1,4 +1,43 @@
-//! Generic IRQ-driven motor-control runtime glue over Fluxkit core and HAL traits.
+//! Generic motor-control runtime glue over Fluxkit core and HAL traits.
+//!
+//! The public runtime model is intentionally simple:
+//!
+//! - non-runtime code owns a [`MotorHandle`] for command/status access
+//! - one owner drives the control loop through [`MotorSystem::tick`]
+//! - each call performs:
+//!   - HAL sampling
+//!   - estimator updates
+//!   - controller fast tick
+//!   - controller medium tick
+//!   - controller slow tick
+//!   - PWM duty application
+//!
+//! `fluxkit_core` still keeps the fast/medium/slow split internally, but
+//! `fluxkit` currently executes the full sequence in one cycle.
+//!
+//! ```ignore
+//! # let hardware = todo!();
+//! # let controller = todo!();
+//! let mut system = fluxkit::MotorSystem::new(
+//!     hardware,
+//!     controller,
+//!     fluxkit::PassThroughEstimator::new(),
+//!     fluxkit::PassThroughEstimator::new(),
+//!     1.0 / 20_000.0,
+//! );
+//! let handle = system.handle();
+//! handle.set_command(fluxkit::MotorCommand {
+//!     mode: fluxkit::ControlMode::Velocity,
+//!     output_velocity_target: fluxkit::RadPerSec::new(2.0),
+//!     ..fluxkit::MotorCommand::default()
+//! });
+//! handle.arm();
+//!
+//! loop {
+//!     let _ = system.tick()?;
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use core::cell::RefCell;
 use core::fmt;
@@ -127,29 +166,6 @@ impl Default for MotorCommand {
     }
 }
 
-/// Runtime scheduling configuration for IRQ-driven operation.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct MotorRuntimeConfig {
-    /// Fast-loop period used by [`MotorSystem::on_pwm_interrupt`].
-    pub fast_dt_seconds: f32,
-    /// Run medium-rate work every `medium_divider` fast cycles. `0` disables it.
-    pub medium_divider: u32,
-    /// Run slow-rate work every `slow_divider` fast cycles. `0` disables it.
-    pub slow_divider: u32,
-}
-
-impl Default for MotorRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            fast_dt_seconds: 0.0,
-            medium_divider: 0,
-            slow_divider: 0,
-        }
-    }
-}
-
 /// Runtime-facing status snapshot shared with non-ISR code.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -171,8 +187,6 @@ struct SharedRuntimeState {
     command_dirty: bool,
     status: MotorRuntimeStatus,
     clear_fault_requested: bool,
-    medium_pending: bool,
-    slow_pending: bool,
 }
 
 /// Non-ISR command and status access for a [`MotorSystem`].
@@ -236,12 +250,14 @@ struct MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, Output
     controller: MotorController<MOD>,
     rotor_estimator: RotorEst,
     output_estimator: OutputEst,
-    runtime_config: MotorRuntimeConfig,
-    fast_cycle_count: u32,
+    dt_seconds: f32,
     pwm_armed: bool,
 }
 
-/// IRQ/deferred runtime owner borrowed from a [`MotorSystem`].
+/// Borrowed runtime owner for a [`MotorSystem`].
+///
+/// This is useful when one context owns loop execution and another only needs
+/// the shared [`MotorHandle`] view.
 #[derive(Debug)]
 pub struct MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
     runtime: &'a mut MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
@@ -282,14 +298,14 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
-    /// Creates a new motor system with explicit runtime scheduling config,
+    /// Creates a new motor system with an explicit loop period,
     /// controller, and rotor/output estimators.
     pub fn new(
         hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>,
         controller: MotorController<MOD>,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
-        runtime_config: MotorRuntimeConfig,
+        dt_seconds: f32,
     ) -> Self {
         Self {
             shared: Mutex::new(RefCell::new(SharedRuntimeState {
@@ -302,22 +318,19 @@ where
                     fault_latched: false,
                 },
                 clear_fault_requested: false,
-                medium_pending: false,
-                slow_pending: false,
             })),
             runtime: MotorRuntimeState {
                 hardware,
                 controller,
                 rotor_estimator,
                 output_estimator,
-                runtime_config,
-                fast_cycle_count: 0,
+                dt_seconds,
                 pwm_armed: false,
             },
         }
     }
 
-    /// Returns a non-ISR handle for command and status sharing.
+    /// Returns a shared handle for command and status access.
     #[inline]
     pub fn handle(&self) -> MotorHandle<'_> {
         MotorHandle {
@@ -325,7 +338,7 @@ where
         }
     }
 
-    /// Splits the system into an IRQ/deferred runtime view and a non-ISR handle.
+    /// Splits the system into a runtime view and a shared handle.
     pub fn split(
         &mut self,
     ) -> (
@@ -341,12 +354,6 @@ where
                 shared: &self.shared,
             },
         )
-    }
-
-    /// Returns the configured runtime scheduling parameters.
-    #[inline]
-    pub const fn runtime_config(&self) -> &MotorRuntimeConfig {
-        &self.runtime.runtime_config
     }
 
     /// Returns shared access to the rotor-side motion estimator.
@@ -442,26 +449,15 @@ where
         (hardware, controller, rotor_estimator, output_estimator)
     }
 
-    /// Runs one fast control cycle using the configured runtime fast period.
+    /// Runs one full control cycle using the configured runtime period.
     #[inline]
-    pub fn run_fast_cycle(
+    pub fn tick(
         &mut self,
     ) -> Result<
         FastLoopOutput,
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        self.runtime().run_fast_cycle()
-    }
-
-    /// Runs pending medium/slow work scheduled by [`Self::run_fast_cycle`].
-    #[inline]
-    pub fn run_deferred(
-        &mut self,
-    ) -> Result<
-        (),
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
-    > {
-        self.runtime().run_deferred()
+        self.runtime().tick()
     }
 
     /// Enables the underlying PWM and then enables the controller.
@@ -494,18 +490,6 @@ where
         self.runtime().sync_runtime_requests()?;
         self.runtime().publish_runtime_status(None);
         Ok(())
-    }
-
-    #[inline]
-    pub(crate) fn run_cycle(
-        &mut self,
-        dt_seconds: f32,
-        schedule: TickSchedule,
-    ) -> Result<
-        FastLoopOutput,
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
-    > {
-        self.runtime().run_cycle(dt_seconds, schedule)
     }
 }
 
@@ -615,23 +599,6 @@ where
         });
     }
 
-    fn schedule_deferred_work(&mut self) {
-        self.runtime.fast_cycle_count = self.runtime.fast_cycle_count.wrapping_add(1);
-        critical_section::with(|cs| {
-            let mut shared = self.shared.borrow(cs).borrow_mut();
-            if self.runtime.runtime_config.medium_divider > 0
-                && self.runtime.fast_cycle_count % self.runtime.runtime_config.medium_divider == 0
-            {
-                shared.medium_pending = true;
-            }
-            if self.runtime.runtime_config.slow_divider > 0
-                && self.runtime.fast_cycle_count % self.runtime.runtime_config.slow_divider == 0
-            {
-                shared.slow_pending = true;
-            }
-        });
-    }
-
     fn fault_and_neutral(
         &mut self,
     ) -> Result<
@@ -648,15 +615,25 @@ where
         Ok(())
     }
 
-    /// Runs one fast IRQ-owned cycle using the configured runtime fast period.
-    /// Runs one fast control cycle using the configured runtime fast period.
-    pub fn run_fast_cycle(
+    /// Runs one full control cycle using the configured runtime period.
+    ///
+    /// This executes the controller fast path and then immediately runs the
+    /// medium and slow hooks with the same configured `dt`.
+    ///
+    /// The controller still applies that ordering internally as:
+    ///
+    /// 1. fast loop
+    /// 2. medium hook
+    /// 3. slow hook
+    ///
+    /// so supervisory updates affect the next fast step, not the current one.
+    pub fn tick(
         &mut self,
     ) -> Result<
         FastLoopOutput,
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        let output = match self.execute_fast_cycle(self.runtime.runtime_config.fast_dt_seconds) {
+        let output = match self.execute_fast_cycle(self.runtime.dt_seconds) {
             Ok(output) => output,
             Err(error) => {
                 if !matches!(error, MotorSystemError::InvalidCurrentSample) {
@@ -665,41 +642,7 @@ where
                 return Err(error);
             }
         };
-        self.schedule_deferred_work();
         Ok(output)
-    }
-
-    /// Runs pending medium/slow work scheduled by [`Self::run_fast_cycle`].
-    pub fn run_deferred(
-        &mut self,
-    ) -> Result<
-        (),
-        MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
-    > {
-        let (run_medium, run_slow) = critical_section::with(|cs| {
-            let mut shared = self.shared.borrow(cs).borrow_mut();
-            let run_medium = shared.medium_pending;
-            let run_slow = shared.slow_pending;
-            shared.medium_pending = false;
-            shared.slow_pending = false;
-            (run_medium, run_slow)
-        });
-
-        let _ = self.sync_runtime_requests()?;
-        if run_medium && self.runtime.runtime_config.medium_divider > 0 {
-            self.runtime.controller.medium_tick(
-                self.runtime.runtime_config.fast_dt_seconds
-                    * self.runtime.runtime_config.medium_divider as f32,
-            );
-        }
-        if run_slow && self.runtime.runtime_config.slow_divider > 0 {
-            self.runtime.controller.slow_tick(
-                self.runtime.runtime_config.fast_dt_seconds
-                    * self.runtime.runtime_config.slow_divider as f32,
-            );
-        }
-        self.publish_runtime_status(None);
-        Ok(())
     }
 
     /// Samples hardware, runs one owned controller cycle, and applies duty.
@@ -804,7 +747,10 @@ where
         FastLoopOutput,
         MotorSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error, OUTPUT::Error>,
     > {
-        self.run_cycle(dt_seconds, TickSchedule::none())
+        self.run_cycle(
+            dt_seconds,
+            TickSchedule::with_medium_and_slow(dt_seconds, dt_seconds),
+        )
     }
 }
 
@@ -1067,11 +1013,7 @@ mod tests {
             controller,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            super::MotorRuntimeConfig {
-                fast_dt_seconds: 0.000_05,
-                medium_divider: 0,
-                slow_divider: 0,
-            },
+            0.000_05,
         );
         {
             let handle = system.handle();
@@ -1083,7 +1025,7 @@ mod tests {
             handle.arm();
         }
 
-        let _output = system.run_fast_cycle().unwrap();
+        let _output = system.tick().unwrap();
 
         assert_eq!(system.handle().status().controller.active_error, None);
         assert!(system.hardware().pwm.enabled);
@@ -1109,23 +1051,19 @@ mod tests {
             controller,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            super::MotorRuntimeConfig {
-                fast_dt_seconds: 0.000_05,
-                medium_divider: 0,
-                slow_divider: 0,
-            },
+            0.000_05,
         );
         system.hardware_mut().pwm.duty = Abc::new(Duty::new(0.2), Duty::new(0.7), Duty::new(0.6));
         system.handle().arm();
 
-        let error = system.run_fast_cycle().unwrap_err();
+        let error = system.tick().unwrap_err();
 
         assert!(matches!(error, MotorSystemError::InvalidCurrentSample));
         assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
     }
 
     #[test]
-    fn deferred_work_runs_supervisory_updates_after_fast_cycle() {
+    fn supervisory_work_runs_inside_fast_cycle() {
         let controller = fluxkit_core::MotorController::new(
             motor_params(),
             inverter_params(),
@@ -1137,11 +1075,7 @@ mod tests {
             controller,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            super::MotorRuntimeConfig {
-                fast_dt_seconds: 0.000_05,
-                medium_divider: 1,
-                slow_divider: 0,
-            },
+            0.000_05,
         );
         {
             let handle = system.handle();
@@ -1153,9 +1087,8 @@ mod tests {
             handle.arm();
         }
 
-        let first = system.run_fast_cycle().unwrap();
-        system.run_deferred().unwrap();
-        let second = system.run_fast_cycle().unwrap();
+        let first = system.tick().unwrap();
+        let second = system.tick().unwrap();
 
         assert_eq!(first.phase_duty, centered_phase_duty());
         assert_ne!(second.phase_duty, centered_phase_duty());
@@ -1196,11 +1129,7 @@ mod tests {
                     RadPerSec::new(1.5),
                 ),
             },
-            super::MotorRuntimeConfig {
-                fast_dt_seconds: 0.000_05,
-                medium_divider: 0,
-                slow_divider: 0,
-            },
+            0.000_05,
         );
         {
             let handle = system.handle();
@@ -1210,7 +1139,7 @@ mod tests {
             });
             handle.arm();
         }
-        let _ = system.run_fast_cycle().unwrap();
+        let _ = system.tick().unwrap();
 
         let status = system.handle().status().controller;
         assert_eq!(
@@ -1237,11 +1166,7 @@ mod tests {
             controller,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            super::MotorRuntimeConfig {
-                fast_dt_seconds: 0.000_05,
-                medium_divider: 0,
-                slow_divider: 0,
-            },
+            0.000_05,
         );
         {
             let handle = system.handle();
@@ -1253,7 +1178,7 @@ mod tests {
             handle.arm();
         }
 
-        let output = system.run_fast_cycle().unwrap();
+        let output = system.tick().unwrap();
         let handle = system.handle();
         let status = handle.status();
 

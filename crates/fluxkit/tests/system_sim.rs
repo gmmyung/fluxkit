@@ -6,7 +6,7 @@ use std::{
 use fluxkit::{
     ActuatorCompensationConfig, ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode,
     CurrentLoopConfig, InverterParams, MotorCommand, MotorController, MotorHardware, MotorLimits,
-    MotorModel, MotorParams, MotorRuntimeConfig, MotorSystem, centered_phase_duty,
+    MotorModel, MotorParams, MotorSystem, centered_phase_duty,
     hal::{
         BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
         PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor,
@@ -259,11 +259,7 @@ fn motor_system_closes_current_loop_against_simulator() {
         controller,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-        MotorRuntimeConfig {
-            fast_dt_seconds: FAST_DT_SECONDS,
-            medium_divider: 20,
-            slow_divider: 0,
-        },
+        FAST_DT_SECONDS,
     );
     {
         let handle = system.handle();
@@ -276,8 +272,7 @@ fn motor_system_closes_current_loop_against_simulator() {
     }
 
     for _ in 0..4_000 {
-        let _output = system.run_fast_cycle().unwrap();
-        system.run_deferred().unwrap();
+        let _output = system.tick().unwrap();
         assert_eq!(system.handle().status().controller.active_error, None);
     }
 
@@ -332,11 +327,7 @@ fn motor_system_supports_scoped_irq_thread_runtime() {
         controller,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-        MotorRuntimeConfig {
-            fast_dt_seconds: FAST_DT_SECONDS,
-            medium_divider: 20,
-            slow_divider: 0,
-        },
+        FAST_DT_SECONDS,
     );
 
     thread::scope(|scope| {
@@ -361,8 +352,7 @@ fn motor_system_supports_scoped_irq_thread_runtime() {
 
         let irq_thread = scope.spawn(move || {
             for _ in 0..4_000 {
-                let _ = runtime.run_fast_cycle().unwrap();
-                runtime.run_deferred().unwrap();
+                let _ = runtime.tick().unwrap();
             }
         });
 

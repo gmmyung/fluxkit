@@ -112,6 +112,21 @@ pub struct MotorCalibrationLimits {
     pub timeout_seconds: f32,
 }
 
+/// Current or next request-driven motor-calibration phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum MotorCalibrationPhase {
+    /// Electrical mapping: pole-pair count and electrical offset.
+    PolePairsAndOffset,
+    /// Phase-resistance identification.
+    PhaseResistance,
+    /// Phase-inductance identification.
+    PhaseInductance,
+    /// Flux-linkage identification.
+    FluxLinkage,
+}
+
 /// Fully resolved motor-side calibration result returned by the request-driven
 /// campaign API.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -172,6 +187,7 @@ pub struct MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, MOD> {
     rotor: ROTOR,
     modulator: MOD,
     limits: MotorCalibrationLimits,
+    dt_seconds: f32,
     pole_pairs: Option<u8>,
     electrical_angle_offset: Option<ElectricalAngle>,
     phase_resistance_ohm: Option<Ohms>,
@@ -197,8 +213,12 @@ where
         modulator: MOD,
         request: MotorCalibrationRequest,
         limits: MotorCalibrationLimits,
+        dt_seconds: f32,
     ) -> Result<Self, CalibrationError> {
-        if !validate_limits(limits) || !validate_request(request) {
+        if !validate_limits(limits)
+            || !validate_request(request)
+            || !validate_dt_seconds(dt_seconds)
+        {
             return Err(CalibrationError::InvalidConfiguration);
         }
 
@@ -209,6 +229,7 @@ where
             rotor,
             modulator,
             limits,
+            dt_seconds,
             pole_pairs: request.pole_pairs,
             electrical_angle_offset: request.electrical_angle_offset,
             phase_resistance_ohm: request.phase_resistance_ohm,
@@ -272,6 +293,15 @@ where
         (self.pwm, self.current, self.bus, self.rotor, self.modulator)
     }
 
+    /// Returns the current or next calibration phase, if the campaign is not complete.
+    #[inline]
+    pub fn phase(&self) -> Option<MotorCalibrationPhase> {
+        self.active_routine
+            .as_ref()
+            .map(MotorCalibrationPhase::from)
+            .or_else(|| self.next_phase())
+    }
+
     /// Drives neutral PWM immediately.
     pub fn set_neutral(
         &mut self,
@@ -282,10 +312,9 @@ where
             .map_err(MotorCalibrationSystemError::Pwm)
     }
 
-    /// Advances the request-driven motor calibration campaign.
+    /// Advances the request-driven motor calibration campaign by one fixed-period step.
     pub fn tick(
         &mut self,
-        dt_seconds: f32,
     ) -> Result<
         Option<MotorCalibrationResult>,
         MotorCalibrationSystemError<PWM::Error, CURRENT::Error, BUS::Error, ROTOR::Error>,
@@ -306,7 +335,7 @@ where
             .active_routine
             .take()
             .expect("active routine must exist");
-        if let Some(delta) = self.tick_active_routine(&mut routine, dt_seconds)? {
+        if let Some(delta) = self.tick_active_routine(&mut routine, self.dt_seconds)? {
             self.merge_partial(delta);
             if self
                 .build_next_routine()
@@ -412,6 +441,22 @@ where
         }
 
         Ok(None)
+    }
+
+    fn next_phase(&self) -> Option<MotorCalibrationPhase> {
+        if self.pole_pairs.is_none() || self.electrical_angle_offset.is_none() {
+            return Some(MotorCalibrationPhase::PolePairsAndOffset);
+        }
+        if self.phase_resistance_ohm.is_none() {
+            return Some(MotorCalibrationPhase::PhaseResistance);
+        }
+        if self.phase_inductance_h.is_none() {
+            return Some(MotorCalibrationPhase::PhaseInductance);
+        }
+        if self.flux_linkage_weber.is_none() {
+            return Some(MotorCalibrationPhase::FluxLinkage);
+        }
+        None
     }
 
     fn merge_partial(&mut self, delta: PartialMotorCalibration) {
@@ -689,6 +734,22 @@ fn validate_request(request: MotorCalibrationRequest) -> bool {
     request.pole_pairs.is_some() == request.electrical_angle_offset.is_some()
 }
 
+#[inline]
+fn validate_dt_seconds(dt_seconds: f32) -> bool {
+    dt_seconds.is_finite() && dt_seconds > 0.0
+}
+
+impl From<&MotorCalibrationRoutine> for MotorCalibrationPhase {
+    fn from(value: &MotorCalibrationRoutine) -> Self {
+        match value {
+            MotorCalibrationRoutine::PolePairsAndOffset(_) => Self::PolePairsAndOffset,
+            MotorCalibrationRoutine::PhaseResistance(_) => Self::PhaseResistance,
+            MotorCalibrationRoutine::PhaseInductance(_) => Self::PhaseInductance,
+            MotorCalibrationRoutine::FluxLinkage(_) => Self::FluxLinkage,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::convert::Infallible;
@@ -827,6 +888,7 @@ mod tests {
                 max_electrical_velocity: RadPerSec::new(60.0),
                 timeout_seconds: 2.0,
             },
+            0.005,
         )
         .unwrap()
     }
@@ -856,6 +918,43 @@ mod tests {
         };
         assert_eq!(calibrator.result(), None);
         assert_eq!(calibrator.error(), None);
+    }
+
+    #[test]
+    fn phase_reports_next_unresolved_step() {
+        let (pwm, current, bus, rotor) = hardware();
+        let mut system = MotorCalibrationSystem::new(
+            pwm,
+            current,
+            bus,
+            rotor,
+            Svpwm,
+            super::MotorCalibrationRequest {
+                pole_pairs: None,
+                electrical_angle_offset: None,
+                phase_resistance_ohm: Some(fluxkit_math::units::Ohms::new(0.12)),
+                phase_inductance_h: Some(fluxkit_math::units::Henries::new(30.0e-6)),
+                flux_linkage_weber: Some(fluxkit_math::units::Webers::new(0.005)),
+            },
+            super::MotorCalibrationLimits {
+                max_align_voltage_mag: Volts::new(2.0),
+                max_spin_voltage_mag: Volts::new(3.0),
+                max_electrical_velocity: RadPerSec::new(60.0),
+                timeout_seconds: 2.0,
+            },
+            0.005,
+        )
+        .unwrap();
+
+        assert_eq!(
+            system.phase(),
+            Some(super::MotorCalibrationPhase::PolePairsAndOffset)
+        );
+        let _ = system.tick().unwrap();
+        assert_eq!(
+            system.phase(),
+            Some(super::MotorCalibrationPhase::PolePairsAndOffset)
+        );
     }
 
     #[test]

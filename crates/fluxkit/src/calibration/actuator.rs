@@ -7,7 +7,7 @@ use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrator,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrator, ActuatorLimits, ActuatorModel,
     ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig, InverterParams, MotorParams,
-    MotorState, MotorStatus, TickSchedule,
+    MotorState, MotorStatus,
 };
 use fluxkit_hal::{BusVoltageSensor, CurrentSampler, OutputSensor, PhasePwm, RotorSensor};
 use fluxkit_math::{
@@ -96,6 +96,21 @@ pub struct ActuatorCalibrationLimits {
     pub max_torque_target: NewtonMeters,
     /// Absolute timeout cap applied to each actuator-side routine.
     pub timeout_seconds: f32,
+}
+
+/// Current or next request-driven actuator-calibration phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ActuatorCalibrationPhase {
+    /// Gear-ratio identification.
+    GearRatio,
+    /// Coulomb and viscous friction identification.
+    Friction,
+    /// Breakaway-torque identification.
+    Breakaway,
+    /// Zero-velocity blend-band identification.
+    BlendBand,
 }
 
 /// Fully resolved actuator-side calibration result returned by the request-driven
@@ -191,6 +206,7 @@ impl ActuatorCalibrationResult {
 pub struct ActuatorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst> {
     motor_system: MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>,
     limits: ActuatorCalibrationLimits,
+    dt_seconds: f32,
     gear_ratio: Option<f32>,
     positive_breakaway_torque: Option<NewtonMeters>,
     negative_breakaway_torque: Option<NewtonMeters>,
@@ -237,8 +253,9 @@ where
         output_estimator: OutputEst,
         request: ActuatorCalibrationRequest,
         limits: ActuatorCalibrationLimits,
+        dt_seconds: f32,
     ) -> Result<Self, CalibrationError> {
-        if !validate_limits(limits) {
+        if !validate_limits(limits) || !validate_dt_seconds(dt_seconds) {
             return Err(CalibrationError::InvalidConfiguration);
         }
 
@@ -254,16 +271,13 @@ where
             controller,
             rotor_estimator,
             output_estimator,
-            crate::MotorRuntimeConfig {
-                fast_dt_seconds: 0.0,
-                medium_divider: 0,
-                slow_divider: 0,
-            },
+            dt_seconds,
         );
 
         let mut system = Self {
             motor_system,
             limits,
+            dt_seconds,
             gear_ratio: request.gear_ratio,
             positive_breakaway_torque: request.positive_breakaway_torque,
             negative_breakaway_torque: request.negative_breakaway_torque,
@@ -303,11 +317,18 @@ where
         self.motor_system
     }
 
-    /// Advances the request-driven actuator calibration campaign.
+    /// Returns the current or next calibration phase, if the campaign is not complete.
+    #[inline]
+    pub fn phase(&self) -> Option<ActuatorCalibrationPhase> {
+        self.active_routine
+            .as_ref()
+            .map(ActuatorCalibrationPhase::from)
+            .or_else(|| self.next_phase())
+    }
+
+    /// Advances the request-driven actuator calibration campaign by one fixed-period step.
     pub fn tick(
         &mut self,
-        dt_seconds: f32,
-        schedule: TickSchedule,
     ) -> Result<
         Option<ActuatorCalibrationResult>,
         ActuatorCalibrationSystemError<
@@ -337,7 +358,7 @@ where
             .active_routine
             .take()
             .expect("active routine must exist");
-        if let Some(delta) = self.tick_active_routine(&mut routine, dt_seconds, schedule)? {
+        if let Some(delta) = self.tick_active_routine(&mut routine)? {
             self.merge_partial(delta);
             if self
                 .build_next_routine()
@@ -356,11 +377,29 @@ where
         Ok(None)
     }
 
+    fn next_phase(&self) -> Option<ActuatorCalibrationPhase> {
+        if self.gear_ratio.is_none() {
+            return Some(ActuatorCalibrationPhase::GearRatio);
+        }
+        if self.positive_coulomb_torque.is_none()
+            || self.negative_coulomb_torque.is_none()
+            || self.positive_viscous_coefficient.is_none()
+            || self.negative_viscous_coefficient.is_none()
+        {
+            return Some(ActuatorCalibrationPhase::Friction);
+        }
+        if self.positive_breakaway_torque.is_none() || self.negative_breakaway_torque.is_none() {
+            return Some(ActuatorCalibrationPhase::Breakaway);
+        }
+        if self.zero_velocity_blend_band.is_none() {
+            return Some(ActuatorCalibrationPhase::BlendBand);
+        }
+        None
+    }
+
     fn tick_active_routine(
         &mut self,
         routine: &mut ActuatorCalibrationRoutine,
-        dt_seconds: f32,
-        schedule: TickSchedule,
     ) -> Result<
         Option<PartialActuatorCalibration>,
         ActuatorCalibrationSystemError<
@@ -372,18 +411,10 @@ where
         >,
     > {
         match routine {
-            ActuatorCalibrationRoutine::GearRatio(calibrator) => {
-                self.tick_gear_ratio(calibrator, dt_seconds, schedule)
-            }
-            ActuatorCalibrationRoutine::Friction(calibrator) => {
-                self.tick_friction(calibrator, dt_seconds, schedule)
-            }
-            ActuatorCalibrationRoutine::Breakaway(calibrator) => {
-                self.tick_breakaway(calibrator, dt_seconds, schedule)
-            }
-            ActuatorCalibrationRoutine::BlendBand(calibrator) => {
-                self.tick_blend_band(calibrator, dt_seconds, schedule)
-            }
+            ActuatorCalibrationRoutine::GearRatio(calibrator) => self.tick_gear_ratio(calibrator),
+            ActuatorCalibrationRoutine::Friction(calibrator) => self.tick_friction(calibrator),
+            ActuatorCalibrationRoutine::Breakaway(calibrator) => self.tick_breakaway(calibrator),
+            ActuatorCalibrationRoutine::BlendBand(calibrator) => self.tick_blend_band(calibrator),
         }
     }
 
@@ -538,8 +569,6 @@ where
     fn tick_gear_ratio(
         &mut self,
         calibrator: &mut ActuatorGearRatioCalibrator,
-        dt_seconds: f32,
-        schedule: TickSchedule,
     ) -> Result<
         Option<PartialActuatorCalibration>,
         ActuatorCalibrationSystemError<
@@ -554,8 +583,6 @@ where
             calibrator,
             ControlMode::Velocity,
             false,
-            dt_seconds,
-            schedule,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorGearRatioCalibrationInput {
                     rotor_mechanical_angle: status.last_rotor_mechanical_angle,
@@ -575,8 +602,6 @@ where
     fn tick_friction(
         &mut self,
         calibrator: &mut ActuatorFrictionCalibrator,
-        dt_seconds: f32,
-        schedule: TickSchedule,
     ) -> Result<
         Option<PartialActuatorCalibration>,
         ActuatorCalibrationSystemError<
@@ -591,8 +616,6 @@ where
             calibrator,
             ControlMode::Velocity,
             true,
-            dt_seconds,
-            schedule,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorFrictionCalibrationInput {
                     output_velocity: status.last_output_mechanical_velocity,
@@ -613,8 +636,6 @@ where
     fn tick_breakaway(
         &mut self,
         calibrator: &mut ActuatorBreakawayCalibrator,
-        dt_seconds: f32,
-        schedule: TickSchedule,
     ) -> Result<
         Option<PartialActuatorCalibration>,
         ActuatorCalibrationSystemError<
@@ -629,8 +650,6 @@ where
             calibrator,
             ControlMode::Torque,
             true,
-            dt_seconds,
-            schedule,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorBreakawayCalibrationInput {
                     output_velocity: status.last_output_mechanical_velocity,
@@ -651,8 +670,6 @@ where
     fn tick_blend_band(
         &mut self,
         calibrator: &mut ActuatorBlendBandCalibrator,
-        dt_seconds: f32,
-        schedule: TickSchedule,
     ) -> Result<
         Option<PartialActuatorCalibration>,
         ActuatorCalibrationSystemError<
@@ -667,8 +684,6 @@ where
             calibrator,
             ControlMode::Torque,
             true,
-            dt_seconds,
-            schedule,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorBlendBandCalibrationInput {
                     output_velocity: status.last_output_mechanical_velocity,
@@ -691,8 +706,6 @@ where
         calibrator: &mut Cal,
         mode: ControlMode,
         require_friction_disabled: bool,
-        dt_seconds: f32,
-        schedule: TickSchedule,
         build_command: Build,
         apply_command: Apply,
     ) -> Result<
@@ -720,11 +733,11 @@ where
 
         self.prepare_motor(mode, require_friction_disabled)?;
         let status = self.motor_system.controller().status();
-        let command = build_command(calibrator, status, dt_seconds);
+        let command = build_command(calibrator, status, self.dt_seconds);
         apply_command(&mut self.motor_system, command);
         let _ = self
             .motor_system
-            .run_cycle(dt_seconds, schedule)
+            .tick()
             .map_err(ActuatorCalibrationSystemError::Motor)?;
 
         self.postflight(calibrator)
@@ -882,4 +895,20 @@ fn validate_limits(limits: ActuatorCalibrationLimits) -> bool {
         && limits.max_torque_target.get() > 0.0
         && limits.timeout_seconds.is_finite()
         && limits.timeout_seconds > 0.0
+}
+
+#[inline]
+fn validate_dt_seconds(dt_seconds: f32) -> bool {
+    dt_seconds.is_finite() && dt_seconds > 0.0
+}
+
+impl From<&ActuatorCalibrationRoutine> for ActuatorCalibrationPhase {
+    fn from(value: &ActuatorCalibrationRoutine) -> Self {
+        match value {
+            ActuatorCalibrationRoutine::GearRatio(_) => Self::GearRatio,
+            ActuatorCalibrationRoutine::Friction(_) => Self::Friction,
+            ActuatorCalibrationRoutine::Breakaway(_) => Self::Breakaway,
+            ActuatorCalibrationRoutine::BlendBand(_) => Self::BlendBand,
+        }
+    }
 }

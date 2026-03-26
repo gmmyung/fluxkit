@@ -35,14 +35,18 @@
           default = pkgs.mkShell {
             packages = rustToolchain ++ (with pkgs; [
               bacon
+              cargo-llvm-cov
               cargo-nextest
               git
               just
+              llvm
               pkg-config
             ]);
 
             shellHook = ''
               export CARGO_TERM_COLOR=always
+              export LLVM_COV="${pkgs.llvm}/bin/llvm-cov"
+              export LLVM_PROFDATA="${pkgs.llvm}/bin/llvm-profdata"
               export RUST_BACKTRACE=1
               echo "driverdriver dev shell (${system})"
             '';

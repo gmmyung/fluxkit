@@ -24,6 +24,7 @@ The shell provides:
 
 - `rustc`
 - `cargo`
+- `cargo-llvm-cov`
 - `clippy`
 - `rustfmt`
 - `rust-analyzer`
@@ -75,6 +76,25 @@ Test only the top-level wrapper:
 
 ```bash
 XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test -p fluxkit
+```
+
+Coverage summary:
+
+```bash
+./scripts/coverage.sh --summary-only
+```
+
+Coverage HTML report:
+
+```bash
+./scripts/coverage.sh
+open target/llvm-cov/html/index.html
+```
+
+Coverage for a single package:
+
+```bash
+./scripts/coverage.sh -p fluxkit
 ```
 
 Build docs:
@@ -169,10 +189,10 @@ Implemented today:
 - output-axis encoder path for supervisory control
 - internal multi-turn unwrapping for both rotor and output axes
 - `Disabled`, `Current`, `Torque`, `Velocity`, `Position`, and `OpenLoopVoltage` modes
-- IRQ-driven `MotorSystem::run_fast_cycle()`
+- IRQ-driven `MotorSystem::tick()`
 - medium-rate supervisory loop in `medium_tick()`
 - position and velocity loops both run in the same `medium_tick()` when `Position` mode is active
-- deferred medium/slow work through `MotorSystem::run_deferred()`
+- medium/slow supervisory work executed inside `MotorSystem::tick()`
 - model-based current-loop feedforward
 - actuator-side compensation telemetry in controller status
 - configurable modulation through `MotorController<M>`
@@ -218,16 +238,16 @@ Actuator calibration procedures:
 
 Typical flow:
 
-1. Construct `MotorCalibrationSystem` with a `MotorCalibrationRequest` and `MotorCalibrationLimits`.
-2. Call `tick(dt_seconds)` until it returns `Some(MotorCalibrationResult)`.
+1. Construct `MotorCalibrationSystem` with a `MotorCalibrationRequest`, `MotorCalibrationLimits`, and a fixed `dt_seconds`.
+2. Call `tick()` until it returns `Some(MotorCalibrationResult)`.
 3. Build `MotorParams` directly from the result with `into_motor_params(...)`.
-4. Construct `ActuatorCalibrationSystem` with an `ActuatorCalibrationRequest` and `ActuatorCalibrationLimits`.
-5. Call `tick(dt_seconds, TickSchedule::with_medium(...))` until it returns `Some(ActuatorCalibrationResult)`.
+4. Construct `ActuatorCalibrationSystem` with an `ActuatorCalibrationRequest`, `ActuatorCalibrationLimits`, and a fixed `dt_seconds`.
+5. Call `tick()` until it returns `Some(ActuatorCalibrationResult)`.
 6. Build `ActuatorParams` directly from the result with `into_*_actuator_params(...)`.
 
-Calibration remains a synchronous bring-up API on purpose. Runtime control is
-IRQ-driven through `MotorSystem`, while calibration uses dedicated systems that
-own the simpler step-by-step procedure flow.
+Motor and actuator calibration are now both fixed-period and IRQ-friendly.
+Runtime control is IRQ-driven through `MotorSystem`, while calibration uses
+dedicated systems with simpler procedure-oriented ownership.
 
 Current simulator-backed confidence:
 
@@ -281,7 +301,7 @@ switching simulation or high-fidelity electromagnetic analysis.
 ## Loop model
 
 `MotorController` uses an explicit multi-rate API internally, and `fluxkit`
-wraps that in an IRQ/deferred runtime model:
+wraps that in a single runtime cycle:
 
 - `fast_tick()`
   - current control
@@ -292,13 +312,11 @@ wraps that in an IRQ/deferred runtime model:
   - `Torque`, `Velocity`, and `Position` targets are expressed at the actuator output
   - rotor measurements remain motor-side for FOC transforms and feedforward
   - output-axis measurements drive the supervisory loops
-- `MotorSystem::run_fast_cycle()`
+- `MotorSystem::tick()`
   - samples sensors
   - runs the fast loop
+  - immediately runs medium/slow supervisory work
   - applies PWM duty
-  - schedules deferred work
-- `MotorSystem::run_deferred()`
-  - runs medium/slow work outside the PWM interrupt
 - `MotorHandle`
   - owns non-ISR command and status access
   - supports `set_command(...)`, `status()`, `arm()`, `disarm()`, and `clear_fault()`

@@ -12,10 +12,10 @@ pub mod calibration;
 pub mod system;
 
 pub use calibration::{
-    ActuatorCalibrationLimits, ActuatorCalibrationRequest, ActuatorCalibrationResult,
-    ActuatorCalibrationSystem, ActuatorCalibrationSystemError, MotorCalibrationLimits,
-    MotorCalibrationRequest, MotorCalibrationResult, MotorCalibrationSystem,
-    MotorCalibrationSystemError,
+    ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
+    ActuatorCalibrationResult, ActuatorCalibrationSystem, ActuatorCalibrationSystemError,
+    MotorCalibrationLimits, MotorCalibrationPhase, MotorCalibrationRequest, MotorCalibrationResult,
+    MotorCalibrationSystem, MotorCalibrationSystemError,
 };
 pub use fluxkit_core as core;
 pub use fluxkit_core::{
@@ -32,5 +32,5 @@ pub use fluxkit_hal::{
 };
 pub use fluxkit_math as math;
 pub use fluxkit_math::*;
-pub use system::{MotorCommand, MotorHandle, MotorRuntimeConfig, MotorRuntimeStatus};
+pub use system::{MotorCommand, MotorHandle, MotorRuntimeStatus};
 pub use system::{MotorHardware, MotorSystem, MotorSystemError};

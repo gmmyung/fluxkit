@@ -9,9 +9,10 @@
 //! - apply the returned drive requests through PWM or `MotorSystem`
 //! - neutral or disable the drive path on completion and failure
 //!
-//! Calibration remains synchronous on purpose. Runtime control in `fluxkit`
-//! is IRQ-driven through [`crate::MotorSystem`], while these systems own the
-//! simpler step-by-step bring-up flow.
+//! Runtime control in `fluxkit` is IRQ-driven through [`crate::MotorSystem`].
+//! Both motor and actuator calibration expose fixed-period
+//! [`tick`](motor::MotorCalibrationSystem::tick)-style
+//! entrypoints so they fit the same single-owner loop model as the runtime.
 //!
 //! Recommended bring-up order:
 //!
@@ -30,7 +31,7 @@
 //!
 //! - construct `MotorCalibrationSystem` or `ActuatorCalibrationSystem`
 //! - provide a calibration request plus operating limits
-//! - call `tick(...)` until it returns `Some(final_calibration_result)`
+//! - call `tick()` until it returns `Some(final_calibration_result)`
 //!
 //! Lower-level routine driving remains in `fluxkit_core`.
 //!
@@ -41,7 +42,6 @@
 //!     ActuatorCalibrationLimits, ActuatorCalibrationRequest, ActuatorCalibrationSystem,
 //!     MotorCalibrationLimits, MotorCalibrationRequest, MotorCalibrationSystem,
 //!     MotorController, MotorHardware, MotorLimits, MotorSystem, PassThroughEstimator,
-//!     TickSchedule,
 //!     math::{
 //!         Svpwm,
 //!         units::{Amps, NewtonMeters, RadPerSec, Volts},
@@ -85,10 +85,11 @@
 //!         max_electrical_velocity: RadPerSec::new(60.0),
 //!         timeout_seconds: 6.0,
 //!     },
+//!     DT,
 //! )?;
 //!
 //! let motor_calibration = loop {
-//!     if let Some(result) = motor_calibration_system.tick(DT)? {
+//!     if let Some(result) = motor_calibration_system.tick()? {
 //!         break result;
 //!     }
 //! };
@@ -121,12 +122,11 @@
 //!         max_torque_target: NewtonMeters::new(0.3),
 //!         timeout_seconds: 5.0,
 //!     },
+//!     DT,
 //! )?;
 //!
 //! let actuator_calibration = loop {
-//!     if let Some(result) =
-//!         actuator_calibration_system.tick(DT, TickSchedule::with_medium(DT))?
-//!     {
+//!     if let Some(result) = actuator_calibration_system.tick()? {
 //!         break result;
 //!     }
 //! };
@@ -151,11 +151,7 @@
 //!     controller,
 //!     PassThroughEstimator::new(),
 //!     PassThroughEstimator::new(),
-//!     fluxkit::MotorRuntimeConfig {
-//!         fast_dt_seconds: DT,
-//!         medium_divider: 20,
-//!         slow_divider: 0,
-//!     },
+//!     DT,
 //! );
 //! let handle = runtime.handle();
 //! handle.set_command(fluxkit::MotorCommand {
@@ -166,8 +162,7 @@
 //! handle.arm();
 //!
 //! loop {
-//!     let _output = runtime.run_fast_cycle()?;
-//!     runtime.run_deferred()?;
+//!     let _output = runtime.tick()?;
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -177,10 +172,10 @@ mod motor;
 mod shared;
 
 pub use actuator::{
-    ActuatorCalibrationLimits, ActuatorCalibrationRequest, ActuatorCalibrationResult,
-    ActuatorCalibrationSystem, ActuatorCalibrationSystemError,
+    ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
+    ActuatorCalibrationResult, ActuatorCalibrationSystem, ActuatorCalibrationSystemError,
 };
 pub use motor::{
-    MotorCalibrationLimits, MotorCalibrationRequest, MotorCalibrationResult,
+    MotorCalibrationLimits, MotorCalibrationPhase, MotorCalibrationRequest, MotorCalibrationResult,
     MotorCalibrationSystem, MotorCalibrationSystemError,
 };

@@ -20,3 +20,5 @@ fluxkit_math = { path = "../fluxkit_math" }
 [dev-dependencies]
 critical-section = { version = "1", features = ["std"] }
 fluxkit-pmsm-sim = { path = "../fluxkit_pmsm_sim" }
+plotters = "0.3.7"
+static_cell = "2"
