@@ -1,18 +1,21 @@
-//! Request-driven calibration systems kept intentionally separate from the
-//! IRQ-driven runtime control surface.
+//! Project-facing calibration systems for motor and actuator bring-up.
 //!
-//! `fluxkit_core` owns the pure calibration state machines. This module owns
-//! the generic glue needed to:
+//! `fluxkit_core` owns the pure calibration procedures. This module wraps them
+//! in HAL-facing systems that fit the same fixed-period execution model as the
+//! runtime.
 //!
-//! - sample HAL sensors
-//! - feed those samples into the pure calibrators
-//! - apply the returned drive requests through PWM or `MotorSystem`
-//! - neutral or disable the drive path on completion and failure
+//! Use these systems when your project needs to:
 //!
-//! Runtime control in `fluxkit` is IRQ-driven through [`crate::MotorSystem`].
-//! Both motor and actuator calibration expose fixed-period
-//! [`tick`](motor::MotorCalibrationSystem::tick)-style
-//! entrypoints so they fit the same single-owner loop model as the runtime.
+//! 1. identify motor electrical parameters
+//! 2. identify actuator/output-side parameters
+//! 3. convert the results into runtime params
+//! 4. hand off into [`crate::MotorSystem`]
+//!
+//! The calibration systems are intentionally separate from the runtime surface:
+//!
+//! - calibration returns final resolved records
+//! - runtime consumes fully built params
+//! - projects can decide when to calibrate, persist, skip, or re-run bring-up
 //!
 //! Recommended bring-up order:
 //!

@@ -1,257 +1,194 @@
 # Fluxkit Agent Notes
 
-This file summarizes the current architecture and the project-specific rules that future coding agents should follow.
+This file is the short current-truth guide for future coding agents.
+
+## Project shape
+
+Fluxkit is a `no_std` motor-control workspace for BLDC / PMSM projects with:
+
+- absolute rotor sensing
+- explicit output/actuator sensing
+- fixed-period control execution
+- request-driven calibration before runtime bring-up
+
+The project is intentionally focused on real motor-control usage, not on being a
+general embedded framework.
 
 ## Workspace layout
 
 - `crates/fluxkit_math`
-  - math, units, transforms, modulation, PI primitives
+  - units, transforms, modulation, PI primitives, estimators
 - `crates/fluxkit_core`
-  - pure deterministic control engine
+  - pure deterministic control and calibration procedures
 - `crates/fluxkit_hal`
-  - narrow motor-control HAL traits
+  - narrow HAL contracts only
 - `crates/fluxkit`
   - user-facing runtime and calibration crate
 - `crates/fluxkit_pmsm_sim`
-  - ideal PMSM plant emulator for integration tests
+  - ideal PMSM plant model for integration tests and examples
 
-## Dependency rules
+## Dependency boundaries
 
 - `fluxkit_core` depends on `fluxkit_math`
 - `fluxkit_core` must not depend on `fluxkit_hal`
 - `fluxkit_hal` must not depend on `fluxkit_core`
-- generic glue between core and hal belongs in `fluxkit`
-- `fluxkit_pmsm_sim` may depend on `fluxkit_math`, but should remain independent from `fluxkit_core` and `fluxkit_hal`
-- runtime ownership, IRQ scheduling, and command/status sharing belong in `fluxkit`
-- MCU-specific board support, DMA plumbing, and framework integration still do not belong in `core` or `hal`
+- generic controller + HAL glue belongs in `fluxkit`
+- `fluxkit_pmsm_sim` stays independent from `fluxkit_core` and `fluxkit_hal`
+- board support, DMA plumbing, MCU startup, and framework integration do not belong in `core` or `hal`
 
-## Current implemented scope
+## Current runtime model
 
-The repo is intentionally trimmed to the current MVP. Do not reintroduce removed placeholder surface unless there is real implementation behind it.
+`fluxkit::MotorSystem` is the project-facing runtime object.
 
-### `fluxkit_core`
+- one owner calls `MotorSystem::tick()` at a fixed period
+- non-IRQ code uses `MotorHandle`
+- `tick()` does one full wrapper-owned control step:
+  - sample hardware
+  - update estimators
+  - run controller work
+  - apply PWM
+  - publish status
 
-Implemented today:
+Shared runtime metadata uses `critical-section` in `fluxkit`, but the owned
+runtime object itself is not globally locked during the control step.
 
-- `ControlMode`
-  - `Disabled`
-  - `Current`
-  - `Torque`
-  - `Velocity`
-  - `Position`
-  - `OpenLoopVoltage`
-- `MotorState`
-  - `Disabled`
-  - `Ready`
-  - `Running`
-  - `Faulted`
+Do not reintroduce the older public split runtime API based on separate
+wrapper-level fast/deferred entrypoints.
+
+## Current calibration model
+
+Calibration lives in `fluxkit`, while pure calibration procedures live in
+`fluxkit_core`.
+
+Public calibration systems:
+
+- `MotorCalibrationSystem`
+- `ActuatorCalibrationSystem`
+
+Both are:
+
+- fixed-period
+- request-driven
+- phase-aware through `phase()`
+- finalized through:
+  - `MotorCalibrationResult`
+  - `ActuatorCalibrationResult`
+
+Typical bring-up order:
+
+1. motor calibration
+2. actuator calibration
+3. runtime `MotorSystem`
+
+## What is implemented
+
+### In `fluxkit_core`
+
 - `MotorController`
-  - synchronous multi-rate FOC control path
-  - configurable modulator through `MotorController<M>`
-  - `MotorController::new(...)` defaults to `Svpwm`
-  - `MotorController::new_with_modulator(...)` accepts any `fluxkit_math::Modulator`
-  - explicit `ActuatorParams` for gear ratio, output-axis limits, and bounded compensation
-  - `tick(input, TickSchedule)` is the preferred runtime entrypoint
-  - `medium_tick()` owns torque, velocity, and position supervisory updates
-  - `slow_tick()` is currently reserved as a no-op hook
-- input validation
-- explicit `Error`
-- bounded duty output
-- model-based current-loop feedforward
-- multi-turn mechanical position unwrapping from absolute-encoder input
+- `Disabled`, `Current`, `Torque`, `Velocity`, `Position`, `OpenLoopVoltage`
+- actuator-output control targets
+- bounded actuator compensation
 - status snapshot
+- pure calibration procedures
 
-Not present anymore:
+### In `fluxkit`
 
-- startup scaffolding
-- calibration scaffolding
-- command-dispatch placeholder API
-
-### `fluxkit_hal`
-
-Implemented today:
-
-- `PhasePwm`
-- `CurrentSampler`
-- `BusVoltageSensor`
-- `RotorSensor`
-- `GateDriver`
-- `FaultInput`
-- `MonotonicMicros`
-- `TemperatureSensor`
-
-These are trait contracts only. Do not add MCU-specific implementations here.
-
-### `fluxkit`
-
-Implemented today:
-
-- re-exports of `core`, `hal`, and `math`
-- `MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT>`
-- `MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, MOD, RotorEst, OutputEst>`
+- `MotorHardware`
+- `MotorSystem`
 - `MotorHandle`
-- `MotorCommand`
-- `MotorRuntimeStatus`
-- `MotorSystemError<...>`
+- runtime command/status sharing
+- request-driven motor calibration
+- request-driven actuator calibration
 
-`MotorSystem` is the runtime owner that:
+### In `fluxkit_pmsm_sim`
 
-1. samples HAL inputs in `tick()`
-2. builds `FastLoopInput`
-3. runs `MotorController`
-4. runs medium/slow supervisory work in the same cycle
-5. writes phase duty back to PWM
+- ideal `d/q` PMSM electrical model
+- rigid-shaft mechanics
+- actuator reduction, inertia, and parasitic friction/load
 
-`MotorHandle` is the non-ISR command/status surface.
+## Current assumptions
 
-### `fluxkit_pmsm_sim`
+- rotor sensing is absolute-encoder only
+- output sensing is explicit
+- no sensorless or Hall abstraction
+- no startup-state-machine framework in the public crate surface
 
-Implemented today:
-
-- ideal PMSM electrical dynamics in `d/q`
-- rigid-shaft mechanical dynamics
-- viscous and static friction
-- output-side actuator reduction, actuator inertia, attached load inertia, and parasitic load model
-- optional voltage-vector magnitude clamp
-- stepping by `d/q`, `alpha/beta`, phase voltage, or PWM duty
-- `PmsmSnapshot` outputs for controller integration tests
-
-This crate is intended for test and simulation use. Keep it independent from
-the controller and HAL crates.
-
-## Hardware assumptions currently in scope
-
-- rotor sensing is absolute-encoder only for now
-- actuator/output sensing is explicit now
-- `RotorEstimate` and `RotorReading` contain:
-  - `electrical_angle`
-  - `mechanical_angle`
-  - `mechanical_velocity`
-- `ActuatorEstimate` and `OutputReading` contain:
-  - wrapped output angle
-  - output velocity
-- there is no rotor-source enum at the moment
-
-Do not reintroduce Hall or sensorless-source abstractions unless there is a real use case and corresponding implementation plan.
+Do not reintroduce removed placeholder abstractions without a concrete
+implementation plan.
 
 ## Control policy
 
-- `Current` mode directly uses explicit `id_ref` and `iq_ref`
-- `Torque`, `Velocity`, and `Position` commands are actuator-output quantities
-- mechanical/load-side compensation is additive feedforward above the current loop
-- actuator compensation is bounded and optional
-- friction compensation uses a hybrid policy:
-  - breakaway direction is command-guided near zero speed
-  - Coulomb and viscous drag transition onto measured output velocity once moving
-- `Torque`, `Velocity`, and `Position` are implemented through `medium_tick()`
-- `Position` mode runs both the position loop and velocity loop in the same `medium_tick()`
-- runtime integration should prefer `MotorSystem::tick()`
-- `OpenLoopVoltage` bypasses the current PI and modulates commanded `vdq` directly
-- neutral duty means centered PWM output, not hardware-off
-- fallback invalid-control output is neutral duty
-- board/runtime code may still choose stronger safety actions such as disabling PWM or the gate driver
+- `Current` mode uses explicit `id` / `iq` targets
+- `Torque`, `Velocity`, and `Position` targets are actuator-output quantities
+- mechanical/output compensation is additive feedforward above the current loop
+- `OpenLoopVoltage` bypasses the current PI and modulates commanded `vdq`
+- neutral duty is centered PWM, not hardware-off
+- invalid current samples force neutral PWM at the wrapper level
 
-## Error policy
+## API guidance
 
-- use `core::error::Error` broadly
-- `fluxkit_core::Error` is the controller error type
-- HAL traits use associated `type Error: core::error::Error`
-- integration-layer errors should also implement `core::error::Error`
+Prefer:
 
-Do not introduce ad hoc string-based error handling where a typed error enum is appropriate.
-
-## Features
-
-Supported workspace-facing features are:
-
-- `defmt`
-- `serde`
-
-Removed:
-
-- `approx-trig`
-- `fixed-point`
-
-Do not add placeholder Cargo features that do not change behavior.
-
-## API direction
-
-Prefer explicit typed APIs over loose tuples.
-
-Good:
-
-- `FastLoopInput`
-- `FastLoopOutput`
-- `MotorStatus`
-- `PhaseCurrentSample`
-- `MotorHardware`
-- `MotorSystem`
+- explicit typed APIs
+- strong ownership
+- request/result types
+- small HAL traits
 
 Avoid:
 
 - giant platform traits
 - executor-coupled APIs in `core` or `hal`
 - hidden hardware ownership inside `MotorController`
+- stringly typed error handling
 
-## Modulation
+## Error policy
 
-- modulation is configurable
-- `MotorController::new(...)` uses `Svpwm`
-- alternate modulators should go through the existing `Modulator` trait
+- use typed error enums
+- `fluxkit_core::Error` is the controller error type
+- HAL traits use associated `type Error: core::error::Error`
+- wrapper/integration errors should also implement `core::error::Error`
 
-Do not hardcode a new modulation strategy into the controller if it can be expressed through `Modulator`.
+## Features
 
-## Current sample policy
+Supported workspace-facing features:
 
-`MotorSystem::tick()` currently treats:
+- `defmt`
+- `serde`
 
-- `CurrentSampleValidity::Invalid` as an integration error and forces neutral PWM
-- `Valid`, `Estimated`, and `Saturated` as acceptable inputs to pass through to the controller
-
-If this policy changes, change it explicitly in `crates/fluxkit/src/system.rs`.
-
-## Simulator guidance
-
-- prefer using `fluxkit_pmsm_sim` in integration tests rather than adding fake plant math to `fluxkit_core` tests
-- keep the simulator deterministic and allocation-free
-- keep it at the “ideal plant model” level; do not turn it into an MCU runtime or switching-level inverter simulator inside this workspace
-
-## Publishing / dependency guidance
-
-When making crates publishable, prefer `version + path` for internal workspace dependencies so:
-
-- local development uses path dependencies
-- published crates resolve through crates.io
-
-Do not leave publishable inter-crate dependencies as `path`-only.
+Do not add placeholder Cargo features that do not change behavior.
 
 ## Verification
 
-The repo is commonly verified through the Nix dev shell:
+Preferred verification path:
 
 ```bash
 XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo fmt
 XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test -p fluxkit-core -p fluxkit-hal -p fluxkit -p fluxkit-pmsm-sim
 ```
 
-If a change only touches the top-level wrapper, at minimum run:
+If only `fluxkit` changed, at minimum run:
 
 ```bash
 XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test -p fluxkit
+```
+
+Coverage helper:
+
+```bash
+./scripts/coverage.sh --summary-only
 ```
 
 ## Editing guidance
 
 - preserve `no_std`
 - preserve allocation-free control-path behavior
-- keep `fast_tick()` synchronous inside `fluxkit_core`
 - keep hardware ownership out of `fluxkit_core`
 - keep HAL traits narrow and synchronous
-- keep `fluxkit` as the user-facing IRQ runtime and calibration layer
+- keep `fluxkit` as the user-facing runtime and calibration layer
 
-If you are unsure where code belongs:
+If unsure where code belongs:
 
-- pure math/control logic -> `fluxkit_core`
+- pure math/control/calibration procedure -> `fluxkit_core`
 - hardware contract -> `fluxkit_hal`
-- generic controller + HAL orchestration -> `fluxkit`
-- MCU-specific board support / framework glue -> board or integration crate
+- controller + HAL orchestration -> `fluxkit`
+- board/framework glue -> outside this workspace

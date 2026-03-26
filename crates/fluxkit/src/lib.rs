@@ -2,11 +2,22 @@
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs, missing_debug_implementations)]
-//! Workspace entry point for the `fluxkit` multi-crate library.
+//! Project-facing entry point for the Fluxkit motor-control workspace.
 //!
-//! The core crates live in [`fluxkit_core`], [`fluxkit_hal`], and
-//! [`fluxkit_math`], and are re-exported here so downstream users can depend on
-//! `fluxkit` as the umbrella crate.
+//! `fluxkit` is the crate you use when integrating a real project:
+//!
+//! - define board-specific HAL implementations
+//! - run motor calibration
+//! - run actuator calibration
+//! - construct [`MotorSystem`]
+//! - drive it from a fixed-period interrupt with [`MotorSystem::tick`]
+//! - interact from non-IRQ code through [`MotorHandle`]
+//!
+//! The lower-level crates are re-exported here:
+//!
+//! - [`fluxkit_core`]: pure deterministic control logic
+//! - [`fluxkit_hal`]: narrow hardware contracts
+//! - [`fluxkit_math`]: units, transforms, modulation, estimators
 
 pub mod calibration;
 pub mod system;

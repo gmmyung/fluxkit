@@ -1,19 +1,23 @@
-//! Generic motor-control runtime glue over Fluxkit core and HAL traits.
+//! Project-facing runtime wrapper over the pure controller and HAL traits.
 //!
-//! The public runtime model is intentionally simple:
+//! This module is for the common embedded ownership model:
 //!
-//! - non-runtime code owns a [`MotorHandle`] for command/status access
-//! - one owner drives the control loop through [`MotorSystem::tick`]
-//! - each call performs:
-//!   - HAL sampling
-//!   - estimator updates
-//!   - controller fast tick
-//!   - controller medium tick
-//!   - controller slow tick
-//!   - PWM duty application
+//! - one context owns the motor runtime and calls [`MotorSystem::tick`]
+//! - another context holds a [`MotorHandle`] for commands and status
 //!
-//! `fluxkit_core` still keeps the fast/medium/slow split internally, but
-//! `fluxkit` currently executes the full sequence in one cycle.
+//! In other words, `MotorSystem` is the runtime object you put behind your
+//! fixed-period control interrupt.
+//!
+//! Each call to [`MotorSystem::tick`] performs one full control step:
+//!
+//! - sample hardware
+//! - update motion estimators
+//! - run the controller
+//! - apply PWM duty
+//! - publish status for non-IRQ code
+//!
+//! `fluxkit_core` still exposes fast/medium/slow internals, but `fluxkit`
+//! deliberately presents a simpler project-oriented runtime surface here.
 //!
 //! ```ignore
 //! # let hardware = todo!();
