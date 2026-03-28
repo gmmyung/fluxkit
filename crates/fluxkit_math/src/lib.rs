@@ -23,9 +23,10 @@
 //!
 //! # Numerical assumptions
 //!
-//! Public APIs are concrete over `f32` in the MVP. Trigonometric functions are
-//! isolated in [`trig`] and currently use `libm`, which keeps the crate usable
-//! in `no_std` builds without tying it to a particular MCU or DSP backend.
+//! Public APIs are concrete over `f32` in the MVP. Trigonometric and square-root
+//! helpers are isolated in [`trig`] and [`scalar`] and currently use
+//! `micromath`, which keeps the crate usable in `no_std` builds without tying
+//! it to a particular MCU or DSP backend.
 //!
 pub mod angle;
 pub mod control;

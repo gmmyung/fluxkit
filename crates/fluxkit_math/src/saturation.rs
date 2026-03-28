@@ -1,7 +1,7 @@
 //! Saturation and norm limiting helpers.
 
 use crate::frame::{AlphaBeta, Dq};
-use crate::scalar::clamp as scalar_clamp;
+use crate::scalar::{clamp as scalar_clamp, sqrt};
 
 /// Clamps `x` into `[min, max]`.
 #[inline]
@@ -30,7 +30,7 @@ pub fn limit_norm_ab(v: AlphaBeta<f32>, max_mag: f32) -> AlphaBeta<f32> {
         return AlphaBeta::zero();
     }
 
-    let scale = max_mag / libm::sqrtf(mag2);
+    let scale = max_mag / sqrt(mag2);
     AlphaBeta {
         alpha: v.alpha * scale,
         beta: v.beta * scale,
@@ -52,7 +52,7 @@ pub fn limit_norm_dq(v: Dq<f32>, max_mag: f32) -> Dq<f32> {
         return Dq::zero();
     }
 
-    let scale = max_mag / libm::sqrtf(mag2);
+    let scale = max_mag / sqrt(mag2);
     Dq {
         d: v.d * scale,
         q: v.q * scale,

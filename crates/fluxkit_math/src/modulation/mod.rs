@@ -14,7 +14,7 @@ pub mod sine_pwm;
 pub mod svpwm;
 
 use crate::frame::{Abc, AlphaBeta};
-use crate::scalar::FRAC_1_SQRT_3;
+use crate::scalar::{FRAC_1_SQRT_3, sqrt};
 use crate::units::{Duty, Volts};
 
 /// Three normalized phase duties in `[0.0, 1.0]`, represented in the generic
@@ -70,7 +70,7 @@ pub fn dq_q_limit(vd: Volts, v_limit: Volts) -> Volts {
         return Volts::ZERO;
     }
 
-    Volts::new(libm::sqrtf(v_limit * v_limit - vd * vd))
+    Volts::new(sqrt(v_limit * v_limit - vd * vd))
 }
 
 impl Modulator for SinePwm {

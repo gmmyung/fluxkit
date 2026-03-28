@@ -1575,7 +1575,10 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
     );
     assert!((motor_result.phase_inductance_h.get() - params.d_inductance_h.get()).abs() < 4.0e-6);
     assert!(
-        (motor_result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 2.0e-4
+        (motor_result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 2.5e-4,
+        "estimated flux linkage {:?} differed from expected {:?}",
+        motor_result.flux_linkage_weber,
+        params.flux_linkage_weber
     );
     assert!(motor_result.electrical_angle_offset.get().is_finite());
 

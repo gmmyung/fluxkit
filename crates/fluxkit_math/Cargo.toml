@@ -15,7 +15,7 @@ serde = ["dep:serde"]
 
 [dependencies]
 defmt = { version = "0.3", optional = true }
-libm = { version = "0.2", default-features = false }
+micromath = { version = "2.1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 
 [dev-dependencies]

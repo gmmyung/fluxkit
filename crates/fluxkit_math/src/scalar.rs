@@ -31,3 +31,22 @@ pub fn clamp(x: Real, lo: Real, hi: Real) -> Real {
 pub fn clamp_abs(x: Real, limit: Real) -> Real {
     clamp(x, -limit, limit)
 }
+
+/// Square root helper backed by `micromath` and refined with two Newton steps.
+#[inline]
+pub fn sqrt(x: Real) -> Real {
+    if !x.is_finite() || x < 0.0 {
+        return Real::NAN;
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+
+    let estimate = micromath::F32Ext::sqrt(x);
+    if !estimate.is_finite() || estimate <= 0.0 {
+        return estimate;
+    }
+
+    let refined = 0.5 * (estimate + x / estimate);
+    0.5 * (refined + x / refined)
+}
