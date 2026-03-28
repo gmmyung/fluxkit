@@ -1,0 +1,22 @@
+[package]
+name = "as5048a-spi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "AS5048A SPI absolute-encoder driver for Fluxkit hardware integrations"
+repository = ""
+
+[features]
+default = []
+async = ["dep:embedded-hal-async"]
+defmt = ["dep:defmt", "fluxkit-hal?/defmt", "fluxkit_math?/defmt"]
+fluxkit = ["dep:fluxkit-hal", "dep:fluxkit_math"]
+serde = ["dep:serde", "fluxkit-hal?/serde", "fluxkit_math?/serde"]
+
+[dependencies]
+defmt = { version = "0.3", optional = true }
+embedded-hal = "1"
+embedded-hal-async = { version = "1", optional = true }
+fluxkit-hal = { path = "../../fluxkit_hal", package = "fluxkit-hal", optional = true }
+fluxkit_math = { path = "../../fluxkit_math", optional = true }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
