@@ -1,15 +1,16 @@
 //! Static motor and inverter parameter types.
 
 use fluxkit_math::{
-    ElectricalAngle,
+    ElectricalAngle, ElectricalDirection,
     units::{Amps, Duty, Henries, Hertz, Ohms, RadPerSec, Volts, Webers},
 };
 
-/// Fixed reference temperature used to normalize calibrated winding resistance.
-pub const PHASE_RESISTANCE_REFERENCE_TEMP_C: f32 = 25.0;
+/// Fixed reference temperature used internally to normalize calibrated winding
+/// resistance.
+pub(crate) const PHASE_RESISTANCE_REFERENCE_TEMP_C: f32 = 25.0;
 
 /// Default copper-like winding resistance temperature coefficient in `1 / °C`.
-pub const PHASE_RESISTANCE_TEMP_COEFF_PER_C: f32 = 0.00393;
+pub(crate) const PHASE_RESISTANCE_TEMP_COEFF_PER_C: f32 = 0.00393;
 
 /// Electrical motor model used by the controller.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,7 +19,7 @@ pub const PHASE_RESISTANCE_TEMP_COEFF_PER_C: f32 = 0.00393;
 pub struct MotorModel {
     /// Number of electrical pole pairs.
     pub pole_pairs: u8,
-    /// Phase resistance normalized to [`PHASE_RESISTANCE_REFERENCE_TEMP_C`].
+    /// Phase resistance normalized to the fixed `25°C` reference temperature.
     pub phase_resistance_ohm_ref: Ohms,
     /// `d`-axis inductance.
     pub d_inductance_h: Henries,
@@ -26,6 +27,8 @@ pub struct MotorModel {
     pub q_inductance_h: Henries,
     /// Flux-linkage estimate.
     pub flux_linkage_weber: Webers,
+    /// Electrical mapping direction between positive mechanical and electrical motion.
+    pub electrical_direction: ElectricalDirection,
     /// Electrical zero offset applied after converting mechanical angle using
     /// `pole_pairs`.
     pub electrical_angle_offset: ElectricalAngle,
@@ -38,7 +41,7 @@ pub struct MotorModel {
 pub struct MotorParams {
     /// Number of electrical pole pairs.
     pub pole_pairs: u8,
-    /// Phase resistance normalized to [`PHASE_RESISTANCE_REFERENCE_TEMP_C`].
+    /// Phase resistance normalized to the fixed `25°C` reference temperature.
     pub phase_resistance_ohm_ref: Ohms,
     /// `d`-axis inductance.
     pub d_inductance_h: Henries,
@@ -46,6 +49,8 @@ pub struct MotorParams {
     pub q_inductance_h: Henries,
     /// Flux-linkage estimate.
     pub flux_linkage_weber: Webers,
+    /// Electrical mapping direction between positive mechanical and electrical motion.
+    pub electrical_direction: ElectricalDirection,
     /// Electrical zero offset applied after converting mechanical angle using
     /// `pole_pairs`.
     pub electrical_angle_offset: ElectricalAngle,
@@ -62,6 +67,8 @@ pub struct MotorLimits {
     pub max_phase_current: Amps,
     /// Optional mechanical speed limit.
     pub max_mech_speed: Option<RadPerSec>,
+    /// Optional motor winding over-temperature trip threshold in `°C`.
+    pub max_winding_temperature_c: Option<f32>,
 }
 
 /// Electrical limits and modulation constraints of the inverter.
@@ -93,6 +100,7 @@ impl MotorParams {
             d_inductance_h: model.d_inductance_h,
             q_inductance_h: model.q_inductance_h,
             flux_linkage_weber: model.flux_linkage_weber,
+            electrical_direction: model.electrical_direction,
             electrical_angle_offset: model.electrical_angle_offset,
             limits,
         }
@@ -107,6 +115,7 @@ impl MotorParams {
             d_inductance_h: self.d_inductance_h,
             q_inductance_h: self.q_inductance_h,
             flux_linkage_weber: self.flux_linkage_weber,
+            electrical_direction: self.electrical_direction,
             electrical_angle_offset: self.electrical_angle_offset,
         }
     }

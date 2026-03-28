@@ -32,6 +32,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "as5048a-spi"
+version = "0.1.0"
+dependencies = [
+ "defmt 0.3.100",
+ "embedded-hal",
+ "embedded-hal-async",
+ "fluxkit-hal",
+ "fluxkit_math",
+ "serde",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -259,6 +271,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
+name = "embedded-hal-async"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
+dependencies = [
+ "embedded-hal",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -294,11 +321,13 @@ name = "fluxkit"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "defmt 0.3.100",
  "fluxkit-core",
  "fluxkit-hal",
  "fluxkit-pmsm-sim",
  "fluxkit_math",
  "plotters",
+ "serde",
  "static_cell",
 ]
 

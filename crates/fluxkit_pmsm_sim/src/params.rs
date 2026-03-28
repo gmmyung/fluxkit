@@ -1,6 +1,9 @@
 //! Static PMSM plant parameters.
 
-use fluxkit_math::units::{Henries, NewtonMeters, Ohms, RadPerSec, Volts, Webers};
+use fluxkit_math::{
+    ElectricalDirection,
+    units::{Henries, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
+};
 
 /// Static parameters for an ideal PMSM plant model.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,6 +21,8 @@ pub struct PmsmParams {
     pub q_inductance_h: Henries,
     /// Permanent-magnet flux linkage.
     pub flux_linkage_weber: Webers,
+    /// Electrical mapping direction between positive mechanical and electrical motion.
+    pub electrical_direction: ElectricalDirection,
     /// Lumped winding thermal model.
     pub thermal: ThermalPlantParams,
     /// Combined mechanical drivetrain model, including rotor-side and

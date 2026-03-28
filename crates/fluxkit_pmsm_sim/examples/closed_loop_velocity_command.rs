@@ -1,9 +1,9 @@
 use std::{env, error::Error, fs};
 
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlMode,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
     CurrentLoopConfig, FastLoopInput, FrictionCompensation, InverterParams, MotorController,
-    MotorLimits, MotorParams, RotorEstimate,
+    MotorLimits, MotorParams, RotorEstimate, motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -15,8 +15,6 @@ use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, ThermalPlantP
 use plotters::prelude::*;
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
-const MEDIUM_DECIMATION: usize = 10;
-const MEDIUM_DT_SECONDS: f32 = FAST_DT_SECONDS * MEDIUM_DECIMATION as f32;
 const GEAR_RATIO: f32 = 2.0;
 const SIMULATION_STEPS: usize = 5_000;
 const TARGET_OUTPUT_ACCELERATION: f32 = 30.0;
@@ -51,50 +49,54 @@ fn main() -> Result<(), Box<dyn Error>> {
         inverter_params(),
         actuator_params_disabled(),
         config(),
+        fluxkit_math::Svpwm,
     );
     let mut compensated = MotorController::new(
         motor_params(),
         inverter_params(),
         actuator_params_compensated(),
         config(),
+        fluxkit_math::Svpwm,
     );
     let mut no_friction = MotorController::new(
         motor_params(),
         inverter_params(),
         actuator_params_disabled(),
         config(),
+        fluxkit_math::Svpwm,
     );
     let mut uncompensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();
     let mut compensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();
     let mut no_friction_plant = PmsmModel::new_zeroed(plant_params_no_friction()).unwrap();
     let mut samples = Vec::with_capacity(SIMULATION_STEPS);
-    uncompensated.set_mode(ControlMode::Velocity);
-    uncompensated.enable();
-
-    compensated.set_mode(ControlMode::Velocity);
-    compensated.enable();
-
-    no_friction.set_mode(ControlMode::Velocity);
-    no_friction.enable();
+    uncompensated.set_armed(true);
+    compensated.set_armed(true);
+    no_friction.set_armed(true);
 
     for step in 0..SIMULATION_STEPS {
         let output_velocity_target = output_velocity_target_for_step(step);
-        uncompensated.set_velocity_target(RadPerSec::new(output_velocity_target));
-        compensated.set_velocity_target(RadPerSec::new(output_velocity_target));
-        no_friction.set_velocity_target(RadPerSec::new(output_velocity_target));
+        uncompensated.apply_command(ControllerCommand::Velocity(RadPerSec::new(
+            output_velocity_target,
+        )));
+        compensated.apply_command(ControllerCommand::Velocity(RadPerSec::new(
+            output_velocity_target,
+        )));
+        no_friction.apply_command(ControllerCommand::Velocity(RadPerSec::new(
+            output_velocity_target,
+        )));
 
-        if step % MEDIUM_DECIMATION == 0 {
-            uncompensated.medium_tick(MEDIUM_DT_SECONDS);
-            compensated.medium_tick(MEDIUM_DT_SECONDS);
-            no_friction.medium_tick(MEDIUM_DT_SECONDS);
-        }
-
-        let no_friction_output =
-            no_friction.fast_tick(fast_loop_input(&no_friction_plant, bus_voltage));
-        let uncompensated_output =
-            uncompensated.fast_tick(fast_loop_input(&uncompensated_plant, bus_voltage));
-        let compensated_output =
-            compensated.fast_tick(fast_loop_input(&compensated_plant, bus_voltage));
+        let no_friction_output = no_friction.step(
+            fast_loop_input(&no_friction_plant, bus_voltage),
+            FAST_DT_SECONDS,
+        );
+        let uncompensated_output = uncompensated.step(
+            fast_loop_input(&uncompensated_plant, bus_voltage),
+            FAST_DT_SECONDS,
+        );
+        let compensated_output = compensated.step(
+            fast_loop_input(&compensated_plant, bus_voltage),
+            FAST_DT_SECONDS,
+        );
 
         no_friction_plant.step_phase_duty(
             no_friction_output.phase_duty,
@@ -349,10 +351,12 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         limits: MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         },
     }
 }
@@ -429,6 +433,7 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,

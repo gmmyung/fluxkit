@@ -2,48 +2,190 @@
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs, missing_debug_implementations)]
-//! Project-facing entry point for the Fluxkit motor-control workspace.
+//! Project-facing crate for BLDC / PMSM bring-up and fixed-period runtime control.
 //!
-//! `fluxkit` is the crate you use when integrating a real project:
+//! `fluxkit` is the top-level crate you use in an application or firmware
+//! project. It is meant for projects that already know their execution model:
 //!
-//! - define board-specific HAL implementations
-//! - run motor calibration
-//! - run actuator calibration
-//! - construct [`MotorSystem`]
-//! - drive it from a fixed-period interrupt with [`MotorSystem::tick`]
-//! - interact from non-IRQ code through [`MotorHandle`]
+//! - fixed-period control interrupt
+//! - absolute rotor sensing
+//! - winding temperature sensing
+//! - explicit output / actuator sensing
 //!
-//! The lower-level crates are re-exported here:
+//! The crate gives you:
 //!
-//! - [`fluxkit_core`]: pure deterministic control logic
-//! - [`fluxkit_hal`]: narrow hardware contracts
-//! - [`fluxkit_math`]: units, transforms, modulation, estimators
+//! - request-driven motor electrical calibration
+//! - request-driven actuator calibration
+//! - a main-context runtime owner, [`MotorRuntime`]
+//! - a non-owning command/status handle, [`MotorHandle`]
+//! - an IRQ-side executor, [`MotorTicker`]
+//!
+//! `fluxkit` is intentionally not an MCU framework or executor. It focuses on
+//! the motor-control problem itself and leaves board startup, interrupt
+//! registration, persistence, and project-specific state machines to your
+//! application code.
+//!
+//! # Typical Flow
+//!
+//! A normal project flow is:
+//!
+//! 1. implement the HAL traits needed by your board
+//! 2. run [`MotorCalibrationRuntime`]
+//! 3. build [`MotorParams`] from the resulting [`MotorCalibrationResult`]
+//! 4. run [`ActuatorCalibrationRuntime`]
+//! 5. build [`ActuatorParams`] from the resulting [`ActuatorCalibrationResult`]
+//! 6. construct [`MotorRuntime`]
+//! 7. call [`MotorRuntime::split`] to get the unique handle/ticker pair
+//! 8. use [`MotorHandle`] from non-IRQ code for commands and status
+//!
+//! The full end-to-end example is:
+//!
+//! - `cargo run -p fluxkit --example threaded_bringup`
+//!
+//! That example shows:
+//!
+//! - motor calibration
+//! - actuator calibration
+//! - transition into runtime control
+//! - one main-owned runtime object
+//! - one non-IRQ command/status path
+//!
+//! # Main Types
+//!
+//! Runtime:
+//!
+//! - [`MotorRuntime`]
+//! - [`MotorRuntimeParams`]
+//! - [`MotorCommand`]
+//! - [`MotorHandle`]
+//! - [`MotorTicker`]
+//! - [`MotorRuntimeStatus`]
+//!
+//! Calibration:
+//!
+//! - [`MotorCalibrationRuntime`]
+//! - [`MotorCalibrationTicker`]
+//! - [`MotorCalibrationRequest`]
+//! - [`MotorCalibrationResult`]
+//! - [`ActuatorCalibrationRuntime`]
+//! - [`ActuatorCalibrationTicker`]
+//! - [`ActuatorCalibrationRequest`]
+//! - [`ActuatorCalibrationResult`]
+//!
+//! Params and units:
+//!
+//! - [`MotorParams`], [`ActuatorParams`], [`MotorLimits`], [`ActuatorLimits`]
+//! - [`CurrentLoopConfig`], [`InverterParams`]
+//! - units such as [`Amps`], [`Volts`], [`RadPerSec`], [`NewtonMeters`]
+//!
+//! # Architecture
+//!
+//! The workspace is intentionally split by responsibility:
+//!
+//! - `fluxkit_math`
+//!   - units, transforms, modulation, estimator primitives
+//! - `fluxkit_core`
+//!   - deterministic control engine and pure calibration procedures
+//! - `fluxkit_hal`
+//!   - narrow synchronous hardware contracts
+//! - `fluxkit`
+//!   - project-facing runtime and calibration wrappers
+//!
+//! The intended ownership model is:
+//!
+//! - one context owns [`MotorRuntime`]
+//! - IRQ code executes it through [`MotorTicker`]
+//! - non-owner code uses [`MotorHandle`]
+//! - phase transitions happen through [`MotorRuntime::try_into_parts`]
+//! - the same pattern applies to calibration through
+//!   [`MotorCalibrationRuntime`] / [`MotorCalibrationTicker`] and
+//!   [`ActuatorCalibrationRuntime`] / [`ActuatorCalibrationTicker`]
+//!
+//! `fluxkit_core` is still available for lower-level engine integration, but
+//! the normal application path should stay at the `fluxkit` layer.
+//!
+//! # Minimal Runtime Shape
+//!
+//! ```ignore
+//! use fluxkit::{
+//!     MotorCommand, MotorRuntime, MotorRuntimeParams, PassThroughEstimator, Svpwm, units::RadPerSec,
+//! };
+//!
+//! # let pwm = todo!();
+//! # let current = todo!();
+//! # let bus = todo!();
+//! # let rotor = todo!();
+//! # let output = todo!();
+//! # let temp = todo!();
+//! # let motor_params = todo!();
+//! # let inverter_params = todo!();
+//! # let actuator_params = todo!();
+//! # let current_loop_config = todo!();
+//! let runtime = MotorRuntime::new(
+//!     pwm,
+//!     current,
+//!     bus,
+//!     rotor,
+//!     output,
+//!     temp,
+//!     MotorRuntimeParams::new(
+//!         motor_params,
+//!         inverter_params,
+//!         actuator_params,
+//!         current_loop_config,
+//!         1.0 / 20_000.0,
+//!     ),
+//!     Svpwm,
+//!     PassThroughEstimator::new(),
+//!     PassThroughEstimator::new(),
+//! );
+//!
+//! let (handle, ticker) = runtime.split()?;
+//! handle.set_command(MotorCommand::Velocity(RadPerSec::new(2.0)));
+//! handle.arm();
+//!
+//! loop {
+//!     ticker.tick()?;
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! # Start Here
+//!
+//! - For runtime owner / handle / ticker semantics, see [`system`].
+//! - For calibration flow and result types, see [`calibration`].
 
 pub mod calibration;
+mod capability;
 pub mod system;
 
 pub use calibration::{
-    ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
-    ActuatorCalibrationResult, ActuatorCalibrationSystem, ActuatorCalibrationSystemError,
-    MotorCalibrationLimits, MotorCalibrationPhase, MotorCalibrationRequest, MotorCalibrationResult,
-    MotorCalibrationSystem, MotorCalibrationSystemError,
+    ActuatorCalibrationHandle, ActuatorCalibrationLimits, ActuatorCalibrationPhase,
+    ActuatorCalibrationRequest, ActuatorCalibrationResult, ActuatorCalibrationRuntime,
+    ActuatorCalibrationRuntimeError, ActuatorCalibrationStatus, ActuatorCalibrationTicker,
+    MotorCalibrationHandle, MotorCalibrationLimits, MotorCalibrationParts, MotorCalibrationPhase,
+    MotorCalibrationRequest, MotorCalibrationResult, MotorCalibrationRuntime,
+    MotorCalibrationRuntimeError, MotorCalibrationStatus, MotorCalibrationTicker,
 };
-pub use fluxkit_core as core;
+pub use capability::CapabilitySplitError;
 pub use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorLimits,
-    ActuatorModel, ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig, Error,
-    FastLoopInput, FastLoopOutput, FrictionCompensation, InverterParams, MotorController,
-    MotorLimits, MotorModel, MotorParams, MotorState, MotorStatus,
-    PHASE_RESISTANCE_REFERENCE_TEMP_C, PHASE_RESISTANCE_TEMP_COEFF_PER_C, RotorEstimate,
-    TickSchedule,
+    ActuatorModel, ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig,
+    CurrentLoopConfigBuilder, Error, FrictionCompensation, InverterParams, MotorLimits, MotorModel,
+    MotorParams, MotorState, MotorStatus, RotorEstimate,
 };
-pub use fluxkit_hal as hal;
 pub use fluxkit_hal::{
-    BusVoltageSensor, CurrentSampleValidity, CurrentSampler, FaultInput, GateDriver,
-    GateDriverFault, MonotonicMicros, OutputReading, OutputSensor, PhaseCurrentSample, PhasePwm,
-    RotorReading, RotorSensor, TemperatureSensor, centered_phase_duty,
+    BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
+    PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
 };
-pub use fluxkit_math as math;
-pub use fluxkit_math::*;
-pub use system::{MotorCommand, MotorHandle, MotorRuntimeStatus};
-pub use system::{MotorHardware, MotorSystem, MotorSystemError};
+pub use fluxkit_math::{
+    Abc, Amps, ContinuousMechanicalAngle, Dq, Duty, ElectricalAngle, ElectricalDirection, Henries,
+    Hertz, MechanicalAngle, MechanicalMotionEstimate, MechanicalMotionSample, MechanicalMotionSeed,
+    Modulator, NewtonMeters, Ohms, PassThroughEstimator, PhaseDuty, RadPerSec, SinePwm, Svpwm,
+    Volts, Webers, WrappedEstimator, angle, units,
+};
+pub use system::MotorRuntimeError;
+pub use system::{
+    MechanicalMotionEstimator, MotorCommand, MotorHandle, MotorRuntime, MotorRuntimeOutput,
+    MotorRuntimeParams, MotorRuntimeParts, MotorRuntimeStatus, MotorTicker,
+};

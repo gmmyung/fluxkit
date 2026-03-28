@@ -1,11 +1,15 @@
 //! Actuator gear-ratio calibration from simultaneous rotor/output travel.
 //!
-//! This procedure commands a steady positive output-axis velocity target. Once
-//! the output velocity settles, it unwraps both the rotor and output encoder
-//! angles over a short sample window and estimates:
+//! This procedure commands steady positive motion on the output axis. Once
+//! positive output velocity is established, it unwraps both the rotor and
+//! output encoder angles over a short sample window and estimates:
 //!
 //! `gear_ratio ~= |rotor_travel / output_travel|`
-
+//!
+//! The routine assumes that positive output-sensor motion corresponds to the
+//! same physical direction as positive rotor motion after reduction. If the
+//! output sensor reports the opposite sign, calibration fails with
+//! [`CalibrationError::OppositeDirection`].
 use fluxkit_math::{ContinuousMechanicalAngle, angle::shortest_angle_delta, units::RadPerSec};
 
 use crate::calibration::shared::CalibrationError;
@@ -15,9 +19,9 @@ use crate::calibration::shared::CalibrationError;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActuatorGearRatioCalibrationConfig {
-    /// Output-axis velocity target used to create measurable travel.
+    /// Output-axis velocity magnitude target used to create measurable travel.
     pub velocity_target: RadPerSec,
-    /// Maximum absolute output-velocity error considered settled.
+    /// Minimum positive output velocity used to confirm established motion.
     pub settle_velocity_error: RadPerSec,
     /// Continuous settle time required before sampling travel.
     pub settle_time_seconds: f32,
@@ -58,7 +62,7 @@ pub struct ActuatorGearRatioCalibrationInput {
     pub dt_seconds: f32,
 }
 
-/// Velocity-target command emitted by the gear-ratio calibrator.
+/// Positive output-axis velocity command emitted by the gear-ratio calibrator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -168,9 +172,14 @@ impl ActuatorGearRatioCalibrator {
 
         self.update_unwrapped_angles(input.rotor_mechanical_angle, input.output_mechanical_angle);
 
-        if (input.output_velocity.get() - self.config.velocity_target.get()).abs()
-            > self.config.settle_velocity_error.get()
-        {
+        if input.output_velocity.get() < -self.config.settle_velocity_error.get() {
+            self.error = Some(CalibrationError::OppositeDirection);
+            return ActuatorGearRatioCalibrationCommand {
+                velocity_target: RadPerSec::ZERO,
+            };
+        }
+
+        if input.output_velocity.get() < self.config.settle_velocity_error.get() {
             self.reset_sampling();
             return ActuatorGearRatioCalibrationCommand {
                 velocity_target: self.config.velocity_target,
@@ -226,7 +235,6 @@ impl ActuatorGearRatioCalibrator {
                 velocity_target: RadPerSec::ZERO,
             };
         }
-
         self.result = Some(ActuatorGearRatioCalibrationResult { gear_ratio });
         ActuatorGearRatioCalibrationCommand {
             velocity_target: RadPerSec::ZERO,
@@ -363,5 +371,25 @@ mod tests {
         }
 
         assert_eq!(calibrator.error(), Some(CalibrationError::Timeout));
+    }
+
+    #[test]
+    fn faults_when_output_velocity_runs_opposite_direction() {
+        let mut calibrator = ActuatorGearRatioCalibrator::new(
+            ActuatorGearRatioCalibrationConfig::default_for_travel_ratio(),
+        )
+        .unwrap();
+
+        let _ = calibrator.tick(ActuatorGearRatioCalibrationInput {
+            rotor_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
+            output_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
+            output_velocity: RadPerSec::new(-0.2),
+            dt_seconds: 0.001,
+        });
+
+        assert_eq!(
+            calibrator.error(),
+            Some(CalibrationError::OppositeDirection)
+        );
     }
 }

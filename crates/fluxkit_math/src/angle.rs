@@ -1,7 +1,30 @@
 //! Angle wrappers and wrapping helpers.
 
 use crate::scalar::{PI, TAU};
-use crate::units::Radians;
+use crate::units::{RadPerSec, Radians};
+
+/// Electrical mapping direction between positive mechanical and electrical motion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ElectricalDirection {
+    /// Positive mechanical rotation advances positive electrical angle.
+    #[default]
+    Positive,
+    /// Positive mechanical rotation advances negative electrical angle.
+    Negative,
+}
+
+impl ElectricalDirection {
+    /// Returns the signed scale factor for this direction.
+    #[inline]
+    pub const fn signum(self) -> f32 {
+        match self {
+            Self::Positive => 1.0,
+            Self::Negative => -1.0,
+        }
+    }
+}
 
 /// Electrical angle in radians, wrapped into `[-pi, pi)` by construction.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Default)]
@@ -196,6 +219,33 @@ pub fn mechanical_to_electrical(
     ElectricalAngle::from_radians(theta_mech.radians() * pole_pairs as f32)
 }
 
+/// Converts a mechanical angle to an electrical angle using `pole_pairs` and
+/// the configured electrical mapping direction.
+#[inline]
+pub fn mechanical_to_electrical_with_direction(
+    theta_mech: ContinuousMechanicalAngle,
+    pole_pairs: u32,
+    direction: ElectricalDirection,
+) -> ElectricalAngle {
+    let sign = direction.signum();
+    ElectricalAngle::new(mechanical_to_electrical(theta_mech, pole_pairs).get() * sign)
+}
+
+/// Converts mechanical rotor speed into electrical angular velocity using
+/// `pole_pairs` and the configured electrical mapping direction.
+#[inline]
+pub fn mechanical_velocity_to_electrical(
+    mechanical_velocity: RadPerSec,
+    pole_pairs: u32,
+    direction: ElectricalDirection,
+) -> RadPerSec {
+    debug_assert!(pole_pairs > 0, "pole_pairs must be non-zero");
+    if pole_pairs == 0 {
+        return RadPerSec::ZERO;
+    }
+    RadPerSec::new(mechanical_velocity.get() * pole_pairs as f32 * direction.signum())
+}
+
 /// Converts a wrapped electrical angle to a wrapped mechanical angle using `pole_pairs`.
 ///
 /// When `pole_pairs == 0`, returns zero and triggers a debug assertion in
@@ -212,11 +262,13 @@ pub fn electrical_to_mechanical(theta_elec: ElectricalAngle, pole_pairs: u32) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        ContinuousMechanicalAngle, ElectricalAngle, MechanicalAngle, electrical_to_mechanical,
-        mechanical_to_electrical, shortest_angle_delta, wrap,
+        ContinuousMechanicalAngle, ElectricalAngle, ElectricalDirection, MechanicalAngle,
+        electrical_to_mechanical, mechanical_to_electrical,
+        mechanical_to_electrical_with_direction, mechanical_velocity_to_electrical,
+        shortest_angle_delta, wrap,
     };
     use crate::scalar::{PI, TAU};
-    use crate::units::Radians;
+    use crate::units::{RadPerSec, Radians};
 
     fn approx_eq(a: f32, b: f32) {
         assert!((a - b).abs() < 1.0e-6, "{a} != {b}");
@@ -254,6 +306,27 @@ mod tests {
         approx_eq(
             ContinuousMechanicalAngle::new(4.0 * PI).wrapped().get(),
             0.0,
+        );
+    }
+
+    #[test]
+    fn direction_aware_conversion_applies_sign() {
+        let mech = ContinuousMechanicalAngle::new(1.25);
+        let positive =
+            mechanical_to_electrical_with_direction(mech, 7, ElectricalDirection::Positive);
+        let negative =
+            mechanical_to_electrical_with_direction(mech, 7, ElectricalDirection::Negative);
+
+        approx_eq(positive.get(), wrap(8.75));
+        approx_eq(negative.get(), wrap(-8.75));
+        approx_eq(
+            mechanical_velocity_to_electrical(
+                RadPerSec::new(2.0),
+                7,
+                ElectricalDirection::Negative,
+            )
+            .get(),
+            -14.0,
         );
     }
 }

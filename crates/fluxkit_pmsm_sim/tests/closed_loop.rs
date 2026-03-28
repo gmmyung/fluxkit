@@ -1,7 +1,7 @@
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlMode,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
     CurrentLoopConfig, FastLoopInput, FrictionCompensation, InverterParams, MotorController,
-    MotorLimits, MotorParams, RotorEstimate, TickSchedule,
+    MotorLimits, MotorParams, RotorEstimate, motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -12,8 +12,6 @@ use fluxkit_math::{
 use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, ThermalPlantParams};
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
-const MEDIUM_DECIMATION: usize = 10;
-const MEDIUM_DT_SECONDS: f32 = FAST_DT_SECONDS * MEDIUM_DECIMATION as f32;
 const GEAR_RATIO: f32 = 2.0;
 const TARGET_STEP_INDEX: usize = 100;
 const POSITION_TARGET_RADIANS: f32 = 2.0;
@@ -25,10 +23,12 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         limits: MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         },
     }
 }
@@ -82,6 +82,7 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -171,7 +172,7 @@ fn run_fast_step(
     bus_voltage: Volts,
     load_torque: NewtonMeters,
 ) {
-    let output = controller.fast_tick(fast_loop_input(plant, bus_voltage));
+    let output = controller.step(fast_loop_input(plant, bus_voltage), FAST_DT_SECONDS);
     assert_eq!(controller.status().active_error, None);
     plant
         .step_phase_duty(output.phase_duty, bus_voltage, load_torque, FAST_DT_SECONDS)
@@ -194,12 +195,15 @@ fn current_mode_drives_positive_q_current_into_the_plant() {
         inverter_params(),
         actuator_params(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut plant = PmsmModel::new_zeroed(plant_params()).unwrap();
 
-    controller.set_mode(ControlMode::Current);
-    controller.set_iq_target(Amps::new(3.0));
-    controller.enable();
+    controller.apply_command(ControllerCommand::Current(fluxkit_math::Dq::new(
+        Amps::ZERO,
+        Amps::new(3.0),
+    )));
+    controller.set_armed(true);
 
     for _ in 0..4_000 {
         run_fast_step(&mut controller, &mut plant, bus_voltage, NewtonMeters::ZERO);
@@ -234,20 +238,17 @@ fn position_mode_tracks_output_axis_feedback() {
         inverter_params(),
         actuator_params(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut plant = PmsmModel::new_zeroed(plant_params()).unwrap();
 
-    controller.set_mode(ControlMode::Position);
-    controller.set_position_target(ContinuousMechanicalAngle::new(POSITION_TARGET_RADIANS));
-    controller.enable();
+    controller.apply_command(ControllerCommand::Position(ContinuousMechanicalAngle::new(
+        POSITION_TARGET_RADIANS,
+    )));
+    controller.set_armed(true);
 
-    for step in 0..200_000 {
-        let schedule = if step % MEDIUM_DECIMATION == MEDIUM_DECIMATION - 1 {
-            TickSchedule::with_medium(MEDIUM_DT_SECONDS)
-        } else {
-            TickSchedule::none()
-        };
-        let output = controller.tick(fast_loop_input(&plant, bus_voltage), schedule);
+    for _step in 0..200_000 {
+        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -283,22 +284,21 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
         inverter_params(),
         actuator_params(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut compensated = MotorController::new(
         motor_params(),
         inverter_params(),
         actuator_params_with_friction_compensation(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut uncompensated_plant =
         PmsmModel::new_zeroed(plant_params_with_output_inertia()).unwrap();
     let mut compensated_plant = PmsmModel::new_zeroed(plant_params_with_output_inertia()).unwrap();
 
-    uncompensated.set_mode(ControlMode::Velocity);
-    uncompensated.enable();
-
-    compensated.set_mode(ControlMode::Velocity);
-    compensated.enable();
+    uncompensated.set_armed(true);
+    compensated.set_armed(true);
 
     for step in 0..1_000 {
         let target_velocity = if step < TARGET_STEP_INDEX {
@@ -307,19 +307,17 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
             let elapsed = (step - TARGET_STEP_INDEX) as f32 * FAST_DT_SECONDS;
             (30.0 * elapsed).min(3.0)
         };
-        uncompensated.set_velocity_target(RadPerSec::new(target_velocity));
-        compensated.set_velocity_target(RadPerSec::new(target_velocity));
+        uncompensated.apply_command(ControllerCommand::Velocity(RadPerSec::new(target_velocity)));
+        compensated.apply_command(ControllerCommand::Velocity(RadPerSec::new(target_velocity)));
 
-        let schedule = if step % MEDIUM_DECIMATION == 0 {
-            TickSchedule::with_medium(MEDIUM_DT_SECONDS)
-        } else {
-            TickSchedule::none()
-        };
-
-        let uncompensated_output =
-            uncompensated.tick(fast_loop_input(&uncompensated_plant, bus_voltage), schedule);
-        let compensated_output =
-            compensated.tick(fast_loop_input(&compensated_plant, bus_voltage), schedule);
+        let uncompensated_output = uncompensated.step(
+            fast_loop_input(&uncompensated_plant, bus_voltage),
+            FAST_DT_SECONDS,
+        );
+        let compensated_output = compensated.step(
+            fast_loop_input(&compensated_plant, bus_voltage),
+            FAST_DT_SECONDS,
+        );
 
         assert_eq!(uncompensated.status().active_error, None);
         assert_eq!(compensated.status().active_error, None);

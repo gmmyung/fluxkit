@@ -162,6 +162,13 @@ pub type MechanicalMotionSeed = AngularEstimatorSeed<MechanicalAngle, RadPerSec>
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "W: serde::Serialize, W::Continuous: serde::Serialize, R: serde::Serialize",
+        deserialize = "W: serde::Deserialize<'de>, W::Continuous: serde::Deserialize<'de>, R: serde::Deserialize<'de>"
+    ))
+)]
 pub struct PassThroughWrappedEstimator<W, R>
 where
     W: WrappedAngleValue,
@@ -304,6 +311,13 @@ pub struct LpfEstimatorConfig {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "W: serde::Serialize, W::Continuous: serde::Serialize, R: serde::Serialize",
+        deserialize = "W: serde::Deserialize<'de>, W::Continuous: serde::Deserialize<'de>, R: serde::Deserialize<'de>"
+    ))
+)]
 pub struct LpfWrappedEstimator<W, R>
 where
     W: WrappedAngleValue,
@@ -398,10 +412,53 @@ pub struct PllEstimatorConfig {
     pub ki: f32,
 }
 
+impl PllEstimatorConfig {
+    /// Sizes PLL gains from a second-order target natural frequency and damping ratio:
+    ///
+    /// - `kp = 2 * zeta * omega_n`
+    /// - `ki = omega_n^2`
+    ///
+    /// where:
+    ///
+    /// - `omega_n` is the target natural frequency in `rad/s`
+    /// - `zeta` is the desired damping ratio
+    ///
+    /// A practical tuning recipe is:
+    ///
+    /// 1. pick damping ratio:
+    ///    - `zeta = 0.707` is a good default
+    /// 2. pick estimator bandwidth:
+    ///    - start around `20..100 Hz` for noisy encoders
+    ///    - start around `100..300 Hz` for clean high-rate magnetic encoders
+    /// 3. convert bandwidth to natural frequency:
+    ///    - `omega_n = 2 * pi * f_bw`
+    /// 4. compute gains:
+    ///    - `kp = 2 * zeta * omega_n`
+    ///    - `ki = omega_n^2`
+    #[inline]
+    pub fn from_natural_frequency_and_damping(
+        natural_frequency: RadPerSec,
+        damping_ratio: f32,
+    ) -> Self {
+        let omega_n = natural_frequency.get();
+        Self {
+            kp: 2.0 * damping_ratio * omega_n,
+            ki: omega_n * omega_n,
+        }
+    }
+}
+
 /// PLL-backed angle estimator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "W: serde::Serialize, W::Continuous: serde::Serialize, R: serde::Serialize",
+        deserialize = "W: serde::Deserialize<'de>, W::Continuous: serde::Deserialize<'de>, R: serde::Deserialize<'de>"
+    ))
+)]
 pub struct PllWrappedEstimator<W, R>
 where
     W: WrappedAngleValue,
@@ -429,6 +486,22 @@ where
             ),
             initialized: false,
         }
+    }
+
+    /// Creates an uninitialized PLL angle estimator sized from a target
+    /// natural frequency and damping ratio.
+    ///
+    /// See [`PllEstimatorConfig::from_natural_frequency_and_damping`] for the
+    /// recommended bandwidth-to-gain tuning recipe.
+    #[inline]
+    pub fn from_natural_frequency_and_damping(
+        natural_frequency: RadPerSec,
+        damping_ratio: f32,
+    ) -> Self {
+        Self::new(PllEstimatorConfig::from_natural_frequency_and_damping(
+            natural_frequency,
+            damping_ratio,
+        ))
     }
 }
 
@@ -629,5 +702,14 @@ mod tests {
             3.0e-2,
         );
         approx_eq(estimate.velocity().get(), omega, 2.5e-1);
+    }
+
+    #[test]
+    fn pll_config_helper_sizes_second_order_gains() {
+        let cfg =
+            PllEstimatorConfig::from_natural_frequency_and_damping(RadPerSec::new(20.0), 0.707);
+
+        approx_eq(cfg.kp, 28.28, 1.0e-6);
+        approx_eq(cfg.ki, 400.0, 1.0e-6);
     }
 }

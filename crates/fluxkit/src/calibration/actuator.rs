@@ -1,13 +1,14 @@
+use core::cell::{Cell, RefCell};
 use core::fmt;
 
+use critical_section::Mutex;
 use fluxkit_core::{
     ActuatorBlendBandCalibrationInput, ActuatorBlendBandCalibrator,
     ActuatorBreakawayCalibrationInput, ActuatorBreakawayCalibrator,
     ActuatorCalibration as PartialActuatorCalibration, ActuatorCalibrationRoutine,
     ActuatorCompensationConfig, ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrator,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrator, ActuatorLimits, ActuatorModel,
-    ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig, InverterParams, MotorParams,
-    MotorState, MotorStatus,
+    ActuatorParams, CalibrationError, CurrentLoopConfig, InverterParams, MotorParams, MotorStatus,
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampler, OutputSensor, PhasePwm, RotorSensor, TemperatureSensor,
@@ -17,21 +18,28 @@ use fluxkit_math::{
     units::{NewtonMeters, RadPerSec},
 };
 
-use super::shared::RoutineState;
-use crate::{MotorHardware, MotorSystem, MotorSystemError, system::MechanicalMotionEstimator};
+use super::shared::{RoutineState, SharedStatus, read_status, write_status};
+use crate::{
+    CapabilitySplitError, MotorRuntime, MotorRuntimeError,
+    system::{MechanicalMotionEstimator, MotorRuntimeParts},
+};
 
 /// HAL and integration failures that can occur while running actuator-side
-/// calibration through the full public motor-system wrapper.
+/// calibration through the public motor-runtime wrapper.
 #[derive(Debug)]
-pub enum ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> {
-    /// Underlying motor-system operation failed.
-    Motor(MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>),
+pub enum ActuatorCalibrationRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> {
+    /// The runtime was temporarily unavailable because another context holds the active inner state.
+    Busy,
+    /// The runtime owner no longer contains an active inner runtime.
+    Inactive,
+    /// Underlying motor-runtime operation failed.
+    Motor(MotorRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>),
     /// The pure core calibration procedure failed.
     Calibration(CalibrationError),
 }
 
 impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> fmt::Display
-    for ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
+    for ActuatorCalibrationRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: fmt::Display,
     CurrentE: fmt::Display,
@@ -42,14 +50,16 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Motor(error) => write!(f, "motor-system error: {error}"),
+            Self::Busy => f.write_str("runtime busy"),
+            Self::Inactive => f.write_str("runtime inactive"),
+            Self::Motor(error) => write!(f, "motor-runtime error: {error}"),
             Self::Calibration(error) => write!(f, "calibration error: {error}"),
         }
     }
 }
 
 impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> core::error::Error
-    for ActuatorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
+    for ActuatorCalibrationRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: core::error::Error + 'static,
     CurrentE: core::error::Error + 'static,
@@ -60,6 +70,8 @@ where
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::Busy => None,
+            Self::Inactive => None,
             Self::Motor(error) => Some(error),
             Self::Calibration(error) => Some(error),
         }
@@ -72,6 +84,11 @@ where
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActuatorCalibrationRequest {
     /// Provided gear ratio. When absent, gear ratio is calibrated.
+    ///
+    /// Gear-ratio calibration assumes the output sensor uses the same positive
+    /// motion convention as the reduced rotor/output axis. If output velocity
+    /// appears opposite to the commanded direction, the runtime faults with
+    /// [`CalibrationError::OppositeDirection`].
     pub gear_ratio: Option<f32>,
     /// Provided positive-direction Coulomb friction torque.
     pub positive_coulomb_torque: Option<NewtonMeters>,
@@ -87,6 +104,14 @@ pub struct ActuatorCalibrationRequest {
     pub negative_breakaway_torque: Option<NewtonMeters>,
     /// Provided zero-velocity blend band.
     pub zero_velocity_blend_band: Option<RadPerSec>,
+}
+
+impl ActuatorCalibrationRequest {
+    /// Calibrate every actuator-side quantity.
+    #[inline]
+    pub fn all() -> Self {
+        Self::default()
+    }
 }
 
 /// User-facing operating limits for the actuator-side calibration campaign.
@@ -147,11 +172,11 @@ impl ActuatorCalibrationResult {
     #[inline]
     pub fn into_actuator_params(
         self,
-        limits: fluxkit_core::ActuatorLimits,
-        compensation: fluxkit_core::ActuatorCompensationConfig,
-    ) -> fluxkit_core::ActuatorParams {
-        let mut actuator = fluxkit_core::ActuatorParams::from_model_limits_and_compensation(
-            fluxkit_core::ActuatorModel {
+        limits: ActuatorLimits,
+        compensation: ActuatorCompensationConfig,
+    ) -> ActuatorParams {
+        let mut actuator = ActuatorParams::from_model_limits_and_compensation(
+            ActuatorModel {
                 gear_ratio: self.gear_ratio,
             },
             limits,
@@ -164,11 +189,8 @@ impl ActuatorCalibrationResult {
     /// Builds actuator parameters from this resolved calibration and
     /// output-axis limits with compensation disabled by default.
     #[inline]
-    pub fn into_uncompensated_actuator_params(
-        self,
-        limits: fluxkit_core::ActuatorLimits,
-    ) -> fluxkit_core::ActuatorParams {
-        self.into_actuator_params(limits, fluxkit_core::ActuatorCompensationConfig::disabled())
+    pub fn into_uncompensated_actuator_params(self, limits: ActuatorLimits) -> ActuatorParams {
+        self.into_actuator_params(limits, ActuatorCompensationConfig::disabled())
     }
 
     /// Builds actuator parameters with friction compensation enabled from this
@@ -179,10 +201,10 @@ impl ActuatorCalibrationResult {
     #[inline]
     pub fn into_friction_compensated_actuator_params(
         self,
-        limits: fluxkit_core::ActuatorLimits,
+        limits: ActuatorLimits,
         max_total_torque: NewtonMeters,
-    ) -> fluxkit_core::ActuatorParams {
-        let mut compensation = fluxkit_core::ActuatorCompensationConfig::disabled();
+    ) -> ActuatorParams {
+        let mut compensation = ActuatorCompensationConfig::disabled();
         compensation.friction.enabled = true;
         compensation.max_total_torque = max_total_torque;
         self.into_actuator_params(limits, compensation)
@@ -190,7 +212,7 @@ impl ActuatorCalibrationResult {
 
     /// Applies this resolved record onto an existing actuator-parameter record.
     #[inline]
-    pub fn apply_to_actuator_params(&self, actuator: &mut fluxkit_core::ActuatorParams) {
+    pub fn apply_to_actuator_params(&self, actuator: &mut ActuatorParams) {
         actuator.gear_ratio = self.gear_ratio;
         actuator.compensation.friction.positive_breakaway_torque = self.positive_breakaway_torque;
         actuator.compensation.friction.negative_breakaway_torque = self.negative_breakaway_torque;
@@ -204,10 +226,55 @@ impl ActuatorCalibrationResult {
     }
 }
 
-/// Encapsulated synchronous actuator-calibration stack built on the public
-/// `MotorSystem` wrapper.
+/// Shared calibration status snapshot for non-owning contexts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ActuatorCalibrationStatus {
+    /// `true` while the calibration owner still contains an active inner runtime.
+    pub active: bool,
+    /// Current or next phase while calibration is in progress.
+    pub phase: Option<ActuatorCalibrationPhase>,
+    /// Final resolved result once calibration completes.
+    pub result: Option<ActuatorCalibrationResult>,
+    /// `true` when the calibration runtime has latched a terminal fault.
+    pub fault_latched: bool,
+}
+
+/// Non-owning access to calibration progress and final result.
 #[derive(Debug)]
-pub struct ActuatorCalibrationSystem<
+pub struct ActuatorCalibrationHandle<'a> {
+    shared: &'a Mutex<RefCell<SharedStatus<ActuatorCalibrationStatus>>>,
+}
+
+impl<'a> ActuatorCalibrationHandle<'a> {
+    /// Returns the latest shared calibration status.
+    pub fn status(&self) -> ActuatorCalibrationStatus {
+        read_status(self.shared)
+    }
+
+    /// Returns `true` while the owning calibration runtime is still active.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.status().active
+    }
+
+    /// Returns `true` once calibration has produced a final result.
+    #[inline]
+    pub fn is_complete(&self) -> bool {
+        self.status().result.is_some()
+    }
+
+    /// Returns `true` when calibration has latched a terminal fault.
+    #[inline]
+    pub fn is_faulted(&self) -> bool {
+        self.status().fault_latched
+    }
+}
+
+/// Active inner actuator-calibration runtime owned by the public wrapper.
+#[derive(Debug)]
+struct InnerActuatorCalibrationRuntime<
     PWM,
     CURRENT,
     BUS,
@@ -218,7 +285,7 @@ pub struct ActuatorCalibrationSystem<
     RotorEst,
     OutputEst,
 > {
-    motor_system: MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+    motor_system: MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
     limits: ActuatorCalibrationLimits,
     dt_seconds: f32,
     gear_ratio: Option<f32>,
@@ -232,8 +299,76 @@ pub struct ActuatorCalibrationSystem<
     active_routine: Option<ActuatorCalibrationRoutine>,
 }
 
+/// Main-context owner of one active actuator-calibration runtime.
+#[derive(Debug)]
+pub struct ActuatorCalibrationRuntime<
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    RotorEst,
+    OutputEst,
+> {
+    inner: Mutex<
+        RefCell<
+            Option<
+                InnerActuatorCalibrationRuntime<
+                    PWM,
+                    CURRENT,
+                    BUS,
+                    ROTOR,
+                    OUTPUT,
+                    TEMP,
+                    MOD,
+                    RotorEst,
+                    OutputEst,
+                >,
+            >,
+        >,
+    >,
+    shared: Mutex<RefCell<SharedStatus<ActuatorCalibrationStatus>>>,
+    split_taken: Cell<bool>,
+}
+
+/// IRQ-side execution capability for one active actuator-calibration runtime.
+#[derive(Debug)]
+pub struct ActuatorCalibrationTicker<
+    'a,
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    RotorEst,
+    OutputEst,
+> {
+    inner: &'a Mutex<
+        RefCell<
+            Option<
+                InnerActuatorCalibrationRuntime<
+                    PWM,
+                    CURRENT,
+                    BUS,
+                    ROTOR,
+                    OUTPUT,
+                    TEMP,
+                    MOD,
+                    RotorEst,
+                    OutputEst,
+                >,
+            >,
+        >,
+    >,
+    shared: &'a Mutex<RefCell<SharedStatus<ActuatorCalibrationStatus>>>,
+}
+
 impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    ActuatorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    ActuatorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -245,21 +380,29 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
-    /// Creates a new actuator-calibration system without requiring predefined
+    /// Creates a new actuator-calibration runtime without requiring predefined
     /// actuator parameters.
     ///
     /// Internally this builds a `MotorController` with a neutral actuator
     /// placeholder:
     ///
     /// - `gear_ratio = 1.0`
-    /// - output-axis limits copied from calibration limits
+    /// - output-axis velocity limit copied from calibration limits
+    /// - output torque left unconstrained by placeholder actuator limits so the
+    ///   calibration routines can still establish motion before gear ratio and
+    ///   friction are known
     /// - friction compensation disabled
     ///
     /// The intended high-level flow is to run gear-ratio calibration first and
     /// then let subsequent completed actuator-calibration deltas patch the live
     /// controller parameters automatically.
     pub fn new(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
+        pwm: PWM,
+        current: CURRENT,
+        bus: BUS,
+        rotor: ROTOR,
+        output: OUTPUT,
+        temp: TEMP,
         motor: MotorParams,
         inverter: InverterParams,
         config: CurrentLoopConfig,
@@ -270,26 +413,42 @@ where
         limits: ActuatorCalibrationLimits,
         dt_seconds: f32,
     ) -> Result<Self, CalibrationError> {
+        Self::from_parts(
+            MotorRuntimeParts {
+                pwm,
+                current,
+                bus,
+                rotor,
+                output,
+                temp,
+                motor,
+                inverter,
+                actuator: placeholder_actuator_params(limits),
+                current_loop: config,
+                modulator,
+                rotor_estimator,
+                output_estimator,
+            },
+            request,
+            limits,
+            dt_seconds,
+        )
+    }
+
+    /// Creates a new actuator-calibration runtime from owned runtime parts.
+    pub fn from_parts(
+        parts: MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+        request: ActuatorCalibrationRequest,
+        limits: ActuatorCalibrationLimits,
+        dt_seconds: f32,
+    ) -> Result<Self, CalibrationError> {
         if !validate_limits(limits) || !validate_dt_seconds(dt_seconds) {
             return Err(CalibrationError::InvalidConfiguration);
         }
 
-        let controller = fluxkit_core::MotorController::new_with_modulator(
-            motor,
-            inverter,
-            placeholder_actuator_params(limits),
-            config,
-            modulator,
-        );
-        let motor_system = MotorSystem::new(
-            hardware,
-            controller,
-            rotor_estimator,
-            output_estimator,
-            dt_seconds,
-        );
+        let motor_system = MotorRuntime::from_parts(parts, dt_seconds);
 
-        let mut system = Self {
+        let mut inner = InnerActuatorCalibrationRuntime {
             motor_system,
             limits,
             dt_seconds,
@@ -303,50 +462,137 @@ where
             zero_velocity_blend_band: request.zero_velocity_blend_band,
             active_routine: None,
         };
-        let partial = system.partial_calibration();
-        system.apply_live_calibration(&partial);
-        Ok(system)
+        let partial = inner.partial_calibration();
+        inner.apply_live_calibration(&partial);
+        Ok(Self {
+            inner: Mutex::new(RefCell::new(Some(inner))),
+            shared: Mutex::new(RefCell::new(SharedStatus {
+                status: ActuatorCalibrationStatus {
+                    active: true,
+                    phase: next_phase_for_request(request),
+                    result: None,
+                    fault_latched: false,
+                },
+            })),
+            split_taken: Cell::new(false),
+        })
     }
 
-    /// Returns shared access to the owned motor system.
+    /// Splits this calibration runtime into its unique handle and ticker.
+    ///
+    /// This can be called at most once for a given calibration owner.
     #[inline]
-    pub const fn motor_system(
+    pub fn split(
         &self,
-    ) -> &MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
-        &self.motor_system
+    ) -> Result<
+        (
+            ActuatorCalibrationHandle<'_>,
+            ActuatorCalibrationTicker<
+                '_,
+                PWM,
+                CURRENT,
+                BUS,
+                ROTOR,
+                OUTPUT,
+                TEMP,
+                MOD,
+                RotorEst,
+                OutputEst,
+            >,
+        ),
+        CapabilitySplitError,
+    > {
+        if !read_status(&self.shared).active {
+            return Err(CapabilitySplitError::Inactive);
+        }
+        if self.split_taken.replace(true) {
+            return Err(CapabilitySplitError::AlreadySplit);
+        }
+        Ok((
+            ActuatorCalibrationHandle {
+                shared: &self.shared,
+            },
+            ActuatorCalibrationTicker {
+                inner: &self.inner,
+                shared: &self.shared,
+            },
+        ))
     }
 
-    /// Returns mutable access to the owned motor system.
+    /// Attempts to take ownership of the active runtime parts for reuse in another phase.
     #[inline]
-    pub fn motor_system_mut(
-        &mut self,
-    ) -> &mut MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
-        &mut self.motor_system
+    pub fn try_into_parts(
+        &self,
+    ) -> Option<MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>>
+    {
+        let inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())?;
+        write_status(&self.shared, |status| status.active = false);
+        inner.motor_system.try_into_parts()
     }
+}
 
-    /// Splits the actuator-calibration system back into the owned motor system.
-    #[inline]
-    pub fn into_motor_system(
-        self,
-    ) -> MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
-        self.motor_system
-    }
-
-    /// Returns the current or next calibration phase, if the campaign is not complete.
-    #[inline]
-    pub fn phase(&self) -> Option<ActuatorCalibrationPhase> {
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    InnerActuatorCalibrationRuntime<
+        PWM,
+        CURRENT,
+        BUS,
+        ROTOR,
+        OUTPUT,
+        TEMP,
+        MOD,
+        RotorEst,
+        OutputEst,
+    >
+where
+    PWM: PhasePwm,
+    CURRENT: CurrentSampler,
+    BUS: BusVoltageSensor,
+    ROTOR: RotorSensor,
+    OUTPUT: OutputSensor,
+    TEMP: TemperatureSensor,
+    MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
+    OutputEst: MechanicalMotionEstimator,
+{
+    fn phase(&self) -> Option<ActuatorCalibrationPhase> {
         self.active_routine
             .as_ref()
             .map(ActuatorCalibrationPhase::from)
             .or_else(|| self.next_phase())
     }
 
-    /// Advances the request-driven actuator calibration campaign by one fixed-period step.
     pub fn tick(
         &mut self,
+        shared: &Mutex<RefCell<SharedStatus<ActuatorCalibrationStatus>>>,
     ) -> Result<
-        Option<ActuatorCalibrationResult>,
-        ActuatorCalibrationSystemError<
+        (),
+        ActuatorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
+    > {
+        let result = self.tick_inner();
+        match result {
+            Ok(_) => {
+                self.publish_status(shared, false);
+                Ok(())
+            }
+            Err(error) => {
+                self.publish_status(shared, true);
+                Err(error)
+            }
+        }
+    }
+
+    fn tick_inner(
+        &mut self,
+    ) -> Result<
+        Option<()>,
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -361,12 +607,11 @@ where
         if self.active_routine.is_none() {
             self.active_routine = self
                 .build_next_routine()
-                .map_err(ActuatorCalibrationSystemError::Calibration)?;
+                .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
             if self.active_routine.is_none() {
-                return Ok(Some(
-                    self.resolve_calibration()
-                        .map_err(ActuatorCalibrationSystemError::Calibration)?,
-                ));
+                self.resolve_calibration()
+                    .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
+                return Ok(Some(()));
             }
         }
 
@@ -378,19 +623,33 @@ where
             self.merge_partial(delta);
             if self
                 .build_next_routine()
-                .map_err(ActuatorCalibrationSystemError::Calibration)?
+                .map_err(ActuatorCalibrationRuntimeError::Calibration)?
                 .is_none()
             {
-                return Ok(Some(
-                    self.resolve_calibration()
-                        .map_err(ActuatorCalibrationSystemError::Calibration)?,
-                ));
+                self.resolve_calibration()
+                    .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
+                return Ok(Some(()));
             }
         } else {
             self.active_routine = Some(routine);
         }
 
         Ok(None)
+    }
+
+    fn publish_status(
+        &self,
+        shared: &Mutex<RefCell<SharedStatus<ActuatorCalibrationStatus>>>,
+        fault_latched: bool,
+    ) {
+        write_status(shared, |status| {
+            *status = ActuatorCalibrationStatus {
+                active: true,
+                phase: self.phase(),
+                result: self.resolve_calibration().ok(),
+                fault_latched,
+            };
+        });
     }
 
     fn next_phase(&self) -> Option<ActuatorCalibrationPhase> {
@@ -418,7 +677,7 @@ where
         routine: &mut ActuatorCalibrationRoutine,
     ) -> Result<
         Option<PartialActuatorCalibration>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -588,7 +847,7 @@ where
         calibrator: &mut ActuatorGearRatioCalibrator,
     ) -> Result<
         Option<PartialActuatorCalibration>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -599,7 +858,6 @@ where
     > {
         self.tick_calibrator(
             calibrator,
-            ControlMode::Velocity,
             false,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorGearRatioCalibrationInput {
@@ -610,9 +868,9 @@ where
                 })
             },
             |motor_system, command| {
-                motor_system
-                    .controller_mut()
-                    .set_velocity_target(command.velocity_target);
+                motor_system.apply_command_immediate(crate::MotorCommand::Velocity(
+                    command.velocity_target,
+                ));
             },
         )
     }
@@ -622,7 +880,7 @@ where
         calibrator: &mut ActuatorFrictionCalibrator,
     ) -> Result<
         Option<PartialActuatorCalibration>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -633,7 +891,6 @@ where
     > {
         self.tick_calibrator(
             calibrator,
-            ControlMode::Velocity,
             true,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorFrictionCalibrationInput {
@@ -645,9 +902,9 @@ where
                 })
             },
             |motor_system, command| {
-                motor_system
-                    .controller_mut()
-                    .set_velocity_target(command.velocity_target);
+                motor_system.apply_command_immediate(crate::MotorCommand::Velocity(
+                    command.velocity_target,
+                ));
             },
         )
     }
@@ -657,7 +914,7 @@ where
         calibrator: &mut ActuatorBreakawayCalibrator,
     ) -> Result<
         Option<PartialActuatorCalibration>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -668,7 +925,6 @@ where
     > {
         self.tick_calibrator(
             calibrator,
-            ControlMode::Torque,
             true,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorBreakawayCalibrationInput {
@@ -681,8 +937,7 @@ where
             },
             |motor_system, command| {
                 motor_system
-                    .controller_mut()
-                    .set_torque_target(command.torque_target);
+                    .apply_command_immediate(crate::MotorCommand::Torque(command.torque_target));
             },
         )
     }
@@ -692,7 +947,7 @@ where
         calibrator: &mut ActuatorBlendBandCalibrator,
     ) -> Result<
         Option<PartialActuatorCalibration>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -703,7 +958,6 @@ where
     > {
         self.tick_calibrator(
             calibrator,
-            ControlMode::Torque,
             true,
             |calibrator, status, dt| {
                 calibrator.tick(ActuatorBlendBandCalibrationInput {
@@ -716,8 +970,7 @@ where
             },
             |motor_system, command| {
                 motor_system
-                    .controller_mut()
-                    .set_torque_target(command.torque_target);
+                    .apply_command_immediate(crate::MotorCommand::Torque(command.torque_target));
             },
         )
     }
@@ -725,13 +978,12 @@ where
     fn tick_calibrator<R, Cal, Command, Build, Apply>(
         &mut self,
         calibrator: &mut Cal,
-        mode: ControlMode,
         require_friction_disabled: bool,
         build_command: Build,
         apply_command: Apply,
     ) -> Result<
         Option<PartialActuatorCalibration>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -745,7 +997,7 @@ where
         R: Into<PartialActuatorCalibration>,
         Build: FnOnce(&mut Cal, MotorStatus, f32) -> Command,
         Apply: FnOnce(
-            &mut MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+            &mut MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
             Command,
         ),
     {
@@ -753,25 +1005,25 @@ where
             return Ok(result);
         }
 
-        self.prepare_motor(mode, require_friction_disabled)?;
-        let status = self.motor_system.controller().status();
+        self.prepare_motor(require_friction_disabled)?;
+        let status = self.motor_system.controller_status();
         let command = build_command(calibrator, status, self.dt_seconds);
         apply_command(&mut self.motor_system, command);
         let _ = self
             .motor_system
+            .ticker_internal()
             .tick()
-            .map_err(ActuatorCalibrationSystemError::Motor)?;
+            .map_err(ActuatorCalibrationRuntimeError::Motor)?;
 
         self.postflight(calibrator)
     }
 
     fn prepare_motor(
         &mut self,
-        mode: ControlMode,
         require_friction_disabled: bool,
     ) -> Result<
         (),
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -780,27 +1032,18 @@ where
             TEMP::Error,
         >,
     > {
-        if require_friction_disabled
-            && self
-                .motor_system
-                .controller()
-                .actuator_params()
-                .compensation
-                .friction
-                .enabled
-        {
-            self.disable_motor()?;
-            return Err(ActuatorCalibrationSystemError::Calibration(
+        if require_friction_disabled && self.motor_system.friction_compensation_enabled() {
+            self.motor_system
+                .set_armed_immediate(false)
+                .map_err(ActuatorCalibrationRuntimeError::Motor)?;
+            return Err(ActuatorCalibrationRuntimeError::Calibration(
                 CalibrationError::InvalidConfiguration,
             ));
         }
 
-        self.motor_system.controller_mut().set_mode(mode);
-        if self.motor_system.controller().status().state == MotorState::Disabled {
-            self.motor_system
-                .enable()
-                .map_err(ActuatorCalibrationSystemError::Motor)?;
-        }
+        self.motor_system
+            .set_armed_immediate(true)
+            .map_err(ActuatorCalibrationRuntimeError::Motor)?;
         Ok(())
     }
 
@@ -809,7 +1052,7 @@ where
         calibrator: &Cal,
     ) -> Result<
         Option<Option<PartialActuatorCalibration>>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -823,14 +1066,18 @@ where
         R: Into<PartialActuatorCalibration>,
     {
         if let Some(result) = calibrator.result() {
-            self.disable_motor()?;
+            self.motor_system
+                .set_armed_immediate(false)
+                .map_err(ActuatorCalibrationRuntimeError::Motor)?;
             let delta = result.into();
             self.apply_live_calibration(&delta);
             return Ok(Some(Some(delta)));
         }
         if let Some(error) = calibrator.error() {
-            self.disable_motor()?;
-            return Err(ActuatorCalibrationSystemError::Calibration(error));
+            self.motor_system
+                .set_armed_immediate(false)
+                .map_err(ActuatorCalibrationRuntimeError::Motor)?;
+            return Err(ActuatorCalibrationRuntimeError::Calibration(error));
         }
         Ok(None)
     }
@@ -840,7 +1087,7 @@ where
         calibrator: &Cal,
     ) -> Result<
         Option<PartialActuatorCalibration>,
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -854,23 +1101,46 @@ where
         R: Into<PartialActuatorCalibration>,
     {
         if let Some(result) = calibrator.result() {
-            self.disable_motor()?;
+            self.motor_system
+                .set_armed_immediate(false)
+                .map_err(ActuatorCalibrationRuntimeError::Motor)?;
             let delta = result.into();
             self.apply_live_calibration(&delta);
             Ok(Some(delta))
         } else if let Some(error) = calibrator.error() {
-            self.disable_motor()?;
-            Err(ActuatorCalibrationSystemError::Calibration(error))
+            self.motor_system
+                .set_armed_immediate(false)
+                .map_err(ActuatorCalibrationRuntimeError::Motor)?;
+            Err(ActuatorCalibrationRuntimeError::Calibration(error))
         } else {
             Ok(None)
         }
     }
 
-    fn disable_motor(
-        &mut self,
+    fn apply_live_calibration(&mut self, calibration: &PartialActuatorCalibration) {
+        self.motor_system.apply_actuator_calibration(calibration);
+    }
+}
+
+impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    ActuatorCalibrationTicker<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+where
+    PWM: PhasePwm,
+    CURRENT: CurrentSampler,
+    BUS: BusVoltageSensor,
+    ROTOR: RotorSensor,
+    OUTPUT: OutputSensor,
+    TEMP: TemperatureSensor,
+    MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
+    OutputEst: MechanicalMotionEstimator,
+{
+    /// Advances the request-driven actuator calibration campaign by one fixed-period step.
+    pub fn tick(
+        &self,
     ) -> Result<
         (),
-        ActuatorCalibrationSystemError<
+        ActuatorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -879,15 +1149,40 @@ where
             TEMP::Error,
         >,
     > {
-        self.motor_system
-            .disable()
-            .map_err(ActuatorCalibrationSystemError::Motor)
+        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
+            .ok_or_else(|| {
+                if read_status(&self.shared).active {
+                    ActuatorCalibrationRuntimeError::Busy
+                } else {
+                    ActuatorCalibrationRuntimeError::Inactive
+                }
+            })?;
+        let result = inner.tick(self.shared);
+        critical_section::with(|cs| {
+            *self.inner.borrow(cs).borrow_mut() = Some(inner);
+        });
+        result
     }
+}
 
-    fn apply_live_calibration(&mut self, calibration: &PartialActuatorCalibration) {
-        calibration
-            .apply_to_actuator_params(self.motor_system.controller_mut().actuator_params_mut());
+fn next_phase_for_request(request: ActuatorCalibrationRequest) -> Option<ActuatorCalibrationPhase> {
+    if request.gear_ratio.is_none() {
+        return Some(ActuatorCalibrationPhase::GearRatio);
     }
+    if request.positive_coulomb_torque.is_none()
+        || request.negative_coulomb_torque.is_none()
+        || request.positive_viscous_coefficient.is_none()
+        || request.negative_viscous_coefficient.is_none()
+    {
+        return Some(ActuatorCalibrationPhase::Friction);
+    }
+    if request.positive_breakaway_torque.is_none() || request.negative_breakaway_torque.is_none() {
+        return Some(ActuatorCalibrationPhase::Breakaway);
+    }
+    if request.zero_velocity_blend_band.is_none() {
+        return Some(ActuatorCalibrationPhase::BlendBand);
+    }
+    None
 }
 
 #[inline]
@@ -896,7 +1191,7 @@ fn placeholder_actuator_params(limits: ActuatorCalibrationLimits) -> ActuatorPar
         ActuatorModel { gear_ratio: 1.0 },
         ActuatorLimits {
             max_output_velocity: Some(limits.max_velocity_target),
-            max_output_torque: Some(limits.max_torque_target),
+            max_output_torque: None,
         },
         ActuatorCompensationConfig::disabled(),
     )

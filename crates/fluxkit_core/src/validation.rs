@@ -29,6 +29,11 @@ pub fn validate_controller_config(
             .max_mech_speed
             .map(|speed| finite_positive(speed.get()))
             .unwrap_or(true)
+        && motor
+            .limits
+            .max_winding_temperature_c
+            .map(|temp_c| temp_c.is_finite())
+            .unwrap_or(true)
         && finite_positive(actuator.gear_ratio)
         && actuator
             .limits

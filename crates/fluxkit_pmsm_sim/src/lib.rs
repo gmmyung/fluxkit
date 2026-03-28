@@ -38,7 +38,9 @@ pub mod error;
 pub mod params;
 pub mod state;
 
-use fluxkit_math::angle::mechanical_to_electrical;
+use fluxkit_math::angle::{
+    mechanical_to_electrical_with_direction, mechanical_velocity_to_electrical,
+};
 use fluxkit_math::{
     ContinuousMechanicalAngle, ElectricalAngle, clamp, clarke,
     frame::{Abc, AlphaBeta, Dq},
@@ -278,12 +280,16 @@ impl PmsmModel {
         load_torque: f32,
     ) -> PlantDerivative {
         let params = &self.params;
-        let pole_pairs = params.pole_pairs as f32;
         let resistance = phase_resistance_ohm(params, state.winding_temperature_c);
         let ld = params.d_inductance_h.get();
         let lq = params.q_inductance_h.get();
         let flux = params.flux_linkage_weber.get();
-        let omega_e = state.omega_mech * pole_pairs;
+        let omega_e = mechanical_velocity_to_electrical(
+            RadPerSec::new(state.omega_mech),
+            params.pole_pairs as u32,
+            params.electrical_direction,
+        )
+        .get();
         let applied_vdq = clamp_vdq(applied_vdq, params.max_voltage_mag);
 
         let did = (applied_vdq.d - resistance * state.id + omega_e * lq * state.iq) / ld;
@@ -389,7 +395,11 @@ impl PmsmModel {
     }
 
     fn electrical_angle(&self) -> ElectricalAngle {
-        mechanical_to_electrical(self.state.mechanical_angle, self.params.pole_pairs as u32)
+        mechanical_to_electrical_with_direction(
+            self.state.mechanical_angle,
+            self.params.pole_pairs as u32,
+            self.params.electrical_direction,
+        )
     }
 
     fn output_angle(&self) -> ContinuousMechanicalAngle {
@@ -406,9 +416,10 @@ impl PmsmModel {
     }
 
     fn electrical_angle_from_theta(&self, theta_mech: f32) -> f32 {
-        mechanical_to_electrical(
+        mechanical_to_electrical_with_direction(
             ContinuousMechanicalAngle::new(theta_mech),
             self.params.pole_pairs as u32,
+            self.params.electrical_direction,
         )
         .get()
     }
@@ -489,7 +500,7 @@ struct PlantDerivative {
 }
 
 fn electromagnetic_torque(params: &PmsmParams, id: f32, iq: f32) -> f32 {
-    let pole_pairs = params.pole_pairs as f32;
+    let pole_pairs = params.pole_pairs as f32 * params.electrical_direction.signum();
     1.5 * pole_pairs
         * (params.flux_linkage_weber.get() * iq
             + (params.d_inductance_h.get() - params.q_inductance_h.get()) * id * iq)
@@ -660,6 +671,7 @@ mod tests {
             d_inductance_h: Henries::new(0.00003),
             q_inductance_h: Henries::new(0.00003),
             flux_linkage_weber: Webers::new(0.005),
+            electrical_direction: fluxkit_math::ElectricalDirection::Positive,
             thermal: crate::ThermalPlantParams::default_for_ambient(25.0),
             actuator: crate::ActuatorPlantParams {
                 output_inertia_kg_m2: 0.0002,

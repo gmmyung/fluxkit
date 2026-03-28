@@ -2,13 +2,15 @@
 //!
 //! This module is for the common embedded ownership model:
 //!
-//! - one context owns the motor runtime and calls [`MotorSystem::tick`]
+//! - one context owns the active [`MotorRuntime`] and provides a [`MotorTicker`]
 //! - another context holds a [`MotorHandle`] for commands and status
+//! - phase transitions consume the active runtime through
+//!   [`MotorRuntime::try_into_parts`]
 //!
-//! In other words, `MotorSystem` is the runtime object you put behind your
+//! In other words, [`MotorRuntime`] is the loop object you put behind your
 //! fixed-period control interrupt.
 //!
-//! Each call to [`MotorSystem::tick`] performs one full control step:
+//! Each call to [`MotorTicker::tick`] performs one full control step:
 //!
 //! - sample hardware
 //! - sample winding temperature
@@ -17,40 +19,58 @@
 //! - apply PWM duty
 //! - publish status for non-IRQ code
 //!
-//! `fluxkit_core` still exposes fast/medium/slow internals, but `fluxkit`
-//! deliberately presents a simpler project-oriented runtime surface here.
+//! `fluxkit` deliberately presents a simpler project-oriented runtime surface
+//! here over the pure controller engine.
 //!
 //! ```ignore
-//! # let hardware = todo!();
-//! # let controller = todo!();
-//! let mut system = fluxkit::MotorSystem::new(
-//!     hardware,
-//!     controller,
+//! # let pwm = todo!();
+//! # let current = todo!();
+//! # let bus = todo!();
+//! # let rotor = todo!();
+//! # let output = todo!();
+//! # let temp = todo!();
+//! # let motor_params = todo!();
+//! # let inverter_params = todo!();
+//! # let actuator_params = todo!();
+//! # let current_loop_config = todo!();
+//! let runtime = fluxkit::MotorRuntime::new(
+//!     pwm,
+//!     current,
+//!     bus,
+//!     rotor,
+//!     output,
+//!     temp,
+//!     fluxkit::MotorRuntimeParams::new(
+//!         motor_params,
+//!         inverter_params,
+//!         actuator_params,
+//!         current_loop_config,
+//!         1.0 / 20_000.0,
+//!     ),
+//!     fluxkit::Svpwm,
 //!     fluxkit::PassThroughEstimator::new(),
 //!     fluxkit::PassThroughEstimator::new(),
-//!     1.0 / 20_000.0,
 //! );
-//! let handle = system.handle();
-//! handle.set_command(fluxkit::MotorCommand {
-//!     mode: fluxkit::ControlMode::Velocity,
-//!     output_velocity_target: fluxkit::RadPerSec::new(2.0),
-//!     ..fluxkit::MotorCommand::default()
-//! });
+//! let (handle, ticker) = runtime.split()?;
+//! handle.set_command(fluxkit::MotorCommand::Velocity(
+//!     fluxkit::RadPerSec::new(2.0),
+//! ));
 //! handle.arm();
 //!
 //! loop {
-//!     let _ = system.tick()?;
+//!     ticker.tick()?;
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::fmt;
 
 use critical_section::Mutex;
+use fluxkit_core::motor::{ControllerCommand, MotorControllerParts};
 use fluxkit_core::{
-    ActuatorEstimate, ControlMode, FastLoopInput, FastLoopOutput, MotorController, MotorStatus,
-    RotorEstimate, TickSchedule,
+    ActuatorCalibration, ActuatorEstimate, ActuatorParams, CurrentLoopConfig, FastLoopInput,
+    FastLoopOutput, InverterParams, MotorController, MotorParams, MotorStatus, RotorEstimate,
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputSensor, PhasePwm, RotorSensor,
@@ -63,26 +83,27 @@ use fluxkit_math::{
     units::{Amps, NewtonMeters, RadPerSec, Volts},
 };
 
-/// Concrete hardware handles required to run one motor-control loop.
+use crate::CapabilitySplitError;
+
+/// Private hardware handles owned by one motor-control runtime.
 #[derive(Debug)]
-pub struct MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP> {
-    /// Three-phase PWM output stage.
-    pub pwm: PWM,
-    /// Phase-current acquisition path.
-    pub current: CURRENT,
-    /// DC bus-voltage acquisition path.
-    pub bus: BUS,
-    /// Absolute-encoder rotor sensing path.
-    pub rotor: ROTOR,
-    /// Output-axis sensing path.
-    pub output: OUTPUT,
-    /// Motor winding temperature sensing path.
-    pub temp: TEMP,
+pub(crate) struct Hardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP> {
+    pwm: PWM,
+    current: CURRENT,
+    bus: BUS,
+    rotor: ROTOR,
+    output: OUTPUT,
+    temp: TEMP,
 }
 
 /// HAL and integration failures that can occur outside the pure controller.
 #[derive(Debug)]
-pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> {
+pub enum MotorRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> {
+    /// The runtime was temporarily unavailable because another context currently
+    /// holds the active inner state.
+    Busy,
+    /// The runtime owner no longer contains an active inner runtime.
+    Inactive,
     /// PWM output operation failed.
     Pwm(PwmE),
     /// Phase-current acquisition failed.
@@ -100,7 +121,7 @@ pub enum MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> {
 }
 
 impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> fmt::Display
-    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
+    for MotorRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: fmt::Display,
     CurrentE: fmt::Display,
@@ -111,6 +132,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Busy => f.write_str("runtime busy"),
+            Self::Inactive => f.write_str("runtime inactive"),
             Self::Pwm(error) => write!(f, "pwm error: {error}"),
             Self::Current(error) => write!(f, "current-sensor error: {error}"),
             Self::Bus(error) => write!(f, "bus-voltage error: {error}"),
@@ -123,7 +146,7 @@ where
 }
 
 impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> core::error::Error
-    for MotorSystemError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
+    for MotorRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
 where
     PwmE: core::error::Error + 'static,
     CurrentE: core::error::Error + 'static,
@@ -134,6 +157,8 @@ where
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::Busy => None,
+            Self::Inactive => None,
             Self::Pwm(error) => Some(error),
             Self::Current(error) => Some(error),
             Self::Bus(error) => Some(error),
@@ -149,33 +174,95 @@ where
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct MotorCommand {
-    /// Requested controller mode.
-    pub mode: ControlMode,
-    /// Requested direct `d`-axis current target.
-    pub id_target: Amps,
-    /// Requested direct `q`-axis current target.
-    pub iq_target: Amps,
-    /// Requested actuator-output torque target.
-    pub output_torque_target: NewtonMeters,
-    /// Requested actuator-output velocity target.
-    pub output_velocity_target: RadPerSec,
-    /// Requested actuator-output position target.
-    pub output_position_target: ContinuousMechanicalAngle,
-    /// Requested open-loop `d/q` voltage target.
-    pub open_loop_voltage_target: Dq<Volts>,
+pub enum MotorCommand {
+    /// Disabled command with all targets cleared.
+    Disabled,
+    /// Direct current-mode command with explicit `d/q` current targets.
+    Current(Dq<Amps>),
+    /// Output-torque command.
+    Torque(NewtonMeters),
+    /// Output-side MIT impedance command.
+    Mit {
+        /// Output-axis position target.
+        position: ContinuousMechanicalAngle,
+        /// Output-axis velocity target.
+        velocity: RadPerSec,
+        /// Position stiffness gain in `Nm / rad`.
+        kp: f32,
+        /// Velocity damping gain in `Nm / (rad/s)`.
+        kd: f32,
+        /// Output-axis feedforward torque.
+        torque_ff: NewtonMeters,
+    },
+    /// Output-velocity command.
+    Velocity(RadPerSec),
+    /// Output-position command.
+    Position(ContinuousMechanicalAngle),
+    /// Open-loop `d/q` voltage command.
+    OpenLoopVoltage(Dq<Volts>),
 }
 
 impl Default for MotorCommand {
     fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+#[inline]
+fn core_command_from_runtime(command: MotorCommand) -> ControllerCommand {
+    match command {
+        MotorCommand::Disabled => ControllerCommand::Disabled,
+        MotorCommand::Current(idq_target) => ControllerCommand::Current(idq_target),
+        MotorCommand::Torque(output_torque_target) => {
+            ControllerCommand::Torque(output_torque_target)
+        }
+        MotorCommand::Mit {
+            position,
+            velocity,
+            kp,
+            kd,
+            torque_ff,
+        } => ControllerCommand::Mit {
+            position,
+            velocity,
+            kp,
+            kd,
+            torque_ff,
+        },
+        MotorCommand::Velocity(output_velocity_target) => {
+            ControllerCommand::Velocity(output_velocity_target)
+        }
+        MotorCommand::Position(output_position_target) => {
+            ControllerCommand::Position(output_position_target)
+        }
+        MotorCommand::OpenLoopVoltage(open_loop_voltage_target) => {
+            ControllerCommand::OpenLoopVoltage(open_loop_voltage_target)
+        }
+    }
+}
+
+/// Output of one owned [`MotorTicker::tick`] cycle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MotorRuntimeOutput {
+    /// Final phase-duty command applied to PWM.
+    pub phase_duty: fluxkit_math::PhaseDuty,
+    /// Measured `d/q` current for this cycle.
+    pub measured_idq: Dq<Amps>,
+    /// Commanded `d/q` voltage for this cycle.
+    pub commanded_vdq: Dq<Volts>,
+    /// `true` if voltage limiting saturated the command.
+    pub saturated: bool,
+}
+
+impl From<FastLoopOutput> for MotorRuntimeOutput {
+    fn from(output: FastLoopOutput) -> Self {
         Self {
-            mode: ControlMode::Disabled,
-            id_target: Amps::ZERO,
-            iq_target: Amps::ZERO,
-            output_torque_target: NewtonMeters::ZERO,
-            output_velocity_target: RadPerSec::ZERO,
-            output_position_target: ContinuousMechanicalAngle::new(0.0),
-            open_loop_voltage_target: Dq::new(Volts::ZERO, Volts::ZERO),
+            phase_duty: output.phase_duty,
+            measured_idq: output.measured_idq,
+            commanded_vdq: output.commanded_vdq,
+            saturated: output.saturated,
         }
     }
 }
@@ -185,14 +272,84 @@ impl Default for MotorCommand {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MotorRuntimeStatus {
+    /// `true` while the runtime owner still contains an active inner runtime.
+    pub active: bool,
     /// Latest controller status snapshot.
     pub controller: MotorStatus,
-    /// Latest fast-loop output, if the runtime has run at least one fast cycle.
-    pub last_fast_output: Option<FastLoopOutput>,
+    /// Latest runtime output, if the runtime has run at least one cycle.
+    pub last_fast_output: Option<MotorRuntimeOutput>,
     /// `true` when runtime arming is requested.
     pub armed: bool,
     /// `true` when the wrapper latched a runtime fault.
     pub fault_latched: bool,
+}
+
+/// Fully specified runtime configuration and controller parameters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MotorRuntimeParams {
+    /// Motor electrical model and operating limits.
+    pub motor: MotorParams,
+    /// Inverter limits and PWM configuration.
+    pub inverter: InverterParams,
+    /// Actuator/output model, limits, and compensation configuration.
+    pub actuator: ActuatorParams,
+    /// Current-loop and supervisory controller tuning.
+    pub current_loop: CurrentLoopConfig,
+    /// Fixed control-loop period in seconds.
+    pub dt_seconds: f32,
+}
+
+/// Owned runtime parts that can be moved between project phases.
+#[derive(Debug)]
+pub struct MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    /// PWM output handle.
+    pub pwm: PWM,
+    /// Phase-current sampler.
+    pub current: CURRENT,
+    /// DC bus-voltage sensor.
+    pub bus: BUS,
+    /// Rotor sensor.
+    pub rotor: ROTOR,
+    /// Output/load-side sensor.
+    pub output: OUTPUT,
+    /// Winding temperature sensor.
+    pub temp: TEMP,
+    /// Motor electrical model and operating limits.
+    pub motor: MotorParams,
+    /// Inverter limits and PWM configuration.
+    pub inverter: InverterParams,
+    /// Actuator/output model, limits, and compensation configuration.
+    pub actuator: ActuatorParams,
+    /// Current-loop and supervisory controller tuning.
+    pub current_loop: CurrentLoopConfig,
+    /// Modulation strategy.
+    pub modulator: MOD,
+    /// Rotor motion estimator state.
+    pub rotor_estimator: RotorEst,
+    /// Output motion estimator state.
+    pub output_estimator: OutputEst,
+}
+
+impl MotorRuntimeParams {
+    /// Bundles the fixed runtime parameters needed to construct a [`MotorRuntime`].
+    #[inline]
+    pub const fn new(
+        motor: MotorParams,
+        inverter: InverterParams,
+        actuator: ActuatorParams,
+        current_loop: CurrentLoopConfig,
+        dt_seconds: f32,
+    ) -> Self {
+        Self {
+            motor,
+            inverter,
+            actuator,
+            current_loop,
+            dt_seconds,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -203,7 +360,7 @@ struct SharedRuntimeState {
     clear_fault_requested: bool,
 }
 
-/// Non-ISR command and status access for a [`MotorSystem`].
+/// Non-ISR command and status access for a motor runtime.
 #[derive(Debug)]
 pub struct MotorHandle<'a> {
     shared: &'a Mutex<RefCell<SharedRuntimeState>>,
@@ -219,6 +376,9 @@ impl<'a> MotorHandle<'a> {
     pub fn set_command(&self, command: MotorCommand) {
         critical_section::with(|cs| {
             let mut shared = self.shared.borrow(cs).borrow_mut();
+            if !shared.status.active {
+                return;
+            }
             shared.command = command;
             shared.command_dirty = true;
         });
@@ -229,17 +389,35 @@ impl<'a> MotorHandle<'a> {
         critical_section::with(|cs| self.shared.borrow(cs).borrow().status)
     }
 
+    /// Returns `true` when the runtime has latched a fault.
+    #[inline]
+    pub fn is_faulted(&self) -> bool {
+        self.status().fault_latched
+    }
+
+    /// Returns `true` while the owning runtime is still active.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.status().active
+    }
+
     /// Requests that the runtime arm the motor path.
     pub fn arm(&self) {
         critical_section::with(|cs| {
-            self.shared.borrow(cs).borrow_mut().status.armed = true;
+            let mut shared = self.shared.borrow(cs).borrow_mut();
+            if shared.status.active {
+                shared.status.armed = true;
+            }
         });
     }
 
     /// Requests that the runtime disarm the motor path.
     pub fn disarm(&self) {
         critical_section::with(|cs| {
-            self.shared.borrow(cs).borrow_mut().status.armed = false;
+            let mut shared = self.shared.borrow(cs).borrow_mut();
+            if shared.status.active {
+                shared.status.armed = false;
+            }
         });
     }
 
@@ -252,15 +430,17 @@ impl<'a> MotorHandle<'a> {
     pub fn clear_fault(&self) {
         critical_section::with(|cs| {
             let mut shared = self.shared.borrow(cs).borrow_mut();
-            shared.clear_fault_requested = true;
-            shared.status.fault_latched = false;
+            if shared.status.active {
+                shared.clear_fault_requested = true;
+                shared.status.fault_latched = false;
+            }
         });
     }
 }
 
 #[derive(Debug)]
-struct MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
-    hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
+struct InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    hardware: Hardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
     controller: MotorController<MOD>,
     rotor_estimator: RotorEst,
     output_estimator: OutputEst,
@@ -268,22 +448,38 @@ struct MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, 
     pwm_armed: bool,
 }
 
-/// Borrowed runtime owner for a [`MotorSystem`].
-///
-/// This is useful when one context owns loop execution and another only needs
-/// the shared [`MotorHandle`] view.
 #[derive(Debug)]
-pub struct MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+struct RuntimeLoop<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
     runtime:
-        &'a mut MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+        &'a mut InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
     shared: &'a Mutex<RefCell<SharedRuntimeState>>,
 }
 
-/// Owned motor runtime plus shared command/status state.
+/// Main-context owner of one active motor runtime.
 #[derive(Debug)]
-pub struct MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
-    runtime: MotorRuntimeState<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+pub struct MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    inner: Mutex<
+        RefCell<
+            Option<
+                InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+            >,
+        >,
+    >,
     shared: Mutex<RefCell<SharedRuntimeState>>,
+    split_taken: Cell<bool>,
+}
+
+/// IRQ-side execution capability for one active motor runtime.
+#[derive(Debug)]
+pub struct MotorTicker<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    inner: &'a Mutex<
+        RefCell<
+            Option<
+                InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+            >,
+        >,
+    >,
+    shared: &'a Mutex<RefCell<SharedRuntimeState>>,
 }
 
 /// Helper trait for estimators that consume wrapped mechanical motion samples
@@ -307,16 +503,76 @@ impl<T> MechanicalMotionEstimator for T where
 }
 
 impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     MOD: Modulator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
-    /// Creates a new motor system with an explicit loop period,
-    /// controller, and rotor/output estimators.
+    /// Creates a new runtime with an explicit loop period, controller params,
+    /// modulator, and rotor/output estimators.
     pub fn new(
-        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
+        pwm: PWM,
+        current: CURRENT,
+        bus: BUS,
+        rotor: ROTOR,
+        output: OUTPUT,
+        temp: TEMP,
+        params: MotorRuntimeParams,
+        modulator: MOD,
+        rotor_estimator: RotorEst,
+        output_estimator: OutputEst,
+    ) -> Self {
+        Self::from_parts(
+            MotorRuntimeParts {
+                pwm,
+                current,
+                bus,
+                rotor,
+                output,
+                temp,
+                motor: params.motor,
+                inverter: params.inverter,
+                actuator: params.actuator,
+                current_loop: params.current_loop,
+                modulator,
+                rotor_estimator,
+                output_estimator,
+            },
+            params.dt_seconds,
+        )
+    }
+
+    /// Creates a runtime from previously owned runtime parts and a loop period.
+    pub fn from_parts(
+        parts: MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+        dt_seconds: f32,
+    ) -> Self {
+        let controller = MotorController::new(
+            parts.motor,
+            parts.inverter,
+            parts.actuator,
+            parts.current_loop,
+            parts.modulator,
+        );
+        Self::from_controller_parts(
+            Hardware {
+                pwm: parts.pwm,
+                current: parts.current,
+                bus: parts.bus,
+                rotor: parts.rotor,
+                output: parts.output,
+                temp: parts.temp,
+            },
+            controller,
+            parts.rotor_estimator,
+            parts.output_estimator,
+            dt_seconds,
+        )
+    }
+
+    fn from_controller_parts(
+        hardware: Hardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
         controller: MotorController<MOD>,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
@@ -327,6 +583,7 @@ where
                 command: MotorCommand::default(),
                 command_dirty: false,
                 status: MotorRuntimeStatus {
+                    active: true,
                     controller: controller.status(),
                     last_fast_output: None,
                     armed: false,
@@ -334,70 +591,100 @@ where
                 },
                 clear_fault_requested: false,
             })),
-            runtime: MotorRuntimeState {
+            inner: Mutex::new(RefCell::new(Some(InnerMotorRuntime {
                 hardware,
                 controller,
                 rotor_estimator,
                 output_estimator,
                 dt_seconds,
                 pwm_armed: false,
-            },
+            }))),
+            split_taken: Cell::new(false),
         }
     }
 
-    /// Returns a shared handle for command and status access.
+    /// Splits this runtime into its unique main-context handle and IRQ-side ticker.
+    ///
+    /// This can be called at most once for a given runtime owner.
     #[inline]
-    pub fn handle(&self) -> MotorHandle<'_> {
-        MotorHandle {
+    pub fn split(
+        &self,
+    ) -> Result<
+        (
+            MotorHandle<'_>,
+            MotorTicker<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+        ),
+        CapabilitySplitError,
+    > {
+        if !critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active) {
+            return Err(CapabilitySplitError::Inactive);
+        }
+        if self.split_taken.replace(true) {
+            return Err(CapabilitySplitError::AlreadySplit);
+        }
+        Ok((
+            MotorHandle {
+                shared: &self.shared,
+            },
+            self.ticker_internal(),
+        ))
+    }
+
+    #[inline]
+    pub(crate) fn ticker_internal(
+        &self,
+    ) -> MotorTicker<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+        MotorTicker {
+            inner: &self.inner,
             shared: &self.shared,
         }
     }
 
-    /// Splits the system into a runtime view and a shared handle.
-    pub fn split(
-        &mut self,
-    ) -> (
-        MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
-        MotorHandle<'_>,
-    ) {
-        (
-            MotorRuntime {
-                runtime: &mut self.runtime,
-                shared: &self.shared,
-            },
-            MotorHandle {
-                shared: &self.shared,
-            },
-        )
-    }
-
-    /// Returns shared access to the rotor-side motion estimator.
-    #[inline]
-    pub const fn rotor_estimator(&self) -> &RotorEst {
-        &self.runtime.rotor_estimator
-    }
-
-    /// Returns mutable access to the rotor-side motion estimator.
-    #[inline]
-    pub fn rotor_estimator_mut(&mut self) -> &mut RotorEst {
-        &mut self.runtime.rotor_estimator
-    }
-
-    /// Returns shared access to the output-side motion estimator.
-    #[inline]
-    pub const fn output_estimator(&self) -> &OutputEst {
-        &self.runtime.output_estimator
-    }
-
-    /// Returns mutable access to the output-side motion estimator.
-    #[inline]
-    pub fn output_estimator_mut(&mut self) -> &mut OutputEst {
-        &mut self.runtime.output_estimator
+    /// Attempts to take ownership of the active runtime parts for reuse in another phase.
+    pub fn try_into_parts(
+        &self,
+    ) -> Option<MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>>
+    {
+        let InnerMotorRuntime {
+            hardware,
+            controller,
+            rotor_estimator,
+            output_estimator,
+            ..
+        } = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())?;
+        critical_section::with(|cs| {
+            let mut shared = self.shared.borrow(cs).borrow_mut();
+            shared.status.active = false;
+            shared.status.armed = false;
+            shared.clear_fault_requested = false;
+        });
+        let MotorControllerParts {
+            motor,
+            inverter,
+            actuator,
+            config,
+            modulator,
+        } = controller.into_parts();
+        Some(MotorRuntimeParts {
+            pwm: hardware.pwm,
+            current: hardware.current,
+            bus: hardware.bus,
+            rotor: hardware.rotor,
+            output: hardware.output,
+            temp: hardware.temp,
+            motor,
+            inverter,
+            actuator,
+            current_loop: config,
+            modulator,
+            rotor_estimator,
+            output_estimator,
+        })
     }
 }
 
 impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    MotorSystem<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -409,131 +696,142 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
+    /// Sets the armed state immediately on the owned runtime.
     #[inline]
-    fn runtime(
-        &mut self,
-    ) -> MotorRuntime<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
-        MotorRuntime {
-            runtime: &mut self.runtime,
-            shared: &self.shared,
+    pub(crate) fn set_armed_immediate(
+        &self,
+        armed: bool,
+    ) -> Result<
+        (),
+        MotorRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
+    > {
+        critical_section::with(|cs| {
+            let mut shared = self.shared.borrow(cs).borrow_mut();
+            if shared.status.active {
+                shared.status.armed = armed;
+            }
+        });
+        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
+            .ok_or_else(|| {
+                let active =
+                    critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active);
+                if active {
+                    MotorRuntimeError::Busy
+                } else {
+                    MotorRuntimeError::Inactive
+                }
+            })?;
+        {
+            let mut runtime = RuntimeLoop {
+                runtime: &mut inner,
+                shared: &self.shared,
+            };
+            runtime.sync_runtime_requests()?;
+            runtime.publish_runtime_status(None);
         }
-    }
-
-    /// Returns shared access to the owned hardware handles.
-    #[inline]
-    #[cfg(test)]
-    pub(crate) const fn hardware(&self) -> &MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP> {
-        &self.runtime.hardware
-    }
-
-    /// Returns mutable access to the owned hardware handles.
-    #[inline]
-    #[cfg(test)]
-    pub(crate) fn hardware_mut(
-        &mut self,
-    ) -> &mut MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP> {
-        &mut self.runtime.hardware
-    }
-
-    /// Returns shared access to the owned pure controller.
-    #[inline]
-    pub(crate) const fn controller(&self) -> &MotorController<MOD> {
-        &self.runtime.controller
-    }
-
-    /// Returns mutable access to the owned pure controller.
-    #[inline]
-    pub(crate) fn controller_mut(&mut self) -> &mut MotorController<MOD> {
-        &mut self.runtime.controller
-    }
-
-    /// Splits the system back into owned hardware and controller parts.
-    #[inline]
-    pub fn into_parts(
-        self,
-    ) -> (
-        MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
-        MotorController<MOD>,
-        RotorEst,
-        OutputEst,
-    ) {
-        let MotorRuntimeState {
-            hardware,
-            controller,
-            rotor_estimator,
-            output_estimator,
-            ..
-        } = self.runtime;
-        (hardware, controller, rotor_estimator, output_estimator)
-    }
-
-    /// Runs one full control cycle using the configured runtime period.
-    #[inline]
-    pub fn tick(
-        &mut self,
-    ) -> Result<
-        FastLoopOutput,
-        MotorSystemError<
-            PWM::Error,
-            CURRENT::Error,
-            BUS::Error,
-            ROTOR::Error,
-            OUTPUT::Error,
-            TEMP::Error,
-        >,
-    > {
-        self.runtime().tick()
-    }
-
-    /// Enables the underlying PWM and then enables the controller.
-    #[inline]
-    pub(crate) fn enable(
-        &mut self,
-    ) -> Result<
-        (),
-        MotorSystemError<
-            PWM::Error,
-            CURRENT::Error,
-            BUS::Error,
-            ROTOR::Error,
-            OUTPUT::Error,
-            TEMP::Error,
-        >,
-    > {
         critical_section::with(|cs| {
-            self.shared.borrow(cs).borrow_mut().status.armed = true;
+            *self.inner.borrow(cs).borrow_mut() = Some(inner);
         });
-        self.runtime().sync_runtime_requests()?;
-        self.runtime().publish_runtime_status(None);
         Ok(())
     }
 
-    /// Forces a neutral output, disables the controller, then disables the PWM.
     #[inline]
-    pub(crate) fn disable(
-        &mut self,
-    ) -> Result<
-        (),
-        MotorSystemError<
-            PWM::Error,
-            CURRENT::Error,
-            BUS::Error,
-            ROTOR::Error,
-            OUTPUT::Error,
-            TEMP::Error,
-        >,
-    > {
+    pub(crate) fn apply_command_immediate(&self, command: MotorCommand) {
         critical_section::with(|cs| {
-            self.shared.borrow(cs).borrow_mut().status.armed = false;
+            let mut shared = self.shared.borrow(cs).borrow_mut();
+            if shared.status.active {
+                shared.command = command;
+                shared.command_dirty = true;
+            }
         });
-        self.runtime().sync_runtime_requests()?;
-        self.runtime().publish_runtime_status(None);
-        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn controller_status(&self) -> MotorStatus {
+        critical_section::with(|cs| self.shared.borrow(cs).borrow().status.controller)
+    }
+
+    #[inline]
+    pub(crate) fn friction_compensation_enabled(&self) -> bool {
+        critical_section::with(|cs| {
+            self.inner
+                .borrow(cs)
+                .borrow()
+                .as_ref()
+                .is_some_and(|inner| inner.controller.friction_compensation_enabled())
+        })
+    }
+
+    #[inline]
+    pub(crate) fn apply_actuator_calibration(&self, calibration: &ActuatorCalibration) {
+        critical_section::with(|cs| {
+            if let Some(inner) = self.inner.borrow(cs).borrow_mut().as_mut() {
+                inner.controller.apply_actuator_calibration(calibration);
+            }
+        });
     }
 }
 
 impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    MotorRuntime<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    MotorTicker<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+where
+    PWM: PhasePwm,
+    CURRENT: CurrentSampler,
+    BUS: BusVoltageSensor,
+    ROTOR: RotorSensor,
+    OUTPUT: OutputSensor,
+    TEMP: TemperatureSensor,
+    MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
+    OutputEst: MechanicalMotionEstimator,
+{
+    /// Runs one full control cycle using the configured runtime period.
+    pub fn tick(
+        &self,
+    ) -> Result<
+        (),
+        MotorRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
+    > {
+        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
+            .ok_or_else(|| {
+                let active =
+                    critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active);
+                if active {
+                    MotorRuntimeError::Busy
+                } else {
+                    MotorRuntimeError::Inactive
+                }
+            })?;
+        let result = {
+            let mut runtime = RuntimeLoop {
+                runtime: &mut inner,
+                shared: self.shared,
+            };
+            runtime.tick()
+        };
+        critical_section::with(|cs| {
+            *self.inner.borrow(cs).borrow_mut() = Some(inner);
+        });
+        result
+    }
+}
+
+impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+    RuntimeLoop<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -549,7 +847,7 @@ where
         &mut self,
     ) -> Result<
         bool,
-        MotorSystemError<
+        MotorRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -563,10 +861,10 @@ where
                 let mut shared = self.shared.borrow(cs).borrow_mut();
                 let command = shared.command;
                 let command_dirty = shared.command_dirty;
-                shared.command_dirty = false;
                 let clear_fault_requested = shared.clear_fault_requested;
-                shared.clear_fault_requested = false;
                 let armed_requested = shared.status.armed;
+                shared.command_dirty = false;
+                shared.clear_fault_requested = false;
                 (
                     command,
                     command_dirty,
@@ -578,8 +876,7 @@ where
         if clear_fault_requested {
             self.runtime.controller.clear_error();
             critical_section::with(|cs| {
-                let mut shared = self.shared.borrow(cs).borrow_mut();
-                shared.status.fault_latched =
+                self.shared.borrow(cs).borrow_mut().status.fault_latched =
                     self.runtime.controller.status().active_error.is_some();
             });
         }
@@ -590,46 +887,34 @@ where
                     .hardware
                     .pwm
                     .enable()
-                    .map_err(MotorSystemError::Pwm)?;
-                self.runtime.controller.enable();
+                    .map_err(MotorRuntimeError::Pwm)?;
+                self.runtime.controller.set_armed(true);
             } else {
-                self.runtime.controller.disable();
+                self.runtime.controller.set_armed(false);
                 self.runtime
                     .hardware
                     .pwm
                     .set_neutral()
-                    .map_err(MotorSystemError::Pwm)?;
+                    .map_err(MotorRuntimeError::Pwm)?;
                 self.runtime
                     .hardware
                     .pwm
                     .disable()
-                    .map_err(MotorSystemError::Pwm)?;
+                    .map_err(MotorRuntimeError::Pwm)?;
             }
             self.runtime.pwm_armed = armed_requested;
         }
 
         if command_dirty {
-            self.runtime.controller.set_mode(command.mode);
-            self.runtime.controller.set_id_target(command.id_target);
-            self.runtime.controller.set_iq_target(command.iq_target);
             self.runtime
                 .controller
-                .set_torque_target(command.output_torque_target);
-            self.runtime
-                .controller
-                .set_velocity_target(command.output_velocity_target);
-            self.runtime
-                .controller
-                .set_position_target(command.output_position_target);
-            self.runtime
-                .controller
-                .set_open_loop_voltage_target(command.open_loop_voltage_target);
+                .apply_command(core_command_from_runtime(command));
         }
 
         Ok(self.runtime.pwm_armed)
     }
 
-    fn publish_runtime_status(&self, last_fast_output: Option<FastLoopOutput>) {
+    fn publish_runtime_status(&self, last_fast_output: Option<MotorRuntimeOutput>) {
         critical_section::with(|cs| {
             let mut shared = self.shared.borrow(cs).borrow_mut();
             if let Some(output) = last_fast_output {
@@ -650,7 +935,7 @@ where
         &mut self,
     ) -> Result<
         (),
-        MotorSystemError<
+        MotorRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -663,7 +948,7 @@ where
             .hardware
             .pwm
             .set_neutral()
-            .map_err(MotorSystemError::Pwm)?;
+            .map_err(MotorRuntimeError::Pwm)?;
         self.mark_runtime_fault();
         self.publish_runtime_status(None);
         Ok(())
@@ -671,21 +956,19 @@ where
 
     /// Runs one full control cycle using the configured runtime period.
     ///
-    /// This executes the controller fast path and then immediately runs the
-    /// medium and slow hooks with the same configured `dt`.
+    /// This executes one full owned controller cycle using the configured `dt`.
     ///
-    /// The controller still applies that ordering internally as:
+    /// Internally that means:
     ///
-    /// 1. fast loop
-    /// 2. medium hook
-    /// 3. slow hook
+    /// 1. sample hardware and run the electrical current loop
+    /// 2. update the supervisory references for the next cycle
     ///
-    /// so supervisory updates affect the next fast step, not the current one.
+    /// so supervisory updates affect the next electrical step, not the current one.
     pub fn tick(
         &mut self,
     ) -> Result<
-        FastLoopOutput,
-        MotorSystemError<
+        (),
+        MotorRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -694,26 +977,24 @@ where
             TEMP::Error,
         >,
     > {
-        let output = match self.execute_fast_cycle(self.runtime.dt_seconds) {
-            Ok(output) => output,
+        match self.execute_fast_cycle(self.runtime.dt_seconds) {
+            Ok(_) => Ok(()),
             Err(error) => {
-                if !matches!(error, MotorSystemError::InvalidCurrentSample) {
+                if !matches!(error, MotorRuntimeError::InvalidCurrentSample) {
                     let _ = self.fault_and_neutral();
                 }
-                return Err(error);
+                Err(error)
             }
-        };
-        Ok(output)
+        }
     }
 
     /// Samples hardware, runs one owned controller cycle, and applies duty.
     pub(crate) fn run_cycle(
         &mut self,
         dt_seconds: f32,
-        schedule: TickSchedule,
     ) -> Result<
-        FastLoopOutput,
-        MotorSystemError<
+        MotorRuntimeOutput,
+        MotorRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -724,12 +1005,12 @@ where
     > {
         let armed = self.sync_runtime_requests()?;
         if !armed {
-            let output = FastLoopOutput {
+            let output = MotorRuntimeOutput::from(FastLoopOutput {
                 phase_duty: fluxkit_hal::centered_phase_duty(),
                 measured_idq: fluxkit_math::frame::Dq::new(Amps::ZERO, Amps::ZERO),
                 commanded_vdq: fluxkit_math::frame::Dq::new(Volts::ZERO, Volts::ZERO),
                 saturated: false,
-            };
+            });
             self.publish_runtime_status(Some(output));
             return Ok(output);
         }
@@ -739,11 +1020,11 @@ where
             .hardware
             .current
             .sample_phase_currents()
-            .map_err(MotorSystemError::Current)?;
+            .map_err(MotorRuntimeError::Current)?;
 
         if current.validity == CurrentSampleValidity::Invalid {
             self.fault_and_neutral()?;
-            return Err(MotorSystemError::InvalidCurrentSample);
+            return Err(MotorRuntimeError::InvalidCurrentSample);
         }
 
         let bus_voltage = self
@@ -751,26 +1032,26 @@ where
             .hardware
             .bus
             .sample_bus_voltage()
-            .map_err(MotorSystemError::Bus)?;
+            .map_err(MotorRuntimeError::Bus)?;
         let winding_temperature_c = self
             .runtime
             .hardware
             .temp
             .sample_temperature_c()
-            .map_err(MotorSystemError::Temp)?;
+            .map_err(MotorRuntimeError::Temp)?;
 
         let rotor = self
             .runtime
             .hardware
             .rotor
             .read_rotor()
-            .map_err(MotorSystemError::Rotor)?;
+            .map_err(MotorRuntimeError::Rotor)?;
         let output_axis = self
             .runtime
             .hardware
             .output
             .read_output()
-            .map_err(MotorSystemError::Output)?;
+            .map_err(MotorRuntimeError::Output)?;
         let rotor_motion = self.runtime.rotor_estimator.update(
             MechanicalMotionSample {
                 wrapped_value: rotor.mechanical_angle,
@@ -786,7 +1067,7 @@ where
             dt_seconds,
         );
 
-        let output = self.runtime.controller.tick(
+        let output = self.runtime.controller.step(
             FastLoopInput {
                 phase_currents: current.currents,
                 bus_voltage,
@@ -801,15 +1082,16 @@ where
                 },
                 dt_seconds,
             },
-            schedule,
+            dt_seconds,
         );
 
         self.runtime
             .hardware
             .pwm
             .set_phase_duty(output.phase_duty)
-            .map_err(MotorSystemError::Pwm)?;
+            .map_err(MotorRuntimeError::Pwm)?;
 
+        let output = MotorRuntimeOutput::from(output);
         self.publish_runtime_status(Some(output));
         Ok(output)
     }
@@ -819,8 +1101,8 @@ where
         &mut self,
         dt_seconds: f32,
     ) -> Result<
-        FastLoopOutput,
-        MotorSystemError<
+        MotorRuntimeOutput,
+        MotorRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -829,10 +1111,7 @@ where
             TEMP::Error,
         >,
     > {
-        self.run_cycle(
-            dt_seconds,
-            TickSchedule::with_medium_and_slow(dt_seconds, dt_seconds),
-        )
+        self.run_cycle(dt_seconds)
     }
 }
 
@@ -850,7 +1129,7 @@ mod tests {
         centered_phase_duty,
     };
     use fluxkit_math::{
-        ContinuousMechanicalAngle, MechanicalAngle, WrappedEstimator,
+        ContinuousMechanicalAngle, Dq, MechanicalAngle, WrappedEstimator,
         estimation::{
             AngularEstimate, EstimatorSeed, MechanicalMotionEstimate, MechanicalMotionSample,
             MechanicalMotionSeed,
@@ -859,7 +1138,7 @@ mod tests {
         units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts},
     };
 
-    use super::{MotorHardware, MotorSystem, MotorSystemError};
+    use super::{Hardware, MotorRuntime, MotorRuntimeError};
 
     #[derive(Debug)]
     struct FakePwm {
@@ -1016,11 +1295,13 @@ mod tests {
                 d_inductance_h: Henries::new(0.00012),
                 q_inductance_h: Henries::new(0.00012),
                 flux_linkage_weber: fluxkit_math::units::Webers::new(0.05),
+                electrical_direction: fluxkit_math::ElectricalDirection::Positive,
                 electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
             },
             MotorLimits {
                 max_phase_current: Amps::new(20.0),
                 max_mech_speed: None,
+                max_winding_temperature_c: None,
             },
         )
     }
@@ -1069,15 +1350,9 @@ mod tests {
 
     fn hardware(
         validity: CurrentSampleValidity,
-    ) -> MotorHardware<
-        FakePwm,
-        FakeCurrentSensor,
-        FakeBusSensor,
-        FakeRotor,
-        FakeOutput,
-        FakeTempSensor,
-    > {
-        MotorHardware {
+    ) -> Hardware<FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor, FakeOutput, FakeTempSensor>
+    {
+        Hardware {
             pwm: FakePwm::default(),
             current: FakeCurrentSensor {
                 sample: PhaseCurrentSample {
@@ -1108,99 +1383,118 @@ mod tests {
 
     #[test]
     fn fast_tick_reads_hal_and_applies_phase_duty() {
-        let controller = fluxkit_core::MotorController::new(
-            motor_params(),
-            inverter_params(),
-            actuator_params(),
-            current_loop_config(),
-        );
-        let mut system = MotorSystem::new(
-            hardware(CurrentSampleValidity::Valid),
-            controller,
+        let hardware = hardware(CurrentSampleValidity::Valid);
+        let system = MotorRuntime::new(
+            hardware.pwm,
+            hardware.current,
+            hardware.bus,
+            hardware.rotor,
+            hardware.output,
+            hardware.temp,
+            super::MotorRuntimeParams::new(
+                motor_params(),
+                inverter_params(),
+                actuator_params(),
+                current_loop_config(),
+                0.000_05,
+            ),
+            fluxkit_math::Svpwm,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            0.000_05,
         );
-        {
-            let handle = system.handle();
-            handle.set_command(super::MotorCommand {
-                mode: ControlMode::Current,
-                iq_target: Amps::new(2.0),
-                ..super::MotorCommand::default()
-            });
-            handle.arm();
-        }
+        let (handle, ticker) = system.split().expect("runtime should split once");
+        handle.set_command(super::MotorCommand::Current(Dq::new(
+            Amps::ZERO,
+            Amps::new(2.0),
+        )));
+        handle.arm();
+        ticker.tick().unwrap();
 
-        let _output = system.tick().unwrap();
-
-        assert_eq!(system.handle().status().controller.active_error, None);
-        assert!(system.hardware().pwm.enabled);
-        assert_eq!(
-            system.handle().status().controller.state,
-            MotorState::Running
-        );
-        assert!(system.hardware().pwm.duty.a.get() >= 0.0);
-        assert!(system.hardware().pwm.duty.a.get() <= 1.0);
-        assert_ne!(system.hardware().pwm.duty, centered_phase_duty());
+        let parts = system
+            .try_into_parts()
+            .expect("runtime parts should be available");
+        assert_eq!(handle.status().controller.active_error, None);
+        assert!(parts.pwm.enabled);
+        assert_eq!(handle.status().controller.state, MotorState::Running);
+        assert!(parts.pwm.duty.a.get() >= 0.0);
+        assert!(parts.pwm.duty.a.get() <= 1.0);
+        assert_ne!(parts.pwm.duty, centered_phase_duty());
     }
 
     #[test]
     fn invalid_current_sample_returns_error_and_forces_neutral_pwm() {
-        let controller = fluxkit_core::MotorController::new(
-            motor_params(),
-            inverter_params(),
-            actuator_params(),
-            current_loop_config(),
-        );
-        let mut system = MotorSystem::new(
-            hardware(CurrentSampleValidity::Invalid),
-            controller,
+        let mut hardware = hardware(CurrentSampleValidity::Invalid);
+        hardware.pwm.duty = Abc::new(Duty::new(0.2), Duty::new(0.7), Duty::new(0.6));
+        let system = MotorRuntime::new(
+            hardware.pwm,
+            hardware.current,
+            hardware.bus,
+            hardware.rotor,
+            hardware.output,
+            hardware.temp,
+            super::MotorRuntimeParams::new(
+                motor_params(),
+                inverter_params(),
+                actuator_params(),
+                current_loop_config(),
+                0.000_05,
+            ),
+            fluxkit_math::Svpwm,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            0.000_05,
         );
-        system.hardware_mut().pwm.duty = Abc::new(Duty::new(0.2), Duty::new(0.7), Duty::new(0.6));
-        system.handle().arm();
+        let (handle, ticker) = system.split().expect("runtime should split once");
+        handle.arm();
+        let error = ticker.tick().unwrap_err();
+        let parts = system
+            .try_into_parts()
+            .expect("runtime parts should be available");
 
-        let error = system.tick().unwrap_err();
-
-        assert!(matches!(error, MotorSystemError::InvalidCurrentSample));
-        assert_eq!(system.hardware().pwm.duty, centered_phase_duty());
+        assert!(matches!(error, MotorRuntimeError::InvalidCurrentSample));
+        assert_eq!(parts.pwm.duty, centered_phase_duty());
     }
 
     #[test]
     fn supervisory_work_runs_inside_fast_cycle() {
-        let controller = fluxkit_core::MotorController::new(
-            motor_params(),
-            inverter_params(),
-            actuator_params(),
-            current_loop_config(),
-        );
-        let mut system = MotorSystem::new(
-            hardware(CurrentSampleValidity::Valid),
-            controller,
+        let hardware = hardware(CurrentSampleValidity::Valid);
+        let system = MotorRuntime::new(
+            hardware.pwm,
+            hardware.current,
+            hardware.bus,
+            hardware.rotor,
+            hardware.output,
+            hardware.temp,
+            super::MotorRuntimeParams::new(
+                motor_params(),
+                inverter_params(),
+                actuator_params(),
+                current_loop_config(),
+                0.000_05,
+            ),
+            fluxkit_math::Svpwm,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            0.000_05,
         );
-        {
-            let handle = system.handle();
-            handle.set_command(super::MotorCommand {
-                mode: ControlMode::Position,
-                output_position_target: ContinuousMechanicalAngle::new(1.0),
-                ..super::MotorCommand::default()
-            });
-            handle.arm();
-        }
-
-        let first = system.tick().unwrap();
-        let second = system.tick().unwrap();
+        let (handle, ticker) = system.split().expect("runtime should split once");
+        handle.set_command(super::MotorCommand::Position(
+            ContinuousMechanicalAngle::new(1.0),
+        ));
+        handle.arm();
+        ticker.tick().unwrap();
+        let first = handle
+            .status()
+            .last_fast_output
+            .expect("first runtime output should be published");
+        ticker.tick().unwrap();
+        let second = handle
+            .status()
+            .last_fast_output
+            .expect("second runtime output should be published");
 
         assert_eq!(first.phase_duty, centered_phase_duty());
         assert_ne!(second.phase_duty, centered_phase_duty());
         assert!(
-            system
-                .handle()
+            handle
                 .status()
                 .controller
                 .last_output_mechanical_angle
@@ -1212,15 +1506,22 @@ mod tests {
 
     #[test]
     fn explicit_estimators_drive_controller_side_motion_estimates() {
-        let controller = fluxkit_core::MotorController::new(
-            motor_params(),
-            inverter_params(),
-            actuator_params(),
-            current_loop_config(),
-        );
-        let mut system = MotorSystem::new(
-            hardware(CurrentSampleValidity::Valid),
-            controller,
+        let hardware = hardware(CurrentSampleValidity::Valid);
+        let system = MotorRuntime::new(
+            hardware.pwm,
+            hardware.current,
+            hardware.bus,
+            hardware.rotor,
+            hardware.output,
+            hardware.temp,
+            super::MotorRuntimeParams::new(
+                motor_params(),
+                inverter_params(),
+                actuator_params(),
+                current_loop_config(),
+                0.000_05,
+            ),
+            fluxkit_math::Svpwm,
             FixedEstimator {
                 output: AngularEstimate::new(
                     MechanicalAngle::new(0.3),
@@ -1235,19 +1536,16 @@ mod tests {
                     RadPerSec::new(1.5),
                 ),
             },
-            0.000_05,
         );
-        {
-            let handle = system.handle();
-            handle.set_command(super::MotorCommand {
-                mode: ControlMode::Current,
-                ..super::MotorCommand::default()
-            });
-            handle.arm();
-        }
-        let _ = system.tick().unwrap();
+        let (handle, ticker) = system.split().expect("runtime should split once");
+        handle.set_command(super::MotorCommand::Current(Dq::new(
+            Amps::ZERO,
+            Amps::ZERO,
+        )));
+        handle.arm();
+        ticker.tick().unwrap();
 
-        let status = system.handle().status().controller;
+        let status = handle.status().controller;
         assert_eq!(
             status.last_rotor_mechanical_angle,
             ContinuousMechanicalAngle::new(1.3)
@@ -1261,36 +1559,117 @@ mod tests {
 
     #[test]
     fn runtime_handle_updates_command_and_receives_status() {
-        let controller = fluxkit_core::MotorController::new(
-            motor_params(),
-            inverter_params(),
-            actuator_params(),
-            current_loop_config(),
-        );
-        let mut system = MotorSystem::new(
-            hardware(CurrentSampleValidity::Valid),
-            controller,
+        let hardware = hardware(CurrentSampleValidity::Valid);
+        let system = MotorRuntime::new(
+            hardware.pwm,
+            hardware.current,
+            hardware.bus,
+            hardware.rotor,
+            hardware.output,
+            hardware.temp,
+            super::MotorRuntimeParams::new(
+                motor_params(),
+                inverter_params(),
+                actuator_params(),
+                current_loop_config(),
+                0.000_05,
+            ),
+            fluxkit_math::Svpwm,
             fluxkit_math::PassThroughEstimator::new(),
             fluxkit_math::PassThroughEstimator::new(),
-            0.000_05,
         );
-        {
-            let handle = system.handle();
-            handle.set_command(super::MotorCommand {
-                mode: ControlMode::Current,
-                iq_target: Amps::new(2.0),
-                ..super::MotorCommand::default()
-            });
-            handle.arm();
-        }
-
-        let output = system.tick().unwrap();
-        let handle = system.handle();
+        let (handle, ticker) = system.split().expect("runtime should split once");
+        handle.set_command(super::MotorCommand::Current(Dq::new(
+            Amps::ZERO,
+            Amps::new(2.0),
+        )));
+        handle.arm();
+        ticker.tick().unwrap();
         let status = handle.status();
 
         assert_eq!(status.controller.mode, ControlMode::Current);
-        assert_eq!(status.last_fast_output, Some(output));
-        assert_eq!(handle.command().iq_target, Amps::new(2.0));
+        assert!(status.last_fast_output.is_some());
+        assert_eq!(
+            handle.command(),
+            super::MotorCommand::Current(Dq::new(Amps::ZERO, Amps::new(2.0)))
+        );
         assert!(!status.fault_latched);
+    }
+
+    #[test]
+    fn over_temperature_latches_runtime_fault_and_centers_output() {
+        let mut motor = motor_params();
+        motor.limits.max_winding_temperature_c = Some(80.0);
+        let mut hardware = hardware(CurrentSampleValidity::Valid);
+        hardware.temp.winding_temperature_c = 95.0;
+        let system = MotorRuntime::new(
+            hardware.pwm,
+            hardware.current,
+            hardware.bus,
+            hardware.rotor,
+            hardware.output,
+            hardware.temp,
+            super::MotorRuntimeParams::new(
+                motor,
+                inverter_params(),
+                actuator_params(),
+                current_loop_config(),
+                0.000_05,
+            ),
+            fluxkit_math::Svpwm,
+            fluxkit_math::PassThroughEstimator::new(),
+            fluxkit_math::PassThroughEstimator::new(),
+        );
+        let (handle, ticker) = system.split().expect("runtime should split once");
+        handle.arm();
+        ticker.tick().unwrap();
+        let status = handle.status();
+
+        assert_eq!(
+            status
+                .last_fast_output
+                .expect("faulted output should be published")
+                .phase_duty,
+            centered_phase_duty()
+        );
+        assert!(status.fault_latched);
+        assert_eq!(
+            status.controller.active_error,
+            Some(fluxkit_core::Error::OverTemperature)
+        );
+        assert_eq!(status.controller.state, MotorState::Faulted);
+    }
+
+    #[test]
+    fn extracted_runtime_marks_handles_and_tickers_inactive() {
+        let hardware = hardware(CurrentSampleValidity::Valid);
+        let system = MotorRuntime::new(
+            hardware.pwm,
+            hardware.current,
+            hardware.bus,
+            hardware.rotor,
+            hardware.output,
+            hardware.temp,
+            super::MotorRuntimeParams::new(
+                motor_params(),
+                inverter_params(),
+                actuator_params(),
+                current_loop_config(),
+                0.000_05,
+            ),
+            fluxkit_math::Svpwm,
+            fluxkit_math::PassThroughEstimator::new(),
+            fluxkit_math::PassThroughEstimator::new(),
+        );
+        let (handle, ticker) = system.split().expect("runtime should split once");
+
+        let _parts = system
+            .try_into_parts()
+            .expect("runtime parts should be available");
+
+        assert!(!handle.status().active);
+        handle.arm();
+        assert!(!handle.status().armed);
+        assert!(matches!(ticker.tick(), Err(MotorRuntimeError::Inactive)));
     }
 }

@@ -19,6 +19,33 @@ real motor projects that have:
 It is not trying to be a generic embedded framework, RTOS, or executor. The
 top-level crate is focused on the motor-control problem itself.
 
+## Architecture
+
+The workspace is split by responsibility:
+
+- `crates/fluxkit_math`
+  - units, transforms, modulation, estimator primitives
+- `crates/fluxkit_core`
+  - deterministic control engine and pure calibration procedures
+- `crates/fluxkit_hal`
+  - narrow synchronous hardware contracts
+- `crates/fluxkit`
+  - project-facing runtime and calibration wrappers
+- `crates/fluxkit_pmsm_sim`
+  - ideal plant model for tests and examples
+
+The intended ownership model is:
+
+- main/context code owns `MotorRuntime`
+- IRQ code executes it through `MotorTicker`
+- non-owner code uses `MotorHandle`
+- motor and actuator calibration follow the same shape through
+  `MotorCalibrationRuntime` / `MotorCalibrationTicker` and
+  `ActuatorCalibrationRuntime` / `ActuatorCalibrationTicker`
+
+If you need lower-level controller integration, `fluxkit_core` is still
+available, but the normal application path should stay at the `fluxkit` layer.
+
 ## What You Build With It
 
 The intended user flow is:
@@ -33,9 +60,10 @@ The intended user flow is:
 2. Run motor electrical calibration.
 3. Run actuator calibration.
 4. Build `MotorParams` and `ActuatorParams` from the resulting calibrated values.
-5. Construct `MotorSystem`.
-6. In your fixed-period control interrupt, call `tick()`.
-7. From non-IRQ code, use `MotorHandle` to:
+5. Construct `MotorRuntime`.
+6. Create a `MotorTicker` from the runtime owner.
+7. In your fixed-period control interrupt, call `ticker.tick()`.
+8. From non-IRQ code, use `MotorHandle` to:
    - set commands
    - arm/disarm
    - inspect status
@@ -55,20 +83,7 @@ That example demonstrates the full intended bring-up path:
 - two long-lived contexts:
   - main context
   - IRQ context
-- `critical-section`-style shared state and mailboxes
-
-## Workspace Layout
-
-- `crates/fluxkit_math`
-  - units, transforms, modulation, PI primitives, estimators
-- `crates/fluxkit_core`
-  - pure deterministic motor-control engine
-- `crates/fluxkit_hal`
-  - narrow hardware trait contracts
-- `crates/fluxkit`
-  - user-facing runtime and calibration crate
-- `crates/fluxkit_pmsm_sim`
-  - ideal PMSM plant emulator for integration tests and examples
+- `critical-section`-style shared state
 
 The dependency split is intentional:
 
@@ -86,7 +101,8 @@ Implemented and usable today:
 - absolute-encoder rotor sensing
 - explicit output-axis sensing
 - request-driven motor and actuator calibration systems
-- IRQ-oriented runtime wrapper through `MotorSystem::tick()`
+- owner / handle / ticker runtime wrapper through `MotorRuntime`, `MotorHandle`,
+  and `MotorTicker`
 - shared command/status surface through `MotorHandle`
 - simulator-backed integration tests for calibration and runtime behavior
 
@@ -102,7 +118,7 @@ Not in scope today:
 
 ### Runtime
 
-`fluxkit::MotorSystem` is the project-facing runtime owner.
+`fluxkit::MotorRuntime` is the project-facing runtime owner.
 
 It owns:
 
@@ -111,7 +127,16 @@ It owns:
 - rotor estimator
 - output estimator
 
-Each call to `tick()` performs one full fixed-period control step:
+The owner creates:
+
+- `handle()`
+  - shared command/status access for non-IRQ code
+- `ticker()`
+  - IRQ-side execution capability
+- `try_into_parts()`
+  - phase handoff back into owned parts when bring-up moves to another stage
+
+Each call to `ticker.tick()` performs one full fixed-period control step:
 
 - sample hardware
 - update estimators
@@ -123,6 +148,10 @@ Each call to `tick()` performs one full fixed-period control step:
 Non-IRQ code interacts through `MotorHandle`, not by mutating the controller
 directly.
 
+When `try_into_parts()` is used, the owner hands its active runtime back out as
+owned parts. Any old handle or ticker derived from that owner becomes inactive
+and should be discarded.
+
 ### Calibration
 
 Calibration is also fixed-period and intended to fit the same main-context /
@@ -130,18 +159,22 @@ IRQ-context ownership model.
 
 Use:
 
-- `MotorCalibrationSystem`
-- `ActuatorCalibrationSystem`
+- `MotorCalibrationRuntime`
+- `ActuatorCalibrationRuntime`
+
+Both are main-context owners that create:
+
+- `handle()`
+  - shared progress/result access
+- `ticker()`
+  - IRQ-side execution capability
+- `try_into_parts()`
+  - ownership handoff for the next bring-up phase
 
 Both are request-driven:
 
 - supply known values as `Some(...)`
 - leave values to be calibrated as `None`
-
-Both expose:
-
-- `tick()`
-- `phase()`
 
 and return final resolved results:
 
@@ -150,9 +183,9 @@ and return final resolved results:
 
 The normal bring-up order is:
 
-1. `MotorCalibrationSystem`
-2. `ActuatorCalibrationSystem`
-3. `MotorSystem`
+1. `MotorCalibrationRuntime`
+2. `ActuatorCalibrationRuntime`
+3. `MotorRuntime`
 
 ## Examples
 
@@ -166,8 +199,9 @@ This is the main project example. It shows:
 
 - `StaticCell`-backed shared state
 - long-lived main-context and IRQ-context threads
-- IRQ-only ticking of the active system
-- main-context construction and phase transitions
+- main-context ownership of each active runtime
+- IRQ-side ticking through ticker capabilities
+- main-context construction, observation, and phase transitions
 - velocity-runtime handoff after calibration
 
 It also writes:

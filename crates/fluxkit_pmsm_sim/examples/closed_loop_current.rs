@@ -1,9 +1,9 @@
 use std::{env, error::Error, fs};
 
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlMode,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
     CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorLimits, MotorParams,
-    RotorEstimate,
+    RotorEstimate, motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -42,16 +42,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         inverter_params(),
         actuator_params(),
         config(),
+        fluxkit_math::Svpwm,
     );
     let mut plant = PmsmModel::new_zeroed(plant_params())?;
     let mut samples = Vec::with_capacity(20_000);
 
-    controller.set_mode(ControlMode::Current);
-    controller.enable();
+    controller.set_armed(true);
 
     for step in 0..20_000 {
         let iq_target = if step < 1_000 { 0.0 } else { 3.0 };
-        controller.set_iq_target(Amps::new(iq_target));
+        controller.apply_command(ControllerCommand::Current(fluxkit_math::Dq::new(
+            Amps::ZERO,
+            Amps::new(iq_target),
+        )));
 
         let state = *plant.state();
         let mechanical_angle = state.mechanical_angle.wrapped();
@@ -65,20 +68,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .map(Amps::new);
 
-        let output = controller.fast_tick(FastLoopInput {
-            phase_currents,
-            bus_voltage,
-            winding_temperature_c: state.winding_temperature_c,
-            rotor: RotorEstimate {
-                mechanical_angle: mechanical_angle.into(),
-                mechanical_velocity: state.mechanical_velocity,
+        let output = controller.step(
+            FastLoopInput {
+                phase_currents,
+                bus_voltage,
+                winding_temperature_c: state.winding_temperature_c,
+                rotor: RotorEstimate {
+                    mechanical_angle: mechanical_angle.into(),
+                    mechanical_velocity: state.mechanical_velocity,
+                },
+                actuator: ActuatorEstimate {
+                    output_angle: output_angle.into(),
+                    output_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
+                },
+                dt_seconds: FAST_DT_SECONDS,
             },
-            actuator: ActuatorEstimate {
-                output_angle: output_angle.into(),
-                output_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
-            },
-            dt_seconds: FAST_DT_SECONDS,
-        });
+            FAST_DT_SECONDS,
+        );
 
         let snapshot = plant.step_phase_duty(
             output.phase_duty,
@@ -245,10 +251,12 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         limits: MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         },
     }
 }
@@ -302,6 +310,7 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,

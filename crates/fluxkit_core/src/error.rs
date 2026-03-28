@@ -11,6 +11,8 @@ pub enum Error {
     InvalidBusVoltage,
     /// The measured winding temperature was invalid for control.
     InvalidTemperature,
+    /// The measured winding temperature exceeded the configured trip limit.
+    OverTemperature,
     /// The phase-current measurement was not finite.
     InvalidPhaseCurrent,
     /// The rotor angle estimate was not finite.
@@ -28,6 +30,7 @@ impl fmt::Display for Error {
         let message = match self {
             Self::InvalidBusVoltage => "invalid bus voltage",
             Self::InvalidTemperature => "invalid winding temperature",
+            Self::OverTemperature => "winding over-temperature",
             Self::InvalidPhaseCurrent => "invalid phase current",
             Self::InvalidRotorAngle => "invalid rotor angle",
             Self::NonFiniteComputation => "non-finite computation",

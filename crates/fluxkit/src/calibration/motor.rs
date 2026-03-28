@@ -1,25 +1,35 @@
+use core::cell::{Cell, RefCell};
 use core::fmt;
 
+use critical_section::Mutex;
 use fluxkit_core::{
     CalibrationError, FluxLinkageCalibrationInput, FluxLinkageCalibrator,
-    MotorCalibration as PartialMotorCalibration, MotorCalibrationRoutine,
-    PhaseInductanceCalibrationInput, PhaseInductanceCalibrator, PhaseResistanceCalibrationInput,
-    PhaseResistanceCalibrator, PolePairsAndOffsetCalibrationInput, PolePairsAndOffsetCalibrator,
+    MotorCalibration as PartialMotorCalibration, MotorCalibrationRoutine, MotorLimits, MotorModel,
+    MotorParams, PhaseInductanceCalibrationInput, PhaseInductanceCalibrator,
+    PhaseResistanceCalibrationInput, PhaseResistanceCalibrator, PolePairsAndOffsetCalibrationInput,
+    PolePairsAndOffsetCalibrator,
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, PhaseCurrentSample, PhasePwm,
-    RotorReading, RotorSensor, TemperatureSensor,
+    RotorSensor, TemperatureSensor,
 };
 use fluxkit_math::{
-    AlphaBeta, ElectricalAngle, Modulator, Volts,
+    AlphaBeta, ElectricalAngle, ElectricalDirection, MechanicalMotionEstimate,
+    MechanicalMotionSample, Modulator, Volts,
     units::{Henries, Ohms, RadPerSec, Webers},
 };
 
-use super::shared::RoutineState;
+use super::shared::{RoutineState, SharedStatus, read_status, write_status};
+use crate::CapabilitySplitError;
+use crate::system::MechanicalMotionEstimator;
 
 /// HAL and integration failures that can occur outside the pure calibration procedures.
 #[derive(Debug)]
-pub enum MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, TempE> {
+pub enum MotorCalibrationRuntimeError<PwmE, CurrentE, BusE, RotorE, TempE> {
+    /// The runtime was temporarily unavailable because another context holds the active inner state.
+    Busy,
+    /// The runtime owner no longer contains an active inner runtime.
+    Inactive,
     /// PWM output operation failed.
     Pwm(PwmE),
     /// Phase-current acquisition failed.
@@ -37,7 +47,7 @@ pub enum MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, TempE> {
 }
 
 impl<PwmE, CurrentE, BusE, RotorE, TempE> fmt::Display
-    for MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, TempE>
+    for MotorCalibrationRuntimeError<PwmE, CurrentE, BusE, RotorE, TempE>
 where
     PwmE: fmt::Display,
     CurrentE: fmt::Display,
@@ -47,6 +57,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Busy => f.write_str("runtime busy"),
+            Self::Inactive => f.write_str("runtime inactive"),
             Self::Pwm(error) => write!(f, "pwm error: {error}"),
             Self::Current(error) => write!(f, "current-sensor error: {error}"),
             Self::Bus(error) => write!(f, "bus-voltage error: {error}"),
@@ -59,7 +71,7 @@ where
 }
 
 impl<PwmE, CurrentE, BusE, RotorE, TempE> core::error::Error
-    for MotorCalibrationSystemError<PwmE, CurrentE, BusE, RotorE, TempE>
+    for MotorCalibrationRuntimeError<PwmE, CurrentE, BusE, RotorE, TempE>
 where
     PwmE: core::error::Error + 'static,
     CurrentE: core::error::Error + 'static,
@@ -69,6 +81,8 @@ where
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::Busy => None,
+            Self::Inactive => None,
             Self::Pwm(error) => Some(error),
             Self::Current(error) => Some(error),
             Self::Bus(error) => Some(error),
@@ -87,13 +101,19 @@ where
 pub struct MotorCalibrationRequest {
     /// Provided electrical pole-pair count.
     ///
-    /// This must be supplied together with `electrical_angle_offset` if you
+    /// This must be supplied together with `electrical_direction` and
+    /// `electrical_angle_offset` if you
     /// want to skip electrical-mapping calibration.
     pub pole_pairs: Option<u8>,
+    /// Provided electrical mapping direction.
+    ///
+    /// This must be supplied together with `pole_pairs` and
+    /// `electrical_angle_offset` if you want to skip electrical-mapping calibration.
+    pub electrical_direction: Option<ElectricalDirection>,
     /// Provided electrical zero offset after mechanical-to-electrical conversion.
     ///
-    /// This must be supplied together with `pole_pairs` if you want to skip
-    /// electrical-mapping calibration.
+    /// This must be supplied together with `pole_pairs` and
+    /// `electrical_direction` if you want to skip electrical-mapping calibration.
     pub electrical_angle_offset: Option<ElectricalAngle>,
     /// Provided phase resistance normalized to `25°C`.
     ///
@@ -104,6 +124,29 @@ pub struct MotorCalibrationRequest {
     pub phase_inductance_h: Option<Henries>,
     /// Provided flux linkage. When absent, flux linkage is calibrated.
     pub flux_linkage_weber: Option<Webers>,
+}
+
+impl MotorCalibrationRequest {
+    /// Calibrate every motor-side quantity.
+    #[inline]
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// Skip electrical-mapping calibration with known pole pairs and offset.
+    #[inline]
+    pub fn with_known_electrical_mapping(
+        pole_pairs: u8,
+        electrical_direction: ElectricalDirection,
+        electrical_angle_offset: ElectricalAngle,
+    ) -> Self {
+        Self {
+            pole_pairs: Some(pole_pairs),
+            electrical_direction: Some(electrical_direction),
+            electrical_angle_offset: Some(electrical_angle_offset),
+            ..Self::default()
+        }
+    }
 }
 
 /// User-facing operating limits for the motor-side calibration campaign.
@@ -144,6 +187,8 @@ pub enum MotorCalibrationPhase {
 pub struct MotorCalibrationResult {
     /// Estimated electrical pole-pair count.
     pub pole_pairs: u8,
+    /// Electrical mapping direction between positive mechanical and electrical motion.
+    pub electrical_direction: ElectricalDirection,
     /// Electrical zero offset after mechanical-to-electrical conversion.
     pub electrical_angle_offset: ElectricalAngle,
     /// Estimated phase resistance normalized to `25°C`.
@@ -158,17 +203,15 @@ impl MotorCalibrationResult {
     /// Builds motor parameters directly from this resolved calibration plus
     /// independent operating limits.
     #[inline]
-    pub const fn into_motor_params(
-        self,
-        limits: fluxkit_core::MotorLimits,
-    ) -> fluxkit_core::MotorParams {
-        fluxkit_core::MotorParams::from_model_and_limits(
-            fluxkit_core::MotorModel {
+    pub const fn into_motor_params(self, limits: MotorLimits) -> MotorParams {
+        MotorParams::from_model_and_limits(
+            MotorModel {
                 pole_pairs: self.pole_pairs,
                 phase_resistance_ohm_ref: self.phase_resistance_ohm_ref,
                 d_inductance_h: self.phase_inductance_h,
                 q_inductance_h: self.phase_inductance_h,
                 flux_linkage_weber: self.flux_linkage_weber,
+                electrical_direction: self.electrical_direction,
                 electrical_angle_offset: self.electrical_angle_offset,
             },
             limits,
@@ -177,8 +220,9 @@ impl MotorCalibrationResult {
 
     /// Applies this resolved record onto an existing motor-parameter record.
     #[inline]
-    pub fn apply_to_motor_params(&self, motor: &mut fluxkit_core::MotorParams) {
+    pub fn apply_to_motor_params(&self, motor: &mut MotorParams) {
         motor.pole_pairs = self.pole_pairs;
+        motor.electrical_direction = self.electrical_direction;
         motor.electrical_angle_offset = self.electrical_angle_offset;
         motor.phase_resistance_ohm_ref = self.phase_resistance_ohm_ref;
         motor.d_inductance_h = self.phase_inductance_h;
@@ -187,18 +231,85 @@ impl MotorCalibrationResult {
     }
 }
 
-/// Encapsulated synchronous calibration stack: hardware plus a modulation strategy.
+/// Shared calibration status snapshot for non-owning contexts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MotorCalibrationStatus {
+    /// `true` while the calibration owner still contains an active inner runtime.
+    pub active: bool,
+    /// Current or next phase while calibration is in progress.
+    pub phase: Option<MotorCalibrationPhase>,
+    /// Final resolved result once calibration completes.
+    pub result: Option<MotorCalibrationResult>,
+    /// `true` when the calibration runtime has latched a terminal fault.
+    pub fault_latched: bool,
+}
+
+/// Owned motor-calibration parts that can be moved into another phase.
 #[derive(Debug)]
-pub struct MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, TEMP, MOD> {
+pub struct MotorCalibrationParts<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst> {
+    /// PWM output handle.
+    pub pwm: PWM,
+    /// Phase-current sampler.
+    pub current: CURRENT,
+    /// DC bus-voltage sensor.
+    pub bus: BUS,
+    /// Rotor sensor.
+    pub rotor: ROTOR,
+    /// Winding temperature sensor.
+    pub temp: TEMP,
+    /// Modulation strategy.
+    pub modulator: MOD,
+    /// Rotor-motion estimator.
+    pub rotor_estimator: RotorEst,
+}
+
+/// Non-owning access to calibration progress and final result.
+#[derive(Debug)]
+pub struct MotorCalibrationHandle<'a> {
+    shared: &'a Mutex<RefCell<SharedStatus<MotorCalibrationStatus>>>,
+}
+
+impl<'a> MotorCalibrationHandle<'a> {
+    /// Returns the latest shared calibration status.
+    pub fn status(&self) -> MotorCalibrationStatus {
+        read_status(self.shared)
+    }
+
+    /// Returns `true` while the owning calibration runtime is still active.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.status().active
+    }
+
+    /// Returns `true` once calibration has produced a final result.
+    #[inline]
+    pub fn is_complete(&self) -> bool {
+        self.status().result.is_some()
+    }
+
+    /// Returns `true` when calibration has latched a terminal fault.
+    #[inline]
+    pub fn is_faulted(&self) -> bool {
+        self.status().fault_latched
+    }
+}
+
+/// Active inner motor-calibration runtime owned by the public wrapper.
+#[derive(Debug)]
+struct InnerMotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst> {
     pwm: PWM,
     current: CURRENT,
     bus: BUS,
     rotor: ROTOR,
     temp: TEMP,
     modulator: MOD,
+    rotor_estimator: RotorEst,
     limits: MotorCalibrationLimits,
     dt_seconds: f32,
     pole_pairs: Option<u8>,
+    electrical_direction: Option<ElectricalDirection>,
     electrical_angle_offset: Option<ElectricalAngle>,
     phase_resistance_ohm_ref: Option<Ohms>,
     phase_inductance_h: Option<Henries>,
@@ -206,8 +317,31 @@ pub struct MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, TEMP, MOD> {
     active_routine: Option<MotorCalibrationRoutine>,
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, TEMP, MOD>
-    MotorCalibrationSystem<PWM, CURRENT, BUS, ROTOR, TEMP, MOD>
+/// Main-context owner of one active motor-calibration runtime.
+#[derive(Debug)]
+pub struct MotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst> {
+    inner: Mutex<
+        RefCell<
+            Option<InnerMotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>>,
+        >,
+    >,
+    shared: Mutex<RefCell<SharedStatus<MotorCalibrationStatus>>>,
+    split_taken: Cell<bool>,
+}
+
+/// IRQ-side execution capability for one active motor-calibration runtime.
+#[derive(Debug)]
+pub struct MotorCalibrationTicker<'a, PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst> {
+    inner: &'a Mutex<
+        RefCell<
+            Option<InnerMotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>>,
+        >,
+    >,
+    shared: &'a Mutex<RefCell<SharedStatus<MotorCalibrationStatus>>>,
+}
+
+impl<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>
+    MotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -215,8 +349,9 @@ where
     ROTOR: RotorSensor,
     TEMP: TemperatureSensor,
     MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
 {
-    /// Creates a new request-driven motor-calibration system.
+    /// Creates a new request-driven motor-calibration runtime.
     pub fn new(
         pwm: PWM,
         current: CURRENT,
@@ -224,6 +359,30 @@ where
         rotor: ROTOR,
         temp: TEMP,
         modulator: MOD,
+        rotor_estimator: RotorEst,
+        request: MotorCalibrationRequest,
+        limits: MotorCalibrationLimits,
+        dt_seconds: f32,
+    ) -> Result<Self, CalibrationError> {
+        Self::from_parts(
+            MotorCalibrationParts {
+                pwm,
+                current,
+                bus,
+                rotor,
+                temp,
+                modulator,
+                rotor_estimator,
+            },
+            request,
+            limits,
+            dt_seconds,
+        )
+    }
+
+    /// Creates a new request-driven motor-calibration runtime from owned parts.
+    pub fn from_parts(
+        parts: MotorCalibrationParts<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>,
         request: MotorCalibrationRequest,
         limits: MotorCalibrationLimits,
         dt_seconds: f32,
@@ -236,111 +395,91 @@ where
         }
 
         Ok(Self {
-            pwm,
-            current,
-            bus,
-            rotor,
-            temp,
-            modulator,
-            limits,
-            dt_seconds,
-            pole_pairs: request.pole_pairs,
-            electrical_angle_offset: request.electrical_angle_offset,
-            phase_resistance_ohm_ref: request.phase_resistance_ohm_ref,
-            phase_inductance_h: request.phase_inductance_h,
-            flux_linkage_weber: request.flux_linkage_weber,
-            active_routine: None,
+            inner: Mutex::new(RefCell::new(Some(InnerMotorCalibrationRuntime {
+                pwm: parts.pwm,
+                current: parts.current,
+                bus: parts.bus,
+                rotor: parts.rotor,
+                temp: parts.temp,
+                modulator: parts.modulator,
+                rotor_estimator: parts.rotor_estimator,
+                limits,
+                dt_seconds,
+                pole_pairs: request.pole_pairs,
+                electrical_direction: request.electrical_direction,
+                electrical_angle_offset: request.electrical_angle_offset,
+                phase_resistance_ohm_ref: request.phase_resistance_ohm_ref,
+                phase_inductance_h: request.phase_inductance_h,
+                flux_linkage_weber: request.flux_linkage_weber,
+                active_routine: None,
+            }))),
+            shared: Mutex::new(RefCell::new(SharedStatus {
+                status: MotorCalibrationStatus {
+                    active: true,
+                    phase: next_phase_for_request(request),
+                    result: None,
+                    fault_latched: false,
+                },
+            })),
+            split_taken: Cell::new(false),
         })
     }
 
-    /// Returns shared access to the owned PWM handle.
-    #[inline]
-    pub const fn pwm(&self) -> &PWM {
-        &self.pwm
+    /// Attempts to take ownership of the active calibration parts for reuse in another phase.
+    pub fn try_into_parts(
+        &self,
+    ) -> Option<MotorCalibrationParts<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>> {
+        let inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())?;
+        write_status(&self.shared, |status| status.active = false);
+        Some(MotorCalibrationParts {
+            pwm: inner.pwm,
+            current: inner.current,
+            bus: inner.bus,
+            rotor: inner.rotor,
+            temp: inner.temp,
+            modulator: inner.modulator,
+            rotor_estimator: inner.rotor_estimator,
+        })
     }
 
-    /// Returns mutable access to the owned PWM handle.
+    /// Splits this calibration runtime into its unique handle and ticker.
+    ///
+    /// This can be called at most once for a given calibration owner.
     #[inline]
-    pub fn pwm_mut(&mut self) -> &mut PWM {
-        &mut self.pwm
-    }
-
-    /// Returns shared access to the owned current-sampler handle.
-    #[inline]
-    pub const fn current(&self) -> &CURRENT {
-        &self.current
-    }
-
-    /// Returns mutable access to the owned current-sampler handle.
-    #[inline]
-    pub fn current_mut(&mut self) -> &mut CURRENT {
-        &mut self.current
-    }
-
-    /// Returns shared access to the owned bus-sensor handle.
-    #[inline]
-    pub const fn bus(&self) -> &BUS {
-        &self.bus
-    }
-
-    /// Returns mutable access to the owned bus-sensor handle.
-    #[inline]
-    pub fn bus_mut(&mut self) -> &mut BUS {
-        &mut self.bus
-    }
-
-    /// Returns shared access to the owned rotor-sensor handle.
-    #[inline]
-    pub const fn rotor(&self) -> &ROTOR {
-        &self.rotor
-    }
-
-    /// Returns mutable access to the owned rotor-sensor handle.
-    #[inline]
-    pub fn rotor_mut(&mut self) -> &mut ROTOR {
-        &mut self.rotor
-    }
-
-    /// Returns shared access to the owned temperature-sensor handle.
-    #[inline]
-    pub const fn temp(&self) -> &TEMP {
-        &self.temp
-    }
-
-    /// Returns mutable access to the owned temperature-sensor handle.
-    #[inline]
-    pub fn temp_mut(&mut self) -> &mut TEMP {
-        &mut self.temp
-    }
-
-    /// Splits the system back into owned parts.
-    #[inline]
-    pub fn into_parts(self) -> (PWM, CURRENT, BUS, ROTOR, TEMP, MOD) {
-        (
-            self.pwm,
-            self.current,
-            self.bus,
-            self.rotor,
-            self.temp,
-            self.modulator,
-        )
-    }
-
-    /// Returns the current or next calibration phase, if the campaign is not complete.
-    #[inline]
-    pub fn phase(&self) -> Option<MotorCalibrationPhase> {
-        self.active_routine
-            .as_ref()
-            .map(MotorCalibrationPhase::from)
-            .or_else(|| self.next_phase())
-    }
-
-    /// Drives neutral PWM immediately.
-    pub fn set_neutral(
-        &mut self,
+    pub fn split(
+        &self,
     ) -> Result<
-        (),
-        MotorCalibrationSystemError<
+        (
+            MotorCalibrationHandle<'_>,
+            MotorCalibrationTicker<'_, PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>,
+        ),
+        CapabilitySplitError,
+    > {
+        if !read_status(&self.shared).active {
+            return Err(CapabilitySplitError::Inactive);
+        }
+        if self.split_taken.replace(true) {
+            return Err(CapabilitySplitError::AlreadySplit);
+        }
+        Ok((
+            MotorCalibrationHandle {
+                shared: &self.shared,
+            },
+            MotorCalibrationTicker {
+                inner: &self.inner,
+                shared: &self.shared,
+            },
+        ))
+    }
+
+    #[cfg(test)]
+    fn tick_active_routine_for_test(
+        &self,
+        routine: &mut MotorCalibrationRoutine,
+        dt_seconds: f32,
+    ) -> Result<
+        Option<PartialMotorCalibration>,
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -348,17 +487,72 @@ where
             TEMP::Error,
         >,
     > {
-        self.pwm
-            .set_neutral()
-            .map_err(MotorCalibrationSystemError::Pwm)
+        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
+            .ok_or_else(|| {
+                if read_status(&self.shared).active {
+                    MotorCalibrationRuntimeError::Busy
+                } else {
+                    MotorCalibrationRuntimeError::Inactive
+                }
+            })?;
+        let result = inner.tick_active_routine(routine, dt_seconds);
+        critical_section::with(|cs| {
+            *self.inner.borrow(cs).borrow_mut() = Some(inner);
+        });
+        result
     }
+}
 
+impl<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>
+    InnerMotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>
+where
+    PWM: PhasePwm,
+    CURRENT: CurrentSampler,
+    BUS: BusVoltageSensor,
+    ROTOR: RotorSensor,
+    TEMP: TemperatureSensor,
+    MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
+{
     /// Advances the request-driven motor calibration campaign by one fixed-period step.
     pub fn tick(
         &mut self,
+        shared: &Mutex<RefCell<SharedStatus<MotorCalibrationStatus>>>,
     ) -> Result<
-        Option<MotorCalibrationResult>,
-        MotorCalibrationSystemError<
+        (),
+        MotorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
+    > {
+        let result = self.tick_inner();
+        match result {
+            Ok(_) => {
+                self.publish_status(shared, false);
+                Ok(())
+            }
+            Err(error) => {
+                self.publish_status(shared, true);
+                Err(error)
+            }
+        }
+    }
+
+    fn phase(&self) -> Option<MotorCalibrationPhase> {
+        self.active_routine
+            .as_ref()
+            .map(MotorCalibrationPhase::from)
+            .or_else(|| self.next_phase())
+    }
+
+    fn tick_inner(
+        &mut self,
+    ) -> Result<
+        Option<()>,
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -369,12 +563,11 @@ where
         if self.active_routine.is_none() {
             self.active_routine = self
                 .build_next_routine()
-                .map_err(MotorCalibrationSystemError::Calibration)?;
+                .map_err(MotorCalibrationRuntimeError::Calibration)?;
             if self.active_routine.is_none() {
-                return Ok(Some(
-                    self.resolve_calibration()
-                        .map_err(MotorCalibrationSystemError::Calibration)?,
-                ));
+                self.resolve_calibration()
+                    .map_err(MotorCalibrationRuntimeError::Calibration)?;
+                return Ok(Some(()));
             }
         }
 
@@ -386,13 +579,12 @@ where
             self.merge_partial(delta);
             if self
                 .build_next_routine()
-                .map_err(MotorCalibrationSystemError::Calibration)?
+                .map_err(MotorCalibrationRuntimeError::Calibration)?
                 .is_none()
             {
-                return Ok(Some(
-                    self.resolve_calibration()
-                        .map_err(MotorCalibrationSystemError::Calibration)?,
-                ));
+                self.resolve_calibration()
+                    .map_err(MotorCalibrationRuntimeError::Calibration)?;
+                return Ok(Some(()));
             }
         } else {
             self.active_routine = Some(routine);
@@ -401,13 +593,45 @@ where
         Ok(None)
     }
 
+    fn publish_status(
+        &self,
+        shared: &Mutex<RefCell<SharedStatus<MotorCalibrationStatus>>>,
+        fault_latched: bool,
+    ) {
+        write_status(shared, |status| {
+            *status = MotorCalibrationStatus {
+                active: true,
+                phase: self.phase(),
+                result: self.resolve_calibration().ok(),
+                fault_latched,
+            };
+        });
+    }
+
+    fn set_neutral(
+        &mut self,
+    ) -> Result<
+        (),
+        MotorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
+    > {
+        self.pwm
+            .set_neutral()
+            .map_err(MotorCalibrationRuntimeError::Pwm)
+    }
+
     fn tick_active_routine(
         &mut self,
         routine: &mut MotorCalibrationRoutine,
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -434,7 +658,10 @@ where
     fn build_next_routine(&self) -> Result<Option<MotorCalibrationRoutine>, CalibrationError> {
         let limits = self.limits;
 
-        if self.pole_pairs.is_none() || self.electrical_angle_offset.is_none() {
+        if self.pole_pairs.is_none()
+            || self.electrical_direction.is_none()
+            || self.electrical_angle_offset.is_none()
+        {
             let mut cfg = fluxkit_core::PolePairsAndOffsetCalibrationConfig::default_for_sweep();
             cfg.align_voltage_mag = min_volts(cfg.align_voltage_mag, limits.max_align_voltage_mag);
             cfg.sweep_electrical_velocity = clamp_abs_rad_per_sec(
@@ -480,6 +707,9 @@ where
             cfg.pole_pairs = self
                 .pole_pairs
                 .expect("electrical mapping resolved before flux linkage");
+            cfg.electrical_direction = self
+                .electrical_direction
+                .expect("electrical mapping resolved before flux linkage");
             cfg.electrical_angle_offset = self
                 .electrical_angle_offset
                 .expect("electrical mapping resolved before flux linkage");
@@ -497,7 +727,10 @@ where
     }
 
     fn next_phase(&self) -> Option<MotorCalibrationPhase> {
-        if self.pole_pairs.is_none() || self.electrical_angle_offset.is_none() {
+        if self.pole_pairs.is_none()
+            || self.electrical_direction.is_none()
+            || self.electrical_angle_offset.is_none()
+        {
             return Some(MotorCalibrationPhase::PolePairsAndOffset);
         }
         if self.phase_resistance_ohm_ref.is_none() {
@@ -516,6 +749,11 @@ where
         if self.pole_pairs.is_none() {
             if let Some(value) = delta.pole_pairs {
                 self.pole_pairs = Some(value);
+            }
+        }
+        if self.electrical_direction.is_none() {
+            if let Some(value) = delta.electrical_direction {
+                self.electrical_direction = Some(value);
             }
         }
         if self.electrical_angle_offset.is_none() {
@@ -545,6 +783,9 @@ where
             pole_pairs: self
                 .pole_pairs
                 .ok_or(CalibrationError::InvalidConfiguration)?,
+            electrical_direction: self
+                .electrical_direction
+                .ok_or(CalibrationError::InvalidConfiguration)?,
             electrical_angle_offset: self
                 .electrical_angle_offset
                 .ok_or(CalibrationError::InvalidConfiguration)?,
@@ -566,7 +807,7 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -576,8 +817,8 @@ where
     > {
         self.tick_alpha_beta_routine(calibrator, dt_seconds, false, |calibrator, rotor, _, dt| {
             calibrator.tick(PolePairsAndOffsetCalibrationInput {
-                mechanical_angle: rotor.mechanical_angle,
-                mechanical_velocity: rotor.mechanical_velocity,
+                mechanical_angle: rotor.wrapped(),
+                mechanical_velocity: rotor.velocity(),
                 dt_seconds: dt,
             })
         })
@@ -589,7 +830,7 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -600,7 +841,7 @@ where
         let winding_temperature_c = self
             .temp
             .sample_temperature_c()
-            .map_err(MotorCalibrationSystemError::Temp)?;
+            .map_err(MotorCalibrationRuntimeError::Temp)?;
         self.tick_alpha_beta_routine(
             calibrator,
             dt_seconds,
@@ -608,7 +849,7 @@ where
             |calibrator, rotor, current, dt| {
                 calibrator.tick(PhaseResistanceCalibrationInput {
                     phase_currents: current.expect("phase current required").currents,
-                    mechanical_velocity: rotor.mechanical_velocity,
+                    mechanical_velocity: rotor.velocity(),
                     winding_temperature_c,
                     dt_seconds: dt,
                 })
@@ -622,7 +863,7 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -637,7 +878,7 @@ where
             |calibrator, rotor, current, dt| {
                 calibrator.tick(PhaseInductanceCalibrationInput {
                     phase_currents: current.expect("phase current required").currents,
-                    mechanical_velocity: rotor.mechanical_velocity,
+                    mechanical_velocity: rotor.velocity(),
                     dt_seconds: dt,
                 })
             },
@@ -650,7 +891,7 @@ where
         dt_seconds: f32,
     ) -> Result<
         Option<PartialMotorCalibration>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -665,8 +906,8 @@ where
             |calibrator, rotor, current, dt| {
                 calibrator.tick(FluxLinkageCalibrationInput {
                     phase_currents: current.expect("phase current required").currents,
-                    mechanical_angle: rotor.mechanical_angle.into(),
-                    mechanical_velocity: rotor.mechanical_velocity,
+                    mechanical_angle: rotor.unwrapped(),
+                    mechanical_velocity: rotor.velocity(),
                     dt_seconds: dt,
                 })
             },
@@ -681,7 +922,7 @@ where
         build_command: Build,
     ) -> Result<
         Option<R>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -691,7 +932,12 @@ where
     >
     where
         Cal: RoutineState<R>,
-        Build: FnOnce(&mut Cal, RotorReading, Option<PhaseCurrentSample>, f32) -> AlphaBeta<Volts>,
+        Build: FnOnce(
+            &mut Cal,
+            MechanicalMotionEstimate,
+            Option<PhaseCurrentSample>,
+            f32,
+        ) -> AlphaBeta<Volts>,
     {
         if let Some(result) = self.preflight(calibrator)? {
             return Ok(result);
@@ -700,18 +946,25 @@ where
         let bus_voltage = self
             .bus
             .sample_bus_voltage()
-            .map_err(MotorCalibrationSystemError::Bus)?;
+            .map_err(MotorCalibrationRuntimeError::Bus)?;
         let rotor = self
             .rotor
             .read_rotor()
-            .map_err(MotorCalibrationSystemError::Rotor)?;
+            .map_err(MotorCalibrationRuntimeError::Rotor)?;
+        let rotor_motion = self.rotor_estimator.update(
+            MechanicalMotionSample {
+                wrapped_value: rotor.mechanical_angle,
+                measured_rate: rotor.mechanical_velocity,
+            },
+            dt_seconds,
+        );
         let current = if needs_current {
             Some(self.sample_valid_current()?)
         } else {
             None
         };
 
-        let command = build_command(calibrator, rotor, current, dt_seconds);
+        let command = build_command(calibrator, rotor_motion, current, dt_seconds);
         self.apply_alpha_beta_command(command, bus_voltage)?;
         self.postflight(calibrator)
     }
@@ -720,7 +973,7 @@ where
         &mut self,
     ) -> Result<
         PhaseCurrentSample,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -731,10 +984,10 @@ where
         let current = self
             .current
             .sample_phase_currents()
-            .map_err(MotorCalibrationSystemError::Current)?;
+            .map_err(MotorCalibrationRuntimeError::Current)?;
         if current.validity == CurrentSampleValidity::Invalid {
             self.set_neutral()?;
-            return Err(MotorCalibrationSystemError::InvalidCurrentSample);
+            return Err(MotorCalibrationRuntimeError::InvalidCurrentSample);
         }
         Ok(current)
     }
@@ -745,7 +998,7 @@ where
         bus_voltage: Volts,
     ) -> Result<
         (),
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -762,7 +1015,7 @@ where
             .modulate(command.map(|volts| volts.get()), bus_voltage);
         self.pwm
             .set_phase_duty(modulation.duty)
-            .map_err(MotorCalibrationSystemError::Pwm)
+            .map_err(MotorCalibrationRuntimeError::Pwm)
     }
 
     fn preflight<R, Cal>(
@@ -770,7 +1023,7 @@ where
         calibrator: &Cal,
     ) -> Result<
         Option<Option<R>>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -787,7 +1040,7 @@ where
         }
         if let Some(error) = calibrator.error() {
             self.set_neutral()?;
-            return Err(MotorCalibrationSystemError::Calibration(error));
+            return Err(MotorCalibrationRuntimeError::Calibration(error));
         }
         Ok(None)
     }
@@ -797,7 +1050,7 @@ where
         calibrator: &Cal,
     ) -> Result<
         Option<R>,
-        MotorCalibrationSystemError<
+        MotorCalibrationRuntimeError<
             PWM::Error,
             CURRENT::Error,
             BUS::Error,
@@ -813,11 +1066,70 @@ where
             Ok(Some(result))
         } else if let Some(error) = calibrator.error() {
             self.set_neutral()?;
-            Err(MotorCalibrationSystemError::Calibration(error))
+            Err(MotorCalibrationRuntimeError::Calibration(error))
         } else {
             Ok(None)
         }
     }
+}
+
+impl<'a, PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>
+    MotorCalibrationTicker<'a, PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>
+where
+    PWM: PhasePwm,
+    CURRENT: CurrentSampler,
+    BUS: BusVoltageSensor,
+    ROTOR: RotorSensor,
+    TEMP: TemperatureSensor,
+    MOD: Modulator,
+    RotorEst: MechanicalMotionEstimator,
+{
+    /// Advances the request-driven motor calibration campaign by one fixed-period step.
+    pub fn tick(
+        &self,
+    ) -> Result<
+        (),
+        MotorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
+    > {
+        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
+            .ok_or_else(|| {
+                if read_status(self.shared).active {
+                    MotorCalibrationRuntimeError::Busy
+                } else {
+                    MotorCalibrationRuntimeError::Inactive
+                }
+            })?;
+        let result = inner.tick(self.shared);
+        critical_section::with(|cs| {
+            *self.inner.borrow(cs).borrow_mut() = Some(inner);
+        });
+        result
+    }
+}
+
+fn next_phase_for_request(request: MotorCalibrationRequest) -> Option<MotorCalibrationPhase> {
+    if request.pole_pairs.is_none()
+        || request.electrical_direction.is_none()
+        || request.electrical_angle_offset.is_none()
+    {
+        return Some(MotorCalibrationPhase::PolePairsAndOffset);
+    }
+    if request.phase_resistance_ohm_ref.is_none() {
+        return Some(MotorCalibrationPhase::PhaseResistance);
+    }
+    if request.phase_inductance_h.is_none() {
+        return Some(MotorCalibrationPhase::PhaseInductance);
+    }
+    if request.flux_linkage_weber.is_none() {
+        return Some(MotorCalibrationPhase::FluxLinkage);
+    }
+    None
 }
 
 #[inline]
@@ -845,7 +1157,8 @@ fn validate_limits(limits: MotorCalibrationLimits) -> bool {
 
 #[inline]
 fn validate_request(request: MotorCalibrationRequest) -> bool {
-    request.pole_pairs.is_some() == request.electrical_angle_offset.is_some()
+    request.pole_pairs.is_some() == request.electrical_direction.is_some()
+        && request.pole_pairs.is_some() == request.electrical_angle_offset.is_some()
 }
 
 #[inline]
@@ -881,12 +1194,13 @@ mod tests {
         RotorReading, RotorSensor, TemperatureSensor, centered_phase_duty,
     };
     use fluxkit_math::{
+        estimation::PassThroughEstimator,
         frame::Abc,
         modulation::Svpwm,
         units::{Amps, Duty, RadPerSec, Volts},
     };
 
-    use super::{MotorCalibrationSystem, MotorCalibrationSystemError};
+    use super::{MotorCalibrationRuntime, MotorCalibrationRuntimeError};
 
     #[derive(Debug)]
     struct FakePwm {
@@ -1005,23 +1319,26 @@ mod tests {
         bus: FakeBusSensor,
         rotor: FakeRotor,
         temp: FakeTempSensor,
-    ) -> MotorCalibrationSystem<
+    ) -> MotorCalibrationRuntime<
         FakePwm,
         FakeCurrentSensor,
         FakeBusSensor,
         FakeRotor,
         FakeTempSensor,
         Svpwm,
+        PassThroughEstimator,
     > {
-        MotorCalibrationSystem::new(
+        MotorCalibrationRuntime::new(
             pwm,
             current,
             bus,
             rotor,
             temp,
             Svpwm,
+            PassThroughEstimator::new(),
             super::MotorCalibrationRequest {
                 pole_pairs: Some(7),
+                electrical_direction: Some(fluxkit_math::ElectricalDirection::Positive),
                 electrical_angle_offset: Some(fluxkit_math::ElectricalAngle::new(0.0)),
                 phase_resistance_ohm_ref: Some(fluxkit_math::units::Ohms::new(0.12)),
                 phase_inductance_h: Some(fluxkit_math::units::Henries::new(30.0e-6)),
@@ -1042,7 +1359,7 @@ mod tests {
     fn resistance_wrapper_rejects_invalid_current_sample() {
         let (pwm, mut current, bus, rotor, temp) = hardware();
         current.sample.validity = CurrentSampleValidity::Invalid;
-        let mut system = system(pwm, current, bus, rotor, temp);
+        let system = system(pwm, current, bus, rotor, temp);
         let calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
             settle_time_seconds: 0.01,
             sample_time_seconds: 0.01,
@@ -1052,12 +1369,13 @@ mod tests {
         .unwrap();
 
         let mut routine = MotorCalibrationRoutine::PhaseResistance(calibrator);
-        let result = system.tick_active_routine(&mut routine, 0.005);
+        let result = system.tick_active_routine_for_test(&mut routine, 0.005);
         assert!(matches!(
             result,
-            Err(MotorCalibrationSystemError::InvalidCurrentSample)
+            Err(MotorCalibrationRuntimeError::InvalidCurrentSample)
         ));
-        assert_eq!(system.pwm().duty, centered_phase_duty());
+        let parts = system.try_into_parts().unwrap();
+        assert_eq!(parts.pwm.duty, centered_phase_duty());
         let MotorCalibrationRoutine::PhaseResistance(calibrator) = routine else {
             unreachable!();
         };
@@ -1068,15 +1386,17 @@ mod tests {
     #[test]
     fn phase_reports_next_unresolved_step() {
         let (pwm, current, bus, rotor, temp) = hardware();
-        let mut system = MotorCalibrationSystem::new(
+        let system = MotorCalibrationRuntime::new(
             pwm,
             current,
             bus,
             rotor,
             temp,
             Svpwm,
+            PassThroughEstimator::new(),
             super::MotorCalibrationRequest {
                 pole_pairs: None,
+                electrical_direction: None,
                 electrical_angle_offset: None,
                 phase_resistance_ohm_ref: Some(fluxkit_math::units::Ohms::new(0.12)),
                 phase_inductance_h: Some(fluxkit_math::units::Henries::new(30.0e-6)),
@@ -1092,13 +1412,14 @@ mod tests {
         )
         .unwrap();
 
+        let (handle, ticker) = system.split().expect("calibration should split once");
         assert_eq!(
-            system.phase(),
+            handle.status().phase,
             Some(super::MotorCalibrationPhase::PolePairsAndOffset)
         );
-        let _ = system.tick().unwrap();
+        ticker.tick().unwrap();
         assert_eq!(
-            system.phase(),
+            handle.status().phase,
             Some(super::MotorCalibrationPhase::PolePairsAndOffset)
         );
     }
@@ -1107,7 +1428,7 @@ mod tests {
     fn inductance_wrapper_rejects_invalid_current_sample() {
         let (pwm, mut current, bus, rotor, temp) = hardware();
         current.sample.validity = CurrentSampleValidity::Invalid;
-        let mut system = system(pwm, current, bus, rotor, temp);
+        let system = system(pwm, current, bus, rotor, temp);
         let calibrator = PhaseInductanceCalibrator::new(PhaseInductanceCalibrationConfig {
             phase_resistance_ohm: fluxkit_math::units::Ohms::new(0.12),
             settle_time_seconds: 0.01,
@@ -1118,12 +1439,13 @@ mod tests {
         .unwrap();
 
         let mut routine = MotorCalibrationRoutine::PhaseInductance(calibrator);
-        let result = system.tick_active_routine(&mut routine, 0.005);
+        let result = system.tick_active_routine_for_test(&mut routine, 0.005);
         assert!(matches!(
             result,
-            Err(MotorCalibrationSystemError::InvalidCurrentSample)
+            Err(MotorCalibrationRuntimeError::InvalidCurrentSample)
         ));
-        assert_eq!(system.pwm().duty, centered_phase_duty());
+        let parts = system.try_into_parts().unwrap();
+        assert_eq!(parts.pwm.duty, centered_phase_duty());
         let MotorCalibrationRoutine::PhaseInductance(calibrator) = routine else {
             unreachable!();
         };
@@ -1135,7 +1457,7 @@ mod tests {
     fn flux_linkage_wrapper_rejects_invalid_current_sample() {
         let (pwm, mut current, bus, rotor, temp) = hardware();
         current.sample.validity = CurrentSampleValidity::Invalid;
-        let mut system = system(pwm, current, bus, rotor, temp);
+        let system = system(pwm, current, bus, rotor, temp);
         let calibrator = FluxLinkageCalibrator::new(FluxLinkageCalibrationConfig {
             phase_resistance_ohm: fluxkit_math::units::Ohms::new(0.12),
             phase_inductance_h: fluxkit_math::units::Henries::new(30.0e-6),
@@ -1149,16 +1471,34 @@ mod tests {
         .unwrap();
 
         let mut routine = MotorCalibrationRoutine::FluxLinkage(calibrator);
-        let result = system.tick_active_routine(&mut routine, 0.005);
+        let result = system.tick_active_routine_for_test(&mut routine, 0.005);
         assert!(matches!(
             result,
-            Err(MotorCalibrationSystemError::InvalidCurrentSample)
+            Err(MotorCalibrationRuntimeError::InvalidCurrentSample)
         ));
-        assert_eq!(system.pwm().duty, centered_phase_duty());
+        let parts = system.try_into_parts().unwrap();
+        assert_eq!(parts.pwm.duty, centered_phase_duty());
         let MotorCalibrationRoutine::FluxLinkage(calibrator) = routine else {
             unreachable!();
         };
         assert_eq!(calibrator.result(), None);
         assert_eq!(calibrator.error(), None);
+    }
+
+    #[test]
+    fn extracted_calibration_marks_handles_and_tickers_inactive() {
+        let (pwm, current, bus, rotor, temp) = hardware();
+        let system = system(pwm, current, bus, rotor, temp);
+        let (handle, ticker) = system.split().expect("calibration should split once");
+
+        let _parts = system
+            .try_into_parts()
+            .expect("calibration parts should be available");
+
+        assert!(!handle.status().active);
+        assert!(matches!(
+            ticker.tick(),
+            Err(MotorCalibrationRuntimeError::Inactive)
+        ));
     }
 }

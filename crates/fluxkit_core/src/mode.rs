@@ -2,11 +2,10 @@
 
 /// Active control mode for the motor controller.
 ///
-/// Scheduling contract:
+/// Each controller cycle runs:
 ///
-/// - `fast_tick()` always owns the electrical current loop and modulation
-/// - `medium_tick()` owns torque, velocity, and position supervisory updates
-/// - `slow_tick()` is currently a reserved hook only
+/// - the electrical current loop and modulation
+/// - the supervisory torque, velocity, or position update for the next cycle
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -15,12 +14,15 @@ pub enum ControlMode {
     Disabled,
     /// Closed-loop `d/q` current control.
     Current,
-    /// Closed-loop torque request mapped into the `q`-axis current target during `medium_tick()`.
+    /// Closed-loop torque request mapped into the `q`-axis current target.
     Torque,
-    /// Closed-loop velocity control generating a `q`-axis current target during `medium_tick()`.
+    /// Closed-loop MIT impedance command with explicit output-side position,
+    /// velocity, stiffness, damping, and torque feedforward.
+    Mit,
+    /// Closed-loop velocity control generating a `q`-axis current target.
     Velocity,
     /// Closed-loop position control generating a velocity target and then a `q`-axis current
-    /// target in the same `medium_tick()`.
+    /// target in the same controller cycle.
     Position,
     /// Direct open-loop `d/q` voltage command.
     OpenLoopVoltage,

@@ -11,6 +11,8 @@ pub enum CalibrationError {
     InvalidConfiguration,
     /// A sampled input frame is invalid.
     InvalidInput,
+    /// Observed motion direction contradicted the commanded calibration direction.
+    OppositeDirection,
     /// The observed motion did not support a reliable estimate.
     IndeterminateEstimate,
     /// The rotor never settled within the configured timeout.
@@ -22,6 +24,9 @@ impl fmt::Display for CalibrationError {
         match self {
             Self::InvalidConfiguration => f.write_str("invalid calibration configuration"),
             Self::InvalidInput => f.write_str("invalid calibration input"),
+            Self::OppositeDirection => {
+                f.write_str("calibration observed motion opposite the commanded direction")
+            }
             Self::IndeterminateEstimate => {
                 f.write_str("calibration data did not support a reliable estimate")
             }

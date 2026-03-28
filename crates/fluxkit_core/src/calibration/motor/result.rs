@@ -1,7 +1,7 @@
 //! Persistable motor-side calibration record.
 
 use fluxkit_math::{
-    ElectricalAngle,
+    ElectricalAngle, ElectricalDirection,
     units::{Henries, Ohms, Webers},
 };
 
@@ -17,6 +17,8 @@ use crate::{calibration::motor, params::MotorParams};
 pub struct MotorCalibration {
     /// Estimated electrical pole-pair count.
     pub pole_pairs: Option<u8>,
+    /// Electrical mapping direction between positive mechanical and electrical motion.
+    pub electrical_direction: Option<ElectricalDirection>,
     /// Electrical zero offset after mechanical-to-electrical conversion.
     pub electrical_angle_offset: Option<ElectricalAngle>,
     /// Estimated phase resistance normalized to `25°C`.
@@ -33,6 +35,7 @@ impl MotorCalibration {
     pub const fn empty() -> Self {
         Self {
             pole_pairs: None,
+            electrical_direction: None,
             electrical_angle_offset: None,
             phase_resistance_ohm_ref: None,
             phase_inductance_h: None,
@@ -48,6 +51,11 @@ impl MotorCalibration {
                 newer.pole_pairs
             } else {
                 self.pole_pairs
+            },
+            electrical_direction: if newer.electrical_direction.is_some() {
+                newer.electrical_direction
+            } else {
+                self.electrical_direction
             },
             electrical_angle_offset: if newer.electrical_angle_offset.is_some() {
                 newer.electrical_angle_offset
@@ -76,6 +84,9 @@ impl MotorCalibration {
     pub fn apply_to_motor_params(&self, motor: &mut MotorParams) {
         if let Some(pole_pairs) = self.pole_pairs {
             motor.pole_pairs = pole_pairs;
+        }
+        if let Some(direction) = self.electrical_direction {
+            motor.electrical_direction = direction;
         }
         if let Some(offset) = self.electrical_angle_offset {
             motor.electrical_angle_offset = offset;
@@ -107,6 +118,7 @@ impl From<motor::PolePairsAndOffsetCalibrationResult> for MotorCalibration {
     fn from(result: motor::PolePairsAndOffsetCalibrationResult) -> Self {
         Self {
             pole_pairs: Some(result.pole_pairs),
+            electrical_direction: Some(result.electrical_direction),
             electrical_angle_offset: Some(result.electrical_angle_offset),
             ..Self::empty()
         }
@@ -146,7 +158,7 @@ impl From<motor::FluxLinkageCalibrationResult> for MotorCalibration {
 #[cfg(test)]
 mod tests {
     use fluxkit_math::{
-        ElectricalAngle,
+        ElectricalAngle, ElectricalDirection,
         units::{Amps, Henries, Ohms, Webers},
     };
 
@@ -160,10 +172,12 @@ mod tests {
     fn merge_prefers_newer_populated_fields() {
         let older = MotorCalibration {
             pole_pairs: Some(7),
+            electrical_direction: Some(ElectricalDirection::Positive),
             phase_resistance_ohm_ref: Some(Ohms::new(0.2)),
             ..MotorCalibration::empty()
         };
         let newer = MotorCalibration {
+            electrical_direction: Some(ElectricalDirection::Negative),
             phase_resistance_ohm_ref: Some(Ohms::new(0.12)),
             electrical_angle_offset: Some(ElectricalAngle::new(0.4)),
             ..MotorCalibration::empty()
@@ -171,6 +185,10 @@ mod tests {
 
         let merged = older.merge(newer);
         assert_eq!(merged.pole_pairs, Some(7));
+        assert_eq!(
+            merged.electrical_direction,
+            Some(ElectricalDirection::Negative)
+        );
         assert_eq!(merged.phase_resistance_ohm_ref, Some(Ohms::new(0.12)));
         assert_eq!(
             merged.electrical_angle_offset,
@@ -187,16 +205,19 @@ mod tests {
                 d_inductance_h: fluxkit_math::units::Henries::new(0.001),
                 q_inductance_h: fluxkit_math::units::Henries::new(0.001),
                 flux_linkage_weber: Webers::new(0.001),
+                electrical_direction: ElectricalDirection::Positive,
                 electrical_angle_offset: ElectricalAngle::new(0.0),
             },
             MotorLimits {
                 max_phase_current: Amps::new(10.0),
                 max_mech_speed: None,
+                max_winding_temperature_c: None,
             },
         );
 
         MotorCalibration {
             pole_pairs: Some(7),
+            electrical_direction: Some(ElectricalDirection::Negative),
             electrical_angle_offset: Some(ElectricalAngle::new(0.3)),
             phase_resistance_ohm_ref: Some(Ohms::new(0.12)),
             ..MotorCalibration::empty()
@@ -204,6 +225,7 @@ mod tests {
         .apply_to_motor_params(&mut params);
 
         assert_eq!(params.pole_pairs, 7);
+        assert_eq!(params.electrical_direction, ElectricalDirection::Negative);
         assert_eq!(params.electrical_angle_offset, ElectricalAngle::new(0.3));
         assert_eq!(params.phase_resistance_ohm_ref, Ohms::new(0.12));
     }

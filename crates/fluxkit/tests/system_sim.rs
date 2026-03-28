@@ -4,18 +4,15 @@ use std::{
 };
 
 use fluxkit::{
-    ActuatorCompensationConfig, ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode,
-    CurrentLoopConfig, InverterParams, MotorCommand, MotorController, MotorHardware, MotorLimits,
-    MotorModel, MotorParams, MotorSystem, centered_phase_duty,
-    hal::{
-        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
-    },
-    math::{
-        ContinuousMechanicalAngle, inverse_clarke, inverse_park,
-        units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
-    },
+    Abc, ActuatorCompensationConfig, ActuatorLimits, ActuatorModel, ActuatorParams,
+    BusVoltageSensor, ContinuousMechanicalAngle, CurrentLoopConfig, CurrentSampleValidity,
+    CurrentSampler, ElectricalDirection, InverterParams, MotorCommand, MotorLimits, MotorModel,
+    MotorParams, MotorRuntime, OutputReading, OutputSensor, PhaseCurrentSample, PhasePwm,
+    RotorReading, RotorSensor, Svpwm, TemperatureSensor,
+    units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
 };
+use fluxkit_hal::centered_phase_duty;
+use fluxkit_math::{inverse_clarke, inverse_park};
 use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, ThermalPlantParams};
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
@@ -30,11 +27,13 @@ fn motor_params() -> MotorParams {
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
+            electrical_direction: ElectricalDirection::Positive,
             electrical_angle_offset: fluxkit::ElectricalAngle::new(0.0),
         },
         MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         },
     )
 }
@@ -90,6 +89,7 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -107,17 +107,18 @@ struct SimHarness {
     plant: PmsmModel,
     bus_voltage: Volts,
     load_torque: NewtonMeters,
-    last_duty: fluxkit::math::frame::Abc<Duty>,
+    last_duty: Abc<Duty>,
 }
 
 type SharedHarness = Arc<Mutex<SimHarness>>;
 
-fn phase_currents(shared: &SharedHarness) -> fluxkit::math::frame::Abc<Amps> {
+fn phase_currents(shared: &SharedHarness) -> Abc<Amps> {
     let harness = shared.lock().unwrap();
     let state = *harness.plant.state();
-    let electrical_angle = fluxkit::math::angle::mechanical_to_electrical(
+    let electrical_angle = fluxkit::angle::mechanical_to_electrical_with_direction(
         state.mechanical_angle.wrapped().into(),
         harness.plant.params().pole_pairs as u32,
+        harness.plant.params().electrical_direction,
     );
     inverse_clarke(inverse_park(
         state.current_dq.map(|current| current.get()),
@@ -143,7 +144,7 @@ impl PhasePwm for SimPwm {
     }
 
     fn set_duty(&mut self, a: Duty, b: Duty, c: Duty) -> Result<(), Self::Error> {
-        let duty = fluxkit::math::frame::Abc::new(a, b, c);
+        let duty = Abc::new(a, b, c);
         let mut harness = self.shared.lock().unwrap();
         harness.last_duty = duty;
         let bus_voltage = harness.bus_voltage;
@@ -238,7 +239,7 @@ impl TemperatureSensor for SimTemp {
 }
 
 #[test]
-fn motor_system_closes_current_loop_against_simulator() {
+fn motor_runtime_closes_current_loop_against_simulator() {
     let shared = Arc::new(Mutex::new(SimHarness {
         plant: PmsmModel::new_zeroed(plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
@@ -246,55 +247,48 @@ fn motor_system_closes_current_loop_against_simulator() {
         last_duty: centered_phase_duty(),
     }));
 
-    let hardware = MotorHardware {
-        pwm: SimPwm {
+    let runtime = MotorRuntime::new(
+        SimPwm {
             shared: Arc::clone(&shared),
         },
-        current: SimCurrent {
+        SimCurrent {
             shared: Arc::clone(&shared),
         },
-        bus: SimBus {
+        SimBus {
             shared: Arc::clone(&shared),
         },
-        rotor: SimRotor {
+        SimRotor {
             shared: Arc::clone(&shared),
         },
-        output: SimOutput {
+        SimOutput {
             shared: Arc::clone(&shared),
         },
-        temp: SimTemp {
+        SimTemp {
             shared: Arc::clone(&shared),
         },
-    };
-    let controller = MotorController::new(
-        motor_params(),
-        inverter_params(),
-        actuator_params(),
-        current_loop_config(),
-    );
-    let mut system = MotorSystem::new(
-        hardware,
-        controller,
+        fluxkit::MotorRuntimeParams::new(
+            motor_params(),
+            inverter_params(),
+            actuator_params(),
+            current_loop_config(),
+            FAST_DT_SECONDS,
+        ),
+        Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-        FAST_DT_SECONDS,
     );
-    {
-        let handle = system.handle();
-        handle.set_command(MotorCommand {
-            mode: ControlMode::Current,
-            iq_target: Amps::new(3.0),
-            ..MotorCommand::default()
-        });
-        handle.arm();
-    }
-
+    let (handle, ticker) = runtime.split().expect("runtime should split once");
+    handle.set_command(MotorCommand::Current(fluxkit::Dq::new(
+        Amps::ZERO,
+        Amps::new(3.0),
+    )));
+    handle.arm();
     for _ in 0..4_000 {
-        let _output = system.tick().unwrap();
-        assert_eq!(system.handle().status().controller.active_error, None);
+        ticker.tick().unwrap();
+        assert_eq!(handle.status().controller.active_error, None);
     }
 
-    let status = system.handle().status().controller;
+    let status = handle.status().controller;
     assert!((status.last_measured_idq.q.get() - 3.0).abs() < 0.05);
     assert!(
         shared
@@ -309,7 +303,7 @@ fn motor_system_closes_current_loop_against_simulator() {
 }
 
 #[test]
-fn motor_system_supports_scoped_irq_thread_runtime() {
+fn motor_runtime_supports_scoped_irq_thread_usage() {
     let shared = Arc::new(Mutex::new(SimHarness {
         plant: PmsmModel::new_zeroed(plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
@@ -317,53 +311,50 @@ fn motor_system_supports_scoped_irq_thread_runtime() {
         last_duty: centered_phase_duty(),
     }));
 
-    let hardware = MotorHardware {
-        pwm: SimPwm {
+    let runtime = MotorRuntime::new(
+        SimPwm {
             shared: Arc::clone(&shared),
         },
-        current: SimCurrent {
+        SimCurrent {
             shared: Arc::clone(&shared),
         },
-        bus: SimBus {
+        SimBus {
             shared: Arc::clone(&shared),
         },
-        rotor: SimRotor {
+        SimRotor {
             shared: Arc::clone(&shared),
         },
-        output: SimOutput {
+        SimOutput {
             shared: Arc::clone(&shared),
         },
-        temp: SimTemp {
+        SimTemp {
             shared: Arc::clone(&shared),
         },
-    };
-    let controller = MotorController::new(
-        motor_params(),
-        inverter_params(),
-        actuator_params(),
-        current_loop_config(),
-    );
-    let mut system = MotorSystem::new(
-        hardware,
-        controller,
+        fluxkit::MotorRuntimeParams::new(
+            motor_params(),
+            inverter_params(),
+            actuator_params(),
+            current_loop_config(),
+            FAST_DT_SECONDS,
+        ),
+        Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-        FAST_DT_SECONDS,
     );
+    let (handle, ticker) = runtime.split().expect("runtime should split once");
 
     thread::scope(|scope| {
-        let (mut runtime, handle) = system.split();
-
+        let handle_for_thread = &handle;
+        let ticker_for_thread = &ticker;
         let control_thread = scope.spawn(move || {
-            handle.set_command(MotorCommand {
-                mode: ControlMode::Current,
-                iq_target: Amps::new(3.0),
-                ..MotorCommand::default()
-            });
-            handle.arm();
+            handle_for_thread.set_command(MotorCommand::Current(fluxkit::Dq::new(
+                Amps::ZERO,
+                Amps::new(3.0),
+            )));
+            handle_for_thread.arm();
 
             for _ in 0..200 {
-                let status = handle.status();
+                let status = handle_for_thread.status();
                 if status.controller.last_measured_idq.q.get() > 2.5 {
                     break;
                 }
@@ -373,7 +364,7 @@ fn motor_system_supports_scoped_irq_thread_runtime() {
 
         let irq_thread = scope.spawn(move || {
             for _ in 0..4_000 {
-                let _ = runtime.tick().unwrap();
+                ticker_for_thread.tick().unwrap();
             }
         });
 
@@ -381,17 +372,126 @@ fn motor_system_supports_scoped_irq_thread_runtime() {
         irq_thread.join().unwrap();
     });
 
-    let status = system.handle().status().controller;
-    assert_eq!(status.active_error, None);
-    assert!((status.last_measured_idq.q.get() - 3.0).abs() < 0.05);
-    assert!(
-        shared
-            .lock()
-            .unwrap()
-            .plant
-            .state()
-            .mechanical_velocity
-            .get()
-            > 100.0
+    assert_eq!(
+        runtime.split().expect_err("runtime must not split twice"),
+        fluxkit::CapabilitySplitError::AlreadySplit
     );
+    let status = handle.status().controller;
+    assert_eq!(status.active_error, None);
+    assert_eq!(status.state, fluxkit::MotorState::Running);
+    assert!((status.last_measured_idq.q.get() - 3.0).abs() < 0.05);
+    assert!(status.last_rotor_mechanical_velocity.get() > 0.0);
+}
+
+#[test]
+fn motor_runtime_supports_mit_command() {
+    let shared = Arc::new(Mutex::new(SimHarness {
+        plant: PmsmModel::new_zeroed(plant_params()).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+    }));
+
+    let runtime = MotorRuntime::new(
+        SimPwm {
+            shared: Arc::clone(&shared),
+        },
+        SimCurrent {
+            shared: Arc::clone(&shared),
+        },
+        SimBus {
+            shared: Arc::clone(&shared),
+        },
+        SimRotor {
+            shared: Arc::clone(&shared),
+        },
+        SimOutput {
+            shared: Arc::clone(&shared),
+        },
+        SimTemp {
+            shared: Arc::clone(&shared),
+        },
+        fluxkit::MotorRuntimeParams::new(
+            motor_params(),
+            inverter_params(),
+            actuator_params(),
+            current_loop_config(),
+            FAST_DT_SECONDS,
+        ),
+        Svpwm,
+        fluxkit::PassThroughEstimator::new(),
+        fluxkit::PassThroughEstimator::new(),
+    );
+    let (handle, ticker) = runtime.split().expect("runtime should split once");
+    handle.set_command(MotorCommand::Mit {
+        position: ContinuousMechanicalAngle::new(1.0),
+        velocity: RadPerSec::ZERO,
+        kp: 5.0,
+        kd: 0.2,
+        torque_ff: NewtonMeters::ZERO,
+    });
+    handle.arm();
+    for _ in 0..8_000 {
+        ticker.tick().unwrap();
+    }
+
+    let status = handle.status().controller;
+    assert_eq!(status.mode, fluxkit::ControlMode::Mit);
+    assert!(status.last_output_mechanical_angle.get() > 0.05);
+    assert!(status.last_measured_idq.q.get() > 0.0);
+}
+
+#[test]
+fn motor_runtime_velocity_mode_tracks_positive_output_speed_with_negative_direction() {
+    let mut plant = plant_params();
+    plant.electrical_direction = fluxkit_math::ElectricalDirection::Negative;
+    let shared = Arc::new(Mutex::new(SimHarness {
+        plant: PmsmModel::new_zeroed(plant).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+    }));
+
+    let mut motor = motor_params();
+    motor.electrical_direction = ElectricalDirection::Negative;
+    let runtime = MotorRuntime::new(
+        SimPwm {
+            shared: Arc::clone(&shared),
+        },
+        SimCurrent {
+            shared: Arc::clone(&shared),
+        },
+        SimBus {
+            shared: Arc::clone(&shared),
+        },
+        SimRotor {
+            shared: Arc::clone(&shared),
+        },
+        SimOutput {
+            shared: Arc::clone(&shared),
+        },
+        SimTemp {
+            shared: Arc::clone(&shared),
+        },
+        fluxkit::MotorRuntimeParams::new(
+            motor,
+            inverter_params(),
+            actuator_params(),
+            current_loop_config(),
+            FAST_DT_SECONDS,
+        ),
+        Svpwm,
+        fluxkit::PassThroughEstimator::new(),
+        fluxkit::PassThroughEstimator::new(),
+    );
+    let (handle, ticker) = runtime.split().expect("runtime should split once");
+    handle.set_command(MotorCommand::Velocity(RadPerSec::new(10.0)));
+    handle.arm();
+    for _ in 0..8_000 {
+        ticker.tick().unwrap();
+        assert_eq!(handle.status().controller.active_error, None);
+    }
+
+    let status = handle.status().controller;
+    assert!(status.last_output_mechanical_velocity.get() > 5.0);
 }

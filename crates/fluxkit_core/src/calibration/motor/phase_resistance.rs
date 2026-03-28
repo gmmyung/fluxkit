@@ -75,8 +75,8 @@ pub struct PhaseResistanceCalibrationInput {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhaseResistanceCalibrationResult {
-    /// Calibrated phase resistance normalized to
-    /// [`PHASE_RESISTANCE_REFERENCE_TEMP_C`].
+    /// Calibrated phase resistance normalized to the fixed `25°C` reference
+    /// temperature.
     pub phase_resistance_ohm_ref: Ohms,
 }
 

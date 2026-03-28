@@ -10,8 +10,8 @@
 //! `psi ~= (v_q - R i_q - L di_q/dt) / omega_e - L i_d`
 
 use fluxkit_math::{
-    AlphaBeta, ContinuousMechanicalAngle, ElectricalAngle,
-    angle::{mechanical_to_electrical, wrap},
+    AlphaBeta, ContinuousMechanicalAngle, ElectricalAngle, ElectricalDirection,
+    angle::{mechanical_to_electrical_with_direction, mechanical_velocity_to_electrical, wrap},
     frame::Abc,
     transforms::{clarke, park},
     trig::sin_cos,
@@ -31,6 +31,8 @@ pub struct FluxLinkageCalibrationConfig {
     pub phase_inductance_h: fluxkit_math::units::Henries,
     /// Previously calibrated pole-pair count.
     pub pole_pairs: u8,
+    /// Previously calibrated electrical mapping direction.
+    pub electrical_direction: ElectricalDirection,
     /// Previously calibrated electrical zero offset.
     pub electrical_angle_offset: ElectricalAngle,
     /// Fixed alignment voltage before the spin begins.
@@ -60,6 +62,7 @@ impl FluxLinkageCalibrationConfig {
             phase_resistance_ohm: Ohms::new(0.1),
             phase_inductance_h: fluxkit_math::units::Henries::new(30.0e-6),
             pole_pairs: 7,
+            electrical_direction: ElectricalDirection::Positive,
             electrical_angle_offset: ElectricalAngle::new(0.0),
             align_voltage_mag: Volts::new(2.0),
             spin_voltage_mag: Volts::new(2.0),
@@ -217,6 +220,7 @@ impl FluxLinkageCalibrator {
         let electrical_angle = rotor_electrical_angle(
             input.mechanical_angle,
             self.config.pole_pairs as u32,
+            self.config.electrical_direction,
             self.config.electrical_angle_offset,
         );
         let current_ab = clarke(input.phase_currents.map(|current| current.get()));
@@ -226,7 +230,12 @@ impl FluxLinkageCalibrator {
             applied_ab.map(|voltage| voltage.get()),
             electrical_angle.get(),
         );
-        let omega_e = input.mechanical_velocity.get() * self.config.pole_pairs as f32;
+        let omega_e = mechanical_velocity_to_electrical(
+            input.mechanical_velocity,
+            self.config.pole_pairs as u32,
+            self.config.electrical_direction,
+        )
+        .get();
 
         if !omega_e.is_finite() || omega_e.abs() < self.config.min_electrical_velocity.get() {
             self.reset_sampling_state();
@@ -290,10 +299,12 @@ impl FluxLinkageCalibrator {
 fn rotor_electrical_angle(
     mechanical_angle: ContinuousMechanicalAngle,
     pole_pairs: u32,
+    electrical_direction: ElectricalDirection,
     electrical_angle_offset: ElectricalAngle,
 ) -> ElectricalAngle {
     ElectricalAngle::new(
-        mechanical_to_electrical(mechanical_angle, pole_pairs).get()
+        mechanical_to_electrical_with_direction(mechanical_angle, pole_pairs, electrical_direction)
+            .get()
             + electrical_angle_offset.get(),
     )
 }
@@ -343,7 +354,7 @@ fn validate_input(input: FluxLinkageCalibrationInput) -> bool {
 #[cfg(test)]
 mod tests {
     use fluxkit_math::{
-        ElectricalAngle,
+        ElectricalAngle, ElectricalDirection,
         angle::ContinuousMechanicalAngle,
         frame::Abc,
         units::{Amps, Henries, Ohms, RadPerSec},
@@ -360,6 +371,7 @@ mod tests {
             phase_resistance_ohm: Ohms::new(0.12),
             phase_inductance_h: Henries::new(30.0e-6),
             pole_pairs: 7,
+            electrical_direction: ElectricalDirection::Positive,
             electrical_angle_offset: ElectricalAngle::new(0.0),
             initial_settle_velocity_threshold: RadPerSec::new(0.01),
             initial_settle_time_seconds: 0.01,

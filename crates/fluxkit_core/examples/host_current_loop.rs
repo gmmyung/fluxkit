@@ -1,7 +1,7 @@
 use fluxkit_core::{
-    ActuatorEstimate, ActuatorLimits, ActuatorModel, ActuatorParams, ControlMode,
-    CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorLimits, MotorModel,
-    MotorParams, RotorEstimate,
+    ActuatorEstimate, ActuatorLimits, ActuatorModel, ActuatorParams, CurrentLoopConfig,
+    FastLoopInput, InverterParams, MotorController, MotorLimits, MotorModel, MotorParams,
+    RotorEstimate,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -18,11 +18,13 @@ fn main() {
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
+            electrical_direction: fluxkit_math::ElectricalDirection::Positive,
             electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         },
         MotorLimits {
             max_phase_current: Amps::new(20.0),
             max_mech_speed: Some(RadPerSec::new(500.0)),
+            max_winding_temperature_c: None,
         },
     );
     let inverter = InverterParams {
@@ -59,9 +61,13 @@ fn main() {
         fluxkit_core::ActuatorCompensationConfig::disabled(),
     );
 
-    let mut controller = MotorController::new(motor, inverter, actuator, config);
-    controller.set_mode(ControlMode::Current);
-    controller.enable();
+    let mut controller =
+        MotorController::new(motor, inverter, actuator, config, fluxkit_math::Svpwm);
+    controller.apply_command(fluxkit_core::motor::ControllerCommand::Current(Dq::new(
+        Amps::ZERO,
+        Amps::ZERO,
+    )));
+    controller.set_armed(true);
 
     let dt = 1.0 / 20_000.0;
     let electrical_speed = 200.0;
@@ -72,7 +78,10 @@ fn main() {
     for step in 0..400 {
         let time = step as f32 * dt;
         let iq_target = if step < 80 { 0.0 } else { 4.0 };
-        controller.set_iq_target(Amps::new(iq_target));
+        controller.apply_command(fluxkit_core::motor::ControllerCommand::Current(Dq::new(
+            Amps::ZERO,
+            Amps::new(iq_target),
+        )));
 
         measured_iq += (iq_target - measured_iq) * 0.04;
 
@@ -81,28 +90,31 @@ fn main() {
         let current_ab = inverse_park(current_dq, angle);
         let phase_currents = inverse_clarke(current_ab).map(Amps::new);
 
-        let output = controller.fast_tick(FastLoopInput {
-            phase_currents,
-            bus_voltage: Volts::new(24.0),
-            winding_temperature_c: 25.0,
-            rotor: RotorEstimate {
-                mechanical_angle: ContinuousMechanicalAngle::new(
-                    angle / motor.model().pole_pairs as f32,
-                ),
-                mechanical_velocity: RadPerSec::new(
-                    electrical_speed / motor.model().pole_pairs as f32,
-                ),
+        let output = controller.step(
+            FastLoopInput {
+                phase_currents,
+                bus_voltage: Volts::new(24.0),
+                winding_temperature_c: 25.0,
+                rotor: RotorEstimate {
+                    mechanical_angle: ContinuousMechanicalAngle::new(
+                        angle / motor.model().pole_pairs as f32,
+                    ),
+                    mechanical_velocity: RadPerSec::new(
+                        electrical_speed / motor.model().pole_pairs as f32,
+                    ),
+                },
+                actuator: ActuatorEstimate {
+                    output_angle: ContinuousMechanicalAngle::new(
+                        angle / motor.model().pole_pairs as f32 / 5.0,
+                    ),
+                    output_velocity: RadPerSec::new(
+                        electrical_speed / motor.model().pole_pairs as f32 / 5.0,
+                    ),
+                },
+                dt_seconds: dt,
             },
-            actuator: ActuatorEstimate {
-                output_angle: ContinuousMechanicalAngle::new(
-                    angle / motor.model().pole_pairs as f32 / 5.0,
-                ),
-                output_velocity: RadPerSec::new(
-                    electrical_speed / motor.model().pole_pairs as f32 / 5.0,
-                ),
-            },
-            dt_seconds: dt,
-        });
+            dt,
+        );
 
         println!(
             "{step},{iq_target:.3},{:.3},{:.3},{:.3},{:.5},{:.5},{:.5},{}",

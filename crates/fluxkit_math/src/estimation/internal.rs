@@ -4,6 +4,8 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct LowPassState {
     alpha: f32,
     value: f32,
@@ -51,6 +53,8 @@ impl LowPassState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct PhaseLockedLoop {
     kp: f32,
     ki: f32,

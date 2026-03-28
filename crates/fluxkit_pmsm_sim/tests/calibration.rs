@@ -5,12 +5,13 @@ use fluxkit_core::{
     ActuatorEstimate, ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
     ActuatorFrictionCalibrator, ActuatorGearRatioCalibrationConfig,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrator, ActuatorLimits, ActuatorModel,
-    ActuatorParams, ControlMode, CurrentLoopConfig, FastLoopInput, FluxLinkageCalibrationConfig,
+    ActuatorParams, CurrentLoopConfig, FastLoopInput, FluxLinkageCalibrationConfig,
     FluxLinkageCalibrationInput, FluxLinkageCalibrator, InverterParams, MotorController,
     MotorLimits, MotorModel, PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
     PhaseInductanceCalibrator, PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
     PhaseResistanceCalibrator, PolePairsAndOffsetCalibrationConfig,
-    PolePairsAndOffsetCalibrationInput, PolePairsAndOffsetCalibrator, RotorEstimate, TickSchedule,
+    PolePairsAndOffsetCalibrationInput, PolePairsAndOffsetCalibrator, RotorEstimate,
+    motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle, ElectricalAngle, MechanicalAngle,
@@ -30,6 +31,7 @@ fn motor_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             output_inertia_kg_m2: 0.0002,
@@ -51,11 +53,13 @@ fn controller_motor_params() -> fluxkit_core::MotorParams {
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
+            electrical_direction: fluxkit_math::ElectricalDirection::Positive,
             electrical_angle_offset: ElectricalAngle::new(0.0),
         },
         MotorLimits {
             max_phase_current: fluxkit_math::units::Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         },
     )
 }
@@ -122,6 +126,7 @@ fn plant_params_with_asymmetric_friction() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -145,6 +150,7 @@ fn plant_params_with_breakaway() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -388,6 +394,7 @@ fn controlled_spin_recovers_flux_linkage() {
         phase_resistance_ohm: params.phase_resistance_ohm_ref,
         phase_inductance_h: params.d_inductance_h,
         pole_pairs: params.pole_pairs,
+        electrical_direction: params.electrical_direction,
         electrical_angle_offset: ElectricalAngle::new(0.0),
         align_voltage_mag: Volts::new(2.0),
         spin_voltage_mag: Volts::new(2.0),
@@ -442,6 +449,7 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
         inverter_params(),
         actuator_params_calibrating(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut plant = PmsmModel::new_zeroed(plant_params_with_asymmetric_friction()).unwrap();
     let mut calibrator = ActuatorFrictionCalibrator::new(
@@ -449,8 +457,7 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
     )
     .unwrap();
 
-    controller.set_mode(ControlMode::Velocity);
-    controller.enable();
+    controller.set_armed(true);
 
     for step in 0..200_000 {
         let status = controller.status();
@@ -461,11 +468,10 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
                 .total_output_torque_command,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.set_velocity_target(command.velocity_target);
+        controller.apply_command(ControllerCommand::Velocity(command.velocity_target));
 
         let _ = step;
-        let schedule = TickSchedule::with_medium(FAST_DT_SECONDS);
-        let output = controller.tick(fast_loop_input(&plant, bus_voltage), schedule);
+        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -513,6 +519,7 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
         inverter_params(),
         actuator_params_unknown_ratio(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut plant = PmsmModel::new_zeroed(plant_params_with_asymmetric_friction()).unwrap();
     let mut calibrator = ActuatorGearRatioCalibrator::new(
@@ -520,8 +527,7 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
     )
     .unwrap();
 
-    controller.set_mode(ControlMode::Velocity);
-    controller.enable();
+    controller.set_armed(true);
 
     for _ in 0..200_000 {
         let status = controller.status();
@@ -531,12 +537,9 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
             output_velocity: status.last_output_mechanical_velocity,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.set_velocity_target(command.velocity_target);
+        controller.apply_command(ControllerCommand::Velocity(command.velocity_target));
 
-        let output = controller.tick(
-            fast_loop_input(&plant, bus_voltage),
-            TickSchedule::with_medium(FAST_DT_SECONDS),
-        );
+        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -569,6 +572,7 @@ fn torque_ramp_recovers_actuator_breakaway() {
         inverter_params(),
         actuator_params_calibrating(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut plant = PmsmModel::new_zeroed(plant_params_with_breakaway()).unwrap();
     let mut calibrator = ActuatorBreakawayCalibrator::new(ActuatorBreakawayCalibrationConfig {
@@ -584,8 +588,7 @@ fn torque_ramp_recovers_actuator_breakaway() {
     })
     .unwrap();
 
-    controller.set_mode(ControlMode::Torque);
-    controller.enable();
+    controller.set_armed(true);
 
     for _ in 0..200_000 {
         let status = controller.status();
@@ -596,12 +599,9 @@ fn torque_ramp_recovers_actuator_breakaway() {
                 .total_output_torque_command,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.set_torque_target(command.torque_target);
+        controller.apply_command(ControllerCommand::Torque(command.torque_target));
 
-        let output = controller.tick(
-            fast_loop_input(&plant, bus_voltage),
-            TickSchedule::with_medium(FAST_DT_SECONDS),
-        );
+        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -640,14 +640,14 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
         inverter_params(),
         actuator_params_calibrating(),
         current_loop_config(),
+        fluxkit_math::Svpwm,
     );
     let mut calibrator = ActuatorBlendBandCalibrator::new(
         ActuatorBlendBandCalibrationConfig::default_for_release_ramp(),
     )
     .unwrap();
 
-    controller.set_mode(ControlMode::Torque);
-    controller.enable();
+    controller.set_armed(true);
 
     for _ in 0..200_000 {
         let status = controller.status();
@@ -658,12 +658,9 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
                 .total_output_torque_command,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.set_torque_target(command.torque_target);
+        controller.apply_command(ControllerCommand::Torque(command.torque_target));
 
-        let output = controller.tick(
-            fast_loop_input(&plant, bus_voltage),
-            TickSchedule::with_medium(FAST_DT_SECONDS),
-        );
+        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(

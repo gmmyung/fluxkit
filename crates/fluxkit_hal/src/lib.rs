@@ -10,24 +10,18 @@
 
 pub mod bus;
 pub mod current;
-pub mod fault;
-pub mod gate;
 pub mod output;
 pub mod pwm;
 pub mod rotor;
 pub mod temperature;
-pub mod time;
 pub mod util;
 
 pub use bus::*;
 pub use current::*;
-pub use fault::*;
-pub use gate::*;
 pub use output::*;
 pub use pwm::*;
 pub use rotor::*;
 pub use temperature::*;
-pub use time::*;
 pub use util::*;
 
 #[cfg(test)]
@@ -35,8 +29,8 @@ mod tests {
     use core::convert::Infallible;
 
     use crate::{
-        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, MonotonicMicros, OutputReading,
-        OutputSensor, PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
+        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
+        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, centered_phase_duty,
     };
     use fluxkit_math::{
         MechanicalAngle,
@@ -131,15 +125,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct FakeClock;
-
-    impl MonotonicMicros for FakeClock {
-        fn now_micros(&self) -> u64 {
-            123_456
-        }
-    }
-
     #[test]
     fn pwm_helper_sets_neutral_output() {
         let mut pwm = FakePwm::default();
@@ -157,7 +142,6 @@ mod tests {
         let mut bus = FakeBusSensor;
         let mut rotor = FakeRotor;
         let mut output = FakeOutput;
-        let clock = FakeClock;
 
         let current_sample = currents.sample_phase_currents().unwrap();
         let bus_voltage = bus.sample_bus_voltage().unwrap();
@@ -171,6 +155,5 @@ mod tests {
             MechanicalAngle::new(1.0 / 7.0)
         );
         assert_eq!(output_reading.mechanical_angle, MechanicalAngle::new(0.2));
-        assert_eq!(clock.now_micros(), 123_456);
     }
 }

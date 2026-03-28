@@ -40,7 +40,7 @@ pub mod trig;
 pub mod units;
 pub mod util;
 
-pub use angle::{ContinuousMechanicalAngle, ElectricalAngle, MechanicalAngle};
+pub use angle::{ContinuousMechanicalAngle, ElectricalAngle, ElectricalDirection, MechanicalAngle};
 pub use control::pi::{PiConfig, PiController, PiState};
 pub use estimation::{
     AngularEstimate, AngularEstimatorSeed, AngularSample, ContinuousAngleValue,

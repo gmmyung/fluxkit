@@ -9,7 +9,7 @@
 //! from the estimated pole-pair count and final measured mechanical angle.
 
 use fluxkit_math::{
-    AlphaBeta, ElectricalAngle, MechanicalAngle,
+    AlphaBeta, ElectricalAngle, ElectricalDirection, MechanicalAngle,
     angle::{mechanical_to_electrical, shortest_angle_delta},
     scalar::TAU,
     trig::sin_cos,
@@ -76,18 +76,22 @@ pub struct PolePairsAndOffsetCalibrationInput {
     pub dt_seconds: f32,
 }
 
-/// Result of a completed pole-pair and offset calibration.
+/// Result of a completed electrical-mapping calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PolePairsAndOffsetCalibrationResult {
     /// Estimated electrical pole-pair count.
     pub pole_pairs: u8,
+    /// Electrical mapping direction between positive mechanical and electrical motion.
+    pub electrical_direction: ElectricalDirection,
     /// Calibrated electrical zero offset.
     pub electrical_angle_offset: ElectricalAngle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 enum InternalState {
     InitialAlign,
     Sweeping,
@@ -229,13 +233,20 @@ impl PolePairsAndOffsetCalibrator {
                     }
 
                     let pole_pairs = rounded as u8;
+                    let electrical_direction = if ratio >= 0.0 {
+                        ElectricalDirection::Positive
+                    } else {
+                        ElectricalDirection::Negative
+                    };
                     let measured_electrical =
                         mechanical_to_electrical(input.mechanical_angle.into(), pole_pairs as u32);
                     let offset = ElectricalAngle::new(
-                        self.commanded_electrical_angle - measured_electrical.get(),
+                        self.commanded_electrical_angle
+                            - electrical_direction.signum() * measured_electrical.get(),
                     );
                     self.result = Some(PolePairsAndOffsetCalibrationResult {
                         pole_pairs,
+                        electrical_direction,
                         electrical_angle_offset: offset,
                     });
                     return AlphaBeta::new(Volts::ZERO, Volts::ZERO);

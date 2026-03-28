@@ -1,9 +1,9 @@
 use std::{env, error::Error, fs};
 
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlMode,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
     CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorLimits, MotorParams,
-    RotorEstimate, TickSchedule,
+    RotorEstimate, motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -15,8 +15,6 @@ use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, ThermalPlantP
 use plotters::prelude::*;
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
-const MEDIUM_DECIMATION: usize = 10;
-const MEDIUM_DT_SECONDS: f32 = FAST_DT_SECONDS * MEDIUM_DECIMATION as f32;
 const GEAR_RATIO: f32 = 2.0;
 
 #[derive(Clone, Copy)]
@@ -43,13 +41,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         inverter_params(),
         actuator_params(),
         config(),
+        fluxkit_math::Svpwm,
     );
     let mut plant = PmsmModel::new_zeroed(plant_params())?;
     let mut samples = Vec::with_capacity(40_000);
 
-    controller.set_mode(ControlMode::Position);
-    controller.set_position_target(ContinuousMechanicalAngle::new(position_target));
-    controller.enable();
+    controller.apply_command(ControllerCommand::Position(ContinuousMechanicalAngle::new(
+        position_target,
+    )));
+    controller.set_armed(true);
 
     for step in 0..40_000 {
         let state = *plant.state();
@@ -64,13 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .map(Amps::new);
 
-        let schedule = if step % MEDIUM_DECIMATION == MEDIUM_DECIMATION - 1 {
-            TickSchedule::with_medium(MEDIUM_DT_SECONDS)
-        } else {
-            TickSchedule::none()
-        };
-
-        let output = controller.tick(
+        let output = controller.step(
             FastLoopInput {
                 phase_currents,
                 bus_voltage,
@@ -85,7 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 },
                 dt_seconds: FAST_DT_SECONDS,
             },
-            schedule,
+            FAST_DT_SECONDS,
         );
 
         plant.step_phase_duty(
@@ -230,10 +224,12 @@ fn motor_params() -> MotorParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
         limits: MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         },
     }
 }
@@ -287,6 +283,7 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(25.0),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,

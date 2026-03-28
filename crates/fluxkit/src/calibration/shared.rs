@@ -1,9 +1,33 @@
+use core::cell::RefCell;
+
+use critical_section::Mutex;
 use fluxkit_core::{
     ActuatorBlendBandCalibrator, ActuatorBreakawayCalibrator, ActuatorCalibration,
     ActuatorFrictionCalibrator, ActuatorGearRatioCalibrator, CalibrationError,
     FluxLinkageCalibrator, MotorCalibration, PhaseInductanceCalibrator, PhaseResistanceCalibrator,
     PolePairsAndOffsetCalibrator,
 };
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SharedStatus<S> {
+    pub status: S,
+}
+
+#[inline]
+pub(crate) fn read_status<S: Copy>(shared: &Mutex<RefCell<SharedStatus<S>>>) -> S {
+    critical_section::with(|cs| shared.borrow(cs).borrow().status)
+}
+
+#[inline]
+pub(crate) fn write_status<S: Copy>(
+    shared: &Mutex<RefCell<SharedStatus<S>>>,
+    update: impl FnOnce(&mut S),
+) {
+    critical_section::with(|cs| {
+        let mut shared = shared.borrow(cs).borrow_mut();
+        update(&mut shared.status);
+    });
+}
 
 pub(crate) trait RoutineState<R> {
     fn result(&self) -> Option<R>;

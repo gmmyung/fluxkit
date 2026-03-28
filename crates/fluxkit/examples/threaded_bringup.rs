@@ -3,20 +3,16 @@ use std::{convert::Infallible, env, fs, thread};
 
 use critical_section::Mutex;
 use fluxkit::{
-    ActuatorCalibrationLimits, ActuatorCalibrationRequest, ActuatorCalibrationSystem,
-    ActuatorLimits, ContinuousMechanicalAngle, ControlMode, CurrentLoopConfig, InverterParams,
-    MotorCalibrationLimits, MotorCalibrationRequest, MotorCalibrationResult,
-    MotorCalibrationSystem, MotorCommand, MotorHardware, MotorLimits, MotorSystem,
-    PassThroughEstimator, centered_phase_duty,
-    hal::{
-        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
-    },
-    math::{
-        Dq, inverse_clarke, inverse_park,
-        units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
-    },
+    Abc, ActuatorCalibrationLimits, ActuatorCalibrationRequest, ActuatorCalibrationRuntime,
+    ActuatorLimits, ActuatorParams, BusVoltageSensor, ContinuousMechanicalAngle, CurrentLoopConfig,
+    CurrentSampleValidity, CurrentSampler, Dq, InverterParams, MotorCalibrationLimits,
+    MotorCalibrationRequest, MotorCalibrationResult, MotorCalibrationRuntime, MotorCommand,
+    MotorLimits, MotorRuntime, OutputReading, OutputSensor, PassThroughEstimator,
+    PhaseCurrentSample, PhasePwm, RadPerSec, RotorReading, RotorSensor, Svpwm, TemperatureSensor,
+    units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, Volts, Webers},
 };
+use fluxkit_hal::centered_phase_duty;
+use fluxkit_math::{inverse_clarke, inverse_park};
 use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState, ThermalPlantParams};
 use plotters::prelude::*;
 use static_cell::StaticCell;
@@ -53,40 +49,12 @@ impl<T> SharedCell<T> {
     }
 }
 
-struct ResultMailbox<T> {
-    inner: Mutex<RefCell<Option<T>>>,
-}
-
-impl<T> ResultMailbox<T> {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new(RefCell::new(None)),
-        }
-    }
-
-    fn publish(&self, value: T) -> Result<(), T> {
-        critical_section::with(|cs| {
-            let mut slot = self.inner.borrow(cs).borrow_mut();
-            if slot.is_some() {
-                Err(value)
-            } else {
-                *slot = Some(value);
-                Ok(())
-            }
-        })
-    }
-
-    fn take(&self) -> Option<T> {
-        critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
-    }
-}
-
 #[derive(Debug)]
 struct SimHarness {
     plant: PmsmModel,
     bus_voltage: Volts,
     load_torque: NewtonMeters,
-    last_duty: fluxkit::math::frame::Abc<Duty>,
+    last_duty: Abc<Duty>,
     rotor_bias: f32,
 }
 
@@ -97,6 +65,7 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -124,30 +93,28 @@ fn inverter_params() -> InverterParams {
     }
 }
 
-fn current_loop_config() -> CurrentLoopConfig {
-    CurrentLoopConfig {
-        kp_d: 0.2,
-        ki_d: 400.0,
-        kp_q: 0.2,
-        ki_q: 400.0,
-        velocity_kp: 0.2,
-        velocity_ki: 8.0,
-        position_kp: 12.0,
-        position_ki: 0.0,
-        max_voltage_mag: Volts::new(12.0),
-        id_ref_default: Amps::ZERO,
-        max_id_target: Amps::new(5.0),
-        max_iq_target: Amps::new(8.0),
-        max_velocity_target: RadPerSec::new(120.0),
-        max_current_ref_derivative_amps_per_sec: 10_000.0,
-        enable_current_feedforward: true,
-    }
+fn current_loop_config(motor_calibration: MotorCalibrationResult) -> CurrentLoopConfig {
+    CurrentLoopConfig::builder(
+        RadPerSec::new(3_333.3333),
+        motor_calibration.phase_inductance_h,
+        motor_calibration.phase_resistance_ohm_ref,
+    )
+    .velocity_gains(0.2, 8.0)
+    .position_gains(12.0, 0.0)
+    .max_voltage_mag(Volts::new(12.0))
+    .id_ref_default(Amps::ZERO)
+    .max_id_target(Amps::new(5.0))
+    .max_iq_target(Amps::new(8.0))
+    .max_velocity_target(RadPerSec::new(120.0))
+    .max_current_ref_derivative_amps_per_sec(10_000.0)
+    .current_feedforward(true)
+    .build()
 }
 
-fn phase_currents(shared: &SharedCell<SimHarness>) -> fluxkit::math::frame::Abc<Amps> {
+fn phase_currents(shared: &SharedCell<SimHarness>) -> Abc<Amps> {
     shared.with(|harness| {
         let state = *harness.plant.state();
-        let electrical_angle = fluxkit::math::angle::mechanical_to_electrical(
+        let electrical_angle = fluxkit::angle::mechanical_to_electrical(
             state.mechanical_angle.wrapped().into(),
             harness.plant.params().pole_pairs as u32,
         );
@@ -176,7 +143,7 @@ impl PhasePwm for SimPwm<'_> {
     }
 
     fn set_duty(&mut self, a: Duty, b: Duty, c: Duty) -> Result<(), Self::Error> {
-        let duty = fluxkit::math::frame::Abc::new(a, b, c);
+        let duty = Abc::new(a, b, c);
         self.shared.with_mut(|harness| {
             harness.last_duty = duty;
             let bus_voltage = harness.bus_voltage;
@@ -296,62 +263,82 @@ fn calibration_hardware<'a>(
     )
 }
 
-fn runtime_hardware<'a>(
-    shared: &'a SharedCell<SimHarness>,
-) -> MotorHardware<SimPwm<'a>, SimCurrent<'a>, SimBus<'a>, SimRotor<'a>, SimOutput<'a>, SimTemp<'a>>
-{
-    MotorHardware {
-        pwm: SimPwm { shared },
-        current: SimCurrent { shared },
-        bus: SimBus { shared },
-        rotor: SimRotor { shared },
-        output: SimOutput { shared },
-        temp: SimTemp { shared },
-    }
-}
-
 fn output_velocity(shared: &SharedCell<SimHarness>) -> f32 {
     shared.with(|harness| harness.plant.state().mechanical_velocity.get() / GEAR_RATIO)
 }
 
-type ExampleMotorCalibrationSystem<'a> = MotorCalibrationSystem<
+type ExampleMotorCalibrationRuntime<'a> = MotorCalibrationRuntime<
     SimPwm<'a>,
     SimCurrent<'a>,
     SimBus<'a>,
     SimRotor<'a>,
     SimTemp<'a>,
-    fluxkit::math::Svpwm,
+    Svpwm,
+    PassThroughEstimator,
 >;
-type ExampleActuatorCalibrationSystem<'a> = ActuatorCalibrationSystem<
+type ExampleActuatorCalibrationRuntime<'a> = ActuatorCalibrationRuntime<
     SimPwm<'a>,
     SimCurrent<'a>,
     SimBus<'a>,
     SimRotor<'a>,
     SimOutput<'a>,
     SimTemp<'a>,
-    fluxkit::math::Svpwm,
+    Svpwm,
     PassThroughEstimator,
     PassThroughEstimator,
 >;
-type ExampleMotorSystem<'a> = MotorSystem<
+type ExampleMotorRuntime<'a> = MotorRuntime<
     SimPwm<'a>,
     SimCurrent<'a>,
     SimBus<'a>,
     SimRotor<'a>,
     SimOutput<'a>,
     SimTemp<'a>,
-    fluxkit::math::Svpwm,
+    Svpwm,
+    PassThroughEstimator,
+    PassThroughEstimator,
+>;
+type ExampleMotorCalibrationTicker<'a> = fluxkit::MotorCalibrationTicker<
+    'a,
+    SimPwm<'a>,
+    SimCurrent<'a>,
+    SimBus<'a>,
+    SimRotor<'a>,
+    SimTemp<'a>,
+    Svpwm,
+    PassThroughEstimator,
+>;
+type ExampleActuatorCalibrationHandle<'a> = fluxkit::ActuatorCalibrationHandle<'a>;
+type ExampleActuatorCalibrationTicker<'a> = fluxkit::ActuatorCalibrationTicker<
+    'a,
+    SimPwm<'a>,
+    SimCurrent<'a>,
+    SimBus<'a>,
+    SimRotor<'a>,
+    SimOutput<'a>,
+    SimTemp<'a>,
+    Svpwm,
+    PassThroughEstimator,
+    PassThroughEstimator,
+>;
+type ExampleMotorHandle<'a> = fluxkit::MotorHandle<'a>;
+type ExampleMotorTicker<'a> = fluxkit::MotorTicker<
+    'a,
+    SimPwm<'a>,
+    SimCurrent<'a>,
+    SimBus<'a>,
+    SimRotor<'a>,
+    SimOutput<'a>,
+    SimTemp<'a>,
+    Svpwm,
     PassThroughEstimator,
     PassThroughEstimator,
 >;
 enum AppState<'a> {
     Empty,
-    MotorCalibrationRunning(ExampleMotorCalibrationSystem<'a>, u32),
-    MotorCalibrationReady(ExampleMotorCalibrationSystem<'a>),
-    ActuatorCalibrationRunning(ExampleActuatorCalibrationSystem<'a>, u32),
-    ActuatorCalibrationReady(ExampleActuatorCalibrationSystem<'a>),
-    RuntimeRunning(ExampleMotorSystem<'a>, u32, Vec<(f32, f32)>),
-    RuntimeReady(ExampleMotorSystem<'a>, Vec<(f32, f32)>),
+    MotorCalibrationRunning(ExampleMotorCalibrationTicker<'a>, u32),
+    ActuatorCalibrationRunning(ExampleActuatorCalibrationTicker<'a>, u32),
+    RuntimeRunning(ExampleMotorTicker<'a>, u32, Vec<(f32, f32)>),
     Finished,
     Faulted,
 }
@@ -360,24 +347,18 @@ enum AppState<'a> {
 struct GlobalRefs {
     shared: Option<&'static SharedCell<SimHarness>>,
     app_state: Option<&'static SharedCell<AppState<'static>>>,
-    motor_mailbox: Option<&'static ResultMailbox<MotorCalibrationResult>>,
-    actuator_mailbox: Option<&'static ResultMailbox<fluxkit::ActuatorCalibrationResult>>,
-    runtime_status: Option<&'static SharedCell<Option<fluxkit::MotorRuntimeStatus>>>,
 }
 
 static SHARED: StaticCell<SharedCell<SimHarness>> = StaticCell::new();
 static APP_STATE: StaticCell<SharedCell<AppState<'static>>> = StaticCell::new();
-static MOTOR_MAILBOX: StaticCell<ResultMailbox<MotorCalibrationResult>> = StaticCell::new();
-static ACTUATOR_MAILBOX: StaticCell<ResultMailbox<fluxkit::ActuatorCalibrationResult>> =
+static MOTOR_CALIBRATION_RUNTIME: StaticCell<ExampleMotorCalibrationRuntime<'static>> =
     StaticCell::new();
-static RUNTIME_STATUS: StaticCell<SharedCell<Option<fluxkit::MotorRuntimeStatus>>> =
+static ACTUATOR_CALIBRATION_RUNTIME: StaticCell<ExampleActuatorCalibrationRuntime<'static>> =
     StaticCell::new();
+static MOTOR_RUNTIME: StaticCell<ExampleMotorRuntime<'static>> = StaticCell::new();
 static GLOBAL_REFS: SharedCell<GlobalRefs> = SharedCell::new(GlobalRefs {
     shared: None,
     app_state: None,
-    motor_mailbox: None,
-    actuator_mailbox: None,
-    runtime_status: None,
 });
 
 fn draw_velocity_plot(
@@ -425,114 +406,61 @@ fn draw_velocity_plot(
     Ok(())
 }
 
-fn irq_loop<'a>(
-    app_state: &SharedCell<AppState<'a>>,
-    motor_mailbox: &ResultMailbox<MotorCalibrationResult>,
-    actuator_mailbox: &ResultMailbox<fluxkit::ActuatorCalibrationResult>,
-    runtime_status: &SharedCell<Option<fluxkit::MotorRuntimeStatus>>,
-    shared: &SharedCell<SimHarness>,
-) {
+fn irq_loop<'a>(app_state: &SharedCell<AppState<'a>>, shared: &SharedCell<SimHarness>) {
     loop {
-        let should_exit = app_state.with_mut(|slot| {
-            let state = core::mem::replace(slot, AppState::Empty);
-            match state {
-                AppState::Empty => {
-                    *slot = AppState::Empty;
-                    false
-                }
-                AppState::MotorCalibrationRunning(mut system, mut cycles) => {
-                    cycles = cycles.wrapping_add(1);
-                    match system.tick() {
-                        Ok(Some(result)) => {
-                            println!("irq: motor calibration complete after {cycles} cycles");
-                            let _ = motor_mailbox.publish(result);
-                            *slot = AppState::MotorCalibrationReady(system);
+        let state = app_state.with_mut(|slot| core::mem::replace(slot, AppState::Empty));
+        let (next_state, should_exit) = match state {
+            AppState::Empty => (AppState::Empty, false),
+            AppState::MotorCalibrationRunning(ticker, mut cycles) => {
+                cycles = cycles.wrapping_add(1);
+                match ticker.tick() {
+                    Ok(()) => {
+                        if cycles % 20_000 == 0 {
+                            println!("irq: motor calibration still running ({cycles} cycles)");
                         }
-                        Ok(None) => {
-                            if cycles % 20_000 == 0 {
-                                println!(
-                                    "irq: motor calibration phase {:?} still running ({cycles} cycles)",
-                                    system.phase().unwrap()
-                                );
-                            }
-                            *slot = AppState::MotorCalibrationRunning(system, cycles);
-                        }
-                        Err(error) => {
-                            eprintln!("irq: motor calibration failed: {error}");
-                            *slot = AppState::Faulted;
-                        }
+                        (AppState::MotorCalibrationRunning(ticker, cycles), false)
                     }
-                    false
-                }
-                AppState::MotorCalibrationReady(system) => {
-                    *slot = AppState::MotorCalibrationReady(system);
-                    false
-                }
-                AppState::ActuatorCalibrationRunning(mut system, mut cycles) => {
-                    cycles = cycles.wrapping_add(1);
-                    match system.tick() {
-                        Ok(Some(result)) => {
-                            println!("irq: actuator calibration complete after {cycles} cycles");
-                            let _ = actuator_mailbox.publish(result);
-                            *slot = AppState::ActuatorCalibrationReady(system);
-                        }
-                        Ok(None) => {
-                            if cycles % 20_000 == 0 {
-                                println!(
-                                    "irq: actuator calibration phase {:?} still running ({cycles} cycles)",
-                                    system.phase().unwrap()
-                                );
-                            }
-                            *slot = AppState::ActuatorCalibrationRunning(system, cycles);
-                        }
-                        Err(error) => {
-                            eprintln!("irq: actuator calibration failed: {error}");
-                            *slot = AppState::Faulted;
-                        }
+                    Err(error) => {
+                        eprintln!("irq: motor calibration failed: {error}");
+                        (AppState::Faulted, false)
                     }
-                    false
-                }
-                AppState::ActuatorCalibrationReady(system) => {
-                    *slot = AppState::ActuatorCalibrationReady(system);
-                    false
-                }
-                AppState::RuntimeRunning(mut system, mut cycles, mut samples) => {
-                    cycles = cycles.wrapping_add(1);
-                    match system.tick() {
-                        Ok(_) => {
-                            runtime_status.with_mut(|slot| *slot = Some(system.handle().status()));
-                            samples.push((cycles as f32 * FAST_DT_SECONDS, output_velocity(shared)));
-                            if cycles % 20_000 == 0 {
-                                println!("irq: runtime executed {cycles} cycles");
-                            }
-                            if cycles >= RUNTIME_FAST_CYCLES {
-                                println!("irq: runtime complete after {cycles} cycles");
-                                *slot = AppState::RuntimeReady(system, samples);
-                            } else {
-                                *slot = AppState::RuntimeRunning(system, cycles, samples);
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("irq: runtime failed: {error}");
-                            *slot = AppState::Faulted;
-                        }
-                    }
-                    false
-                }
-                AppState::RuntimeReady(system, samples) => {
-                    *slot = AppState::RuntimeReady(system, samples);
-                    false
-                }
-                AppState::Finished => {
-                    *slot = AppState::Finished;
-                    true
-                }
-                AppState::Faulted => {
-                    *slot = AppState::Faulted;
-                    true
                 }
             }
-        });
+            AppState::ActuatorCalibrationRunning(ticker, mut cycles) => {
+                cycles = cycles.wrapping_add(1);
+                match ticker.tick() {
+                    Ok(()) => {
+                        if cycles % 20_000 == 0 {
+                            println!("irq: actuator calibration still running ({cycles} cycles)");
+                        }
+                        (AppState::ActuatorCalibrationRunning(ticker, cycles), false)
+                    }
+                    Err(error) => {
+                        eprintln!("irq: actuator calibration failed: {error}");
+                        (AppState::Faulted, false)
+                    }
+                }
+            }
+            AppState::RuntimeRunning(ticker, mut cycles, mut samples) => {
+                cycles = cycles.wrapping_add(1);
+                match ticker.tick() {
+                    Ok(()) => {
+                        samples.push((cycles as f32 * FAST_DT_SECONDS, output_velocity(shared)));
+                        if cycles % 20_000 == 0 {
+                            println!("irq: runtime executed {cycles} cycles");
+                        }
+                        (AppState::RuntimeRunning(ticker, cycles, samples), false)
+                    }
+                    Err(error) => {
+                        eprintln!("irq: runtime failed: {error}");
+                        (AppState::Faulted, false)
+                    }
+                }
+            }
+            AppState::Finished => (AppState::Finished, true),
+            AppState::Faulted => (AppState::Faulted, true),
+        };
+        app_state.with_mut(|slot| *slot = next_state);
 
         if should_exit {
             break;
@@ -560,19 +488,10 @@ fn init_globals() -> GlobalRefs {
     }));
     let app_state: &'static SharedCell<AppState<'static>> =
         APP_STATE.init(SharedCell::new(AppState::Empty));
-    let motor_mailbox: &'static ResultMailbox<MotorCalibrationResult> =
-        MOTOR_MAILBOX.init(ResultMailbox::<MotorCalibrationResult>::new());
-    let actuator_mailbox: &'static ResultMailbox<fluxkit::ActuatorCalibrationResult> =
-        ACTUATOR_MAILBOX.init(ResultMailbox::<fluxkit::ActuatorCalibrationResult>::new());
-    let runtime_status: &'static SharedCell<Option<fluxkit::MotorRuntimeStatus>> =
-        RUNTIME_STATUS.init(SharedCell::new(None));
 
     let refs = GlobalRefs {
         shared: Some(shared),
         app_state: Some(app_state),
-        motor_mailbox: Some(motor_mailbox),
-        actuator_mailbox: Some(actuator_mailbox),
-        runtime_status: Some(runtime_status),
     };
     GLOBAL_REFS.with_mut(|slot| *slot = refs);
     refs
@@ -582,28 +501,31 @@ fn main_context_loop(plot_path: &str) {
     let GlobalRefs {
         shared: Some(shared),
         app_state: Some(app_state),
-        motor_mailbox: Some(motor_mailbox),
-        actuator_mailbox: Some(actuator_mailbox),
-        runtime_status: Some(runtime_status),
     } = init_globals()
     else {
         unreachable!();
     };
 
     let mut motor_params = None;
-    let mut runtime_started = false;
+    let mut actuator_calibration_handle: Option<ExampleActuatorCalibrationHandle<'static>> = None;
+    let mut actuator_calibration_owner: Option<
+        &'static ExampleActuatorCalibrationRuntime<'static>,
+    > = None;
+    let mut runtime_handle: Option<ExampleMotorHandle<'static>> = None;
+    let mut runtime_owner: Option<&'static ExampleMotorRuntime<'static>> = None;
     let mut runtime_target_reported = false;
 
     println!("phase 1: motor calibration");
     let (pwm, current, bus, rotor, temp) = calibration_hardware(shared);
-    let motor_calibration = MotorCalibrationSystem::new(
+    let motor_calibration = MotorCalibrationRuntime::new(
         pwm,
         current,
         bus,
         rotor,
         temp,
-        fluxkit::math::Svpwm,
-        MotorCalibrationRequest::default(),
+        Svpwm,
+        PassThroughEstimator::new(),
+        MotorCalibrationRequest::all(),
         MotorCalibrationLimits {
             max_align_voltage_mag: Volts::new(2.0),
             max_spin_voltage_mag: Volts::new(3.0),
@@ -613,13 +535,40 @@ fn main_context_loop(plot_path: &str) {
         FAST_DT_SECONDS,
     )
     .unwrap();
-    app_state.with_mut(|slot| {
-        *slot = AppState::MotorCalibrationRunning(motor_calibration, 0);
-    });
+    let motor_calibration_owner = MOTOR_CALIBRATION_RUNTIME.init(motor_calibration);
+    let (handle, ticker) = motor_calibration_owner.split().unwrap();
+    let mut motor_calibration_handle = Some(handle);
+    app_state.with_mut(|slot| *slot = AppState::MotorCalibrationRunning(ticker, 0));
 
     loop {
         if motor_params.is_none() {
-            if let Some(result) = motor_mailbox.take() {
+            let motor_result = motor_calibration_handle
+                .as_ref()
+                .and_then(|handle| handle.status().result);
+            if let Some(result) = motor_result {
+                let parts = loop {
+                    let taken = app_state.with_mut(|slot| {
+                        match core::mem::replace(slot, AppState::Empty) {
+                            AppState::MotorCalibrationRunning(ticker, cycles) => {
+                                match motor_calibration_owner.try_into_parts() {
+                                    Some(parts) => Some(parts),
+                                    None => {
+                                        *slot = AppState::MotorCalibrationRunning(ticker, cycles);
+                                        None
+                                    }
+                                }
+                            }
+                            other => {
+                                *slot = other;
+                                None
+                            }
+                        }
+                    });
+                    if let Some(parts) = taken {
+                        break parts;
+                    }
+                    thread::yield_now();
+                };
                 println!(
                     "main: received motor calibration result: pole_pairs={}, R={:.4} ohm, L={:.8} H, psi={:.6} Wb, offset={:.4} rad",
                     result.pole_pairs,
@@ -631,25 +580,35 @@ fn main_context_loop(plot_path: &str) {
                 motor_params = Some(result.into_motor_params(MotorLimits {
                     max_phase_current: Amps::new(10.0),
                     max_mech_speed: Some(RadPerSec::new(150.0)),
+                    max_winding_temperature_c: None,
                 }));
-
-                app_state.with_mut(|slot| {
-                    let state = core::mem::replace(slot, AppState::Empty);
-                    let AppState::MotorCalibrationReady(_system) = state else {
-                        panic!("main: unexpected state while transitioning from motor calibration");
-                    };
-                });
+                motor_calibration_handle = None;
 
                 println!("phase 2: actuator calibration");
-                let actuator_calibration = ActuatorCalibrationSystem::new(
-                    runtime_hardware(shared),
-                    motor_params.unwrap(),
-                    inverter_params(),
-                    current_loop_config(),
-                    fluxkit::math::Svpwm,
-                    PassThroughEstimator::new(),
-                    PassThroughEstimator::new(),
-                    ActuatorCalibrationRequest::default(),
+                let actuator_calibration = ActuatorCalibrationRuntime::from_parts(
+                    fluxkit::MotorRuntimeParts {
+                        pwm: parts.pwm,
+                        current: parts.current,
+                        bus: parts.bus,
+                        rotor: parts.rotor,
+                        output: SimOutput { shared },
+                        temp: parts.temp,
+                        motor: motor_params.unwrap(),
+                        inverter: inverter_params(),
+                        actuator: ActuatorParams::from_model_limits_and_compensation(
+                            fluxkit::ActuatorModel { gear_ratio: 1.0 },
+                            ActuatorLimits {
+                                max_output_velocity: Some(RadPerSec::new(10.0)),
+                                max_output_torque: None,
+                            },
+                            fluxkit::ActuatorCompensationConfig::disabled(),
+                        ),
+                        current_loop: current_loop_config(result),
+                        modulator: parts.modulator,
+                        rotor_estimator: parts.rotor_estimator,
+                        output_estimator: PassThroughEstimator::new(),
+                    },
+                    ActuatorCalibrationRequest::all(),
                     ActuatorCalibrationLimits {
                         max_velocity_target: RadPerSec::new(10.0),
                         max_torque_target: NewtonMeters::new(0.3),
@@ -658,12 +617,43 @@ fn main_context_loop(plot_path: &str) {
                     FAST_DT_SECONDS,
                 )
                 .unwrap();
-                app_state.with_mut(|slot| {
-                    *slot = AppState::ActuatorCalibrationRunning(actuator_calibration, 0);
-                });
+                let actuator_calibration = ACTUATOR_CALIBRATION_RUNTIME.init(actuator_calibration);
+                let (handle, ticker) = actuator_calibration.split().unwrap();
+                actuator_calibration_handle = Some(handle);
+                actuator_calibration_owner = Some(actuator_calibration);
+                app_state.with_mut(|slot| *slot = AppState::ActuatorCalibrationRunning(ticker, 0));
             }
-        } else if !runtime_started {
-            if let Some(result) = actuator_mailbox.take() {
+        } else if !app_state.with(|slot| matches!(slot, AppState::RuntimeRunning(..))) {
+            let actuator_result = actuator_calibration_handle
+                .as_ref()
+                .and_then(|handle| handle.status().result);
+            if let Some(result) = actuator_result {
+                let parts = loop {
+                    let taken = app_state.with_mut(|slot| {
+                        match core::mem::replace(slot, AppState::Empty) {
+                            AppState::ActuatorCalibrationRunning(ticker, cycles) => {
+                                let owner = actuator_calibration_owner
+                                    .expect("actuator calibration owner should be initialized");
+                                match owner.try_into_parts() {
+                                    Some(parts) => Some(parts),
+                                    None => {
+                                        *slot =
+                                            AppState::ActuatorCalibrationRunning(ticker, cycles);
+                                        None
+                                    }
+                                }
+                            }
+                            other => {
+                                *slot = other;
+                                None
+                            }
+                        }
+                    });
+                    if let Some(parts) = taken {
+                        break parts;
+                    }
+                    thread::yield_now();
+                };
                 println!(
                     "main: received actuator calibration result: gear_ratio={:.4}, breakaway=({:.4}, {:.4}) Nm, coulomb=({:.4}, {:.4}) Nm, viscous=({:.4}, {:.4}), blend={:.4} rad/s",
                     result.gear_ratio,
@@ -683,47 +673,32 @@ fn main_context_loop(plot_path: &str) {
                     NewtonMeters::new(0.3),
                 );
 
-                app_state.with_mut(|slot| {
-                    let state = core::mem::replace(slot, AppState::Empty);
-                    let AppState::ActuatorCalibrationReady(_system) = state else {
-                        panic!(
-                            "main: unexpected state while transitioning from actuator calibration"
-                        );
-                    };
-                });
-
                 println!("phase 3: runtime control");
-                let runtime_system = MotorSystem::new(
-                    runtime_hardware(shared),
-                    fluxkit::MotorController::new(
-                        motor_params.unwrap(),
-                        inverter_params(),
-                        actuator_params,
-                        current_loop_config(),
-                    ),
-                    PassThroughEstimator::new(),
-                    PassThroughEstimator::new(),
+                let runtime_system = MotorRuntime::from_parts(
+                    fluxkit::MotorRuntimeParts {
+                        actuator: actuator_params,
+                        ..parts
+                    },
                     FAST_DT_SECONDS,
                 );
-                let handle = runtime_system.handle();
-                handle.set_command(MotorCommand {
-                    mode: ControlMode::Velocity,
-                    output_velocity_target: RadPerSec::new(2.0),
-                    ..MotorCommand::default()
-                });
+                let runtime_system = MOTOR_RUNTIME.init(runtime_system);
+                let (handle, ticker) = runtime_system.split().unwrap();
+                handle.set_command(MotorCommand::Velocity(RadPerSec::new(2.0)));
                 handle.arm();
-                runtime_status.with_mut(|slot| *slot = Some(handle.status()));
-                runtime_started = true;
+                runtime_handle = Some(handle);
+                runtime_owner = Some(runtime_system);
+                actuator_calibration_handle = None;
                 app_state.with_mut(|slot| {
                     *slot = AppState::RuntimeRunning(
-                        runtime_system,
+                        ticker,
                         0,
                         Vec::with_capacity(RUNTIME_FAST_CYCLES as usize),
-                    );
+                    )
                 });
             }
         } else {
-            if let Some(status) = runtime_status.with(|slot| *slot) {
+            let runtime_status = runtime_handle.as_ref().map(|handle| handle.status());
+            if let Some(status) = runtime_status {
                 if status.fault_latched {
                     panic!("main: runtime fault latched");
                 }
@@ -741,20 +716,33 @@ fn main_context_loop(plot_path: &str) {
 
             let ready =
                 app_state.with_mut(|slot| match core::mem::replace(slot, AppState::Empty) {
-                    AppState::RuntimeReady(system, samples) => {
-                        *slot = AppState::Finished;
-                        Some((system, samples))
+                    AppState::RuntimeRunning(ticker, cycles, samples)
+                        if cycles >= RUNTIME_FAST_CYCLES =>
+                    {
+                        let owner = runtime_owner.expect("runtime owner should be initialized");
+                        match owner.try_into_parts() {
+                            Some(_parts) => Some(samples),
+                            None => {
+                                *slot = AppState::RuntimeRunning(ticker, cycles, samples);
+                                None
+                            }
+                        }
                     }
                     state => {
                         *slot = state;
                         None
                     }
                 });
-            if let Some((system, trace)) = ready {
+            if let Some(trace) = ready {
+                app_state.with_mut(|slot| *slot = AppState::Finished);
                 draw_velocity_plot(plot_path, &trace).unwrap();
                 println!("wrote output-velocity plot to {plot_path}");
 
-                let final_status = system.handle().status().controller;
+                let final_status = runtime_handle
+                    .as_ref()
+                    .expect("runtime handle should be available")
+                    .status()
+                    .controller;
                 println!(
                     "done: pole_pairs={}, iq={:.3}, rotor_vel={:.3}",
                     motor_params.unwrap().pole_pairs,
@@ -790,21 +778,12 @@ fn main() {
                 let GlobalRefs {
                     shared: Some(shared),
                     app_state: Some(app_state),
-                    motor_mailbox: Some(motor_mailbox),
-                    actuator_mailbox: Some(actuator_mailbox),
-                    runtime_status: Some(runtime_status),
                 } = refs
                 else {
                     thread::yield_now();
                     continue;
                 };
-                irq_loop(
-                    app_state,
-                    motor_mailbox,
-                    actuator_mailbox,
-                    runtime_status,
-                    shared,
-                );
+                irq_loop(app_state, shared);
                 break;
             }
         });

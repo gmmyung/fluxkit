@@ -5,23 +5,23 @@ use std::{
     thread,
 };
 
-use fluxkit::core::MotorCalibration;
 use fluxkit::{
-    ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
-    ActuatorCalibrationSystem, ActuatorLimits, ContinuousMechanicalAngle, ControlMode,
-    CurrentLoopConfig, ElectricalAngle, InverterParams, MotorCalibrationLimits,
-    MotorCalibrationPhase, MotorCalibrationRequest, MotorCalibrationSystem, MotorCommand,
-    MotorHardware, MotorLimits, MotorModel, MotorParams, MotorSystem, PassThroughEstimator,
-    centered_phase_duty,
-    hal::{
-        BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
-        PhaseCurrentSample, PhasePwm, RotorReading, RotorSensor, TemperatureSensor,
-    },
-    math::{
-        inverse_clarke, inverse_park,
-        units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
-    },
+    Abc, ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
+    ActuatorCalibrationRuntime, ActuatorLimits, BusVoltageSensor, ContinuousMechanicalAngle,
+    CurrentLoopConfig, CurrentSampleValidity, CurrentSampler, ElectricalAngle, ElectricalDirection,
+    InverterParams, MechanicalAngle, MotorCalibrationLimits, MotorCalibrationPhase,
+    MotorCalibrationRequest, MotorCalibrationRuntime, MotorCommand, MotorLimits, MotorModel,
+    MotorParams, MotorRuntime, OutputReading, OutputSensor, PassThroughEstimator,
+    PhaseCurrentSample, PhasePwm, RadPerSec, RotorReading, RotorSensor, Svpwm, TemperatureSensor,
+    units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, Volts, Webers},
 };
+use fluxkit_core::{
+    FluxLinkageCalibrationResult, MotorCalibration, PhaseInductanceCalibrationResult,
+    PhaseResistanceCalibrationResult, PolePairsAndOffsetCalibrationConfig,
+    PolePairsAndOffsetCalibrationResult,
+};
+use fluxkit_hal::centered_phase_duty;
+use fluxkit_math::{inverse_clarke, inverse_park};
 use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState, ThermalPlantParams};
 
 const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
@@ -35,6 +35,7 @@ fn plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             output_inertia_kg_m2: 0.0002,
@@ -55,6 +56,7 @@ fn actuator_friction_plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -78,6 +80,7 @@ fn actuator_breakaway_plant_params() -> PmsmParams {
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: fluxkit_math::ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -102,11 +105,13 @@ fn controller_motor_params() -> MotorParams {
             d_inductance_h: Henries::new(0.000_03),
             q_inductance_h: Henries::new(0.000_03),
             flux_linkage_weber: Webers::new(0.005),
+            electrical_direction: ElectricalDirection::Positive,
             electrical_angle_offset: ElectricalAngle::new(0.0),
         },
         MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         },
     )
 }
@@ -147,19 +152,20 @@ struct SimHarness {
     plant: PmsmModel,
     bus_voltage: Volts,
     load_torque: NewtonMeters,
-    last_duty: fluxkit::math::frame::Abc<Duty>,
+    last_duty: Abc<Duty>,
     rotor_bias: f32,
 }
 
 type SharedHarness = Rc<RefCell<SimHarness>>;
 type SharedThreadHarness = Arc<Mutex<SimHarness>>;
 
-fn phase_currents(shared: &SharedHarness) -> fluxkit::math::frame::Abc<Amps> {
+fn phase_currents(shared: &SharedHarness) -> Abc<Amps> {
     let harness = shared.borrow();
     let state = *harness.plant.state();
-    let electrical_angle = fluxkit::math::angle::mechanical_to_electrical(
+    let electrical_angle = fluxkit::angle::mechanical_to_electrical_with_direction(
         state.mechanical_angle.wrapped().into(),
         harness.plant.params().pole_pairs as u32,
+        harness.plant.params().electrical_direction,
     );
     inverse_clarke(inverse_park(
         state.current_dq.map(|current| current.get()),
@@ -168,12 +174,13 @@ fn phase_currents(shared: &SharedHarness) -> fluxkit::math::frame::Abc<Amps> {
     .map(Amps::new)
 }
 
-fn phase_currents_thread(shared: &SharedThreadHarness) -> fluxkit::math::frame::Abc<Amps> {
+fn phase_currents_thread(shared: &SharedThreadHarness) -> Abc<Amps> {
     let harness = shared.lock().unwrap();
     let state = *harness.plant.state();
-    let electrical_angle = fluxkit::math::angle::mechanical_to_electrical(
+    let electrical_angle = fluxkit::angle::mechanical_to_electrical_with_direction(
         state.mechanical_angle.wrapped().into(),
         harness.plant.params().pole_pairs as u32,
+        harness.plant.params().electrical_direction,
     );
     inverse_clarke(inverse_park(
         state.current_dq.map(|current| current.get()),
@@ -198,7 +205,7 @@ impl PhasePwm for SimPwm {
     }
 
     fn set_duty(&mut self, a: Duty, b: Duty, c: Duty) -> Result<(), Self::Error> {
-        let duty = fluxkit::math::frame::Abc::new(a, b, c);
+        let duty = Abc::new(a, b, c);
         let mut harness = self.shared.borrow_mut();
         harness.last_duty = duty;
         let bus_voltage = harness.bus_voltage;
@@ -252,7 +259,7 @@ impl RotorSensor for SimRotor {
         let harness = self.shared.borrow();
         let state = *harness.plant.state();
         Ok(RotorReading {
-            mechanical_angle: fluxkit::math::MechanicalAngle::new(
+            mechanical_angle: MechanicalAngle::new(
                 state.mechanical_angle.get() + harness.rotor_bias,
             ),
             mechanical_velocity: state.mechanical_velocity,
@@ -290,7 +297,7 @@ impl PhasePwm for ThreadedSimPwm {
     }
 
     fn set_duty(&mut self, a: Duty, b: Duty, c: Duty) -> Result<(), Self::Error> {
-        let duty = fluxkit::math::frame::Abc::new(a, b, c);
+        let duty = Abc::new(a, b, c);
         let mut harness = self.shared.lock().unwrap();
         harness.last_duty = duty;
         let bus_voltage = harness.bus_voltage;
@@ -344,7 +351,7 @@ impl RotorSensor for ThreadedSimRotor {
         let harness = self.shared.lock().unwrap();
         let state = *harness.plant.state();
         Ok(RotorReading {
-            mechanical_angle: ContinuousMechanicalAngle::new(fluxkit::math::angle::wrap(
+            mechanical_angle: ContinuousMechanicalAngle::new(fluxkit::angle::wrap(
                 state.mechanical_angle.get() + harness.rotor_bias,
             ))
             .wrapped(),
@@ -383,6 +390,27 @@ impl OutputSensor for SimOutput {
             )
             .wrapped(),
             mechanical_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SimOutputInverted {
+    shared: SharedHarness,
+}
+
+impl OutputSensor for SimOutputInverted {
+    type Error = core::convert::Infallible;
+
+    fn read_output(&mut self) -> Result<OutputReading, Self::Error> {
+        let harness = self.shared.borrow();
+        let state = *harness.plant.state();
+        Ok(OutputReading {
+            mechanical_angle: ContinuousMechanicalAngle::new(
+                -(state.mechanical_angle.get() / GEAR_RATIO),
+            )
+            .wrapped(),
+            mechanical_velocity: RadPerSec::new(-(state.mechanical_velocity.get() / GEAR_RATIO)),
         })
     }
 }
@@ -435,33 +463,33 @@ fn threaded_calibration_hardware(
     )
 }
 
-fn motor_hardware(
+fn runtime_handles(
     shared: &SharedHarness,
-) -> MotorHardware<SimPwm, SimCurrent, SimBus, SimRotor, SimOutput, SimTemp> {
-    MotorHardware {
-        pwm: SimPwm {
+) -> (SimPwm, SimCurrent, SimBus, SimRotor, SimOutput, SimTemp) {
+    (
+        SimPwm {
             shared: Rc::clone(shared),
         },
-        current: SimCurrent {
+        SimCurrent {
             shared: Rc::clone(shared),
         },
-        bus: SimBus {
+        SimBus {
             shared: Rc::clone(shared),
         },
-        rotor: SimRotor {
+        SimRotor {
             shared: Rc::clone(shared),
         },
-        output: SimOutput {
+        SimOutput {
             shared: Rc::clone(shared),
         },
-        temp: SimTemp {
+        SimTemp {
             shared: Rc::clone(shared),
         },
-    }
+    )
 }
 
 #[test]
-fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
+fn motor_calibration_runtime_recovers_phase_resistance_and_inductance() {
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new(
             plant_params(),
@@ -480,15 +508,17 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
     }));
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let params = plant_params();
-    let mut system = MotorCalibrationSystem::new(
+    let system = MotorCalibrationRuntime::new(
         pwm,
         current,
         bus,
         rotor,
         temp,
-        fluxkit::math::Svpwm,
+        Svpwm,
+        PassThroughEstimator::new(),
         MotorCalibrationRequest {
             pole_pairs: Some(params.pole_pairs),
+            electrical_direction: Some(params.electrical_direction),
             electrical_angle_offset: Some(ElectricalAngle::new(0.0)),
             phase_resistance_ohm_ref: None,
             phase_inductance_h: None,
@@ -504,8 +534,10 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
     )
     .unwrap();
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
@@ -519,17 +551,18 @@ fn motor_calibration_system_recovers_phase_resistance_and_inductance() {
 
 #[test]
 fn motor_calibration_results_apply_through_public_record() {
-    let sweep_result = fluxkit::core::PolePairsAndOffsetCalibrationResult {
+    let sweep_result = PolePairsAndOffsetCalibrationResult {
         pole_pairs: 7,
+        electrical_direction: ElectricalDirection::Positive,
         electrical_angle_offset: ElectricalAngle::new(0.15),
     };
-    let resistance_result = fluxkit::core::PhaseResistanceCalibrationResult {
+    let resistance_result = PhaseResistanceCalibrationResult {
         phase_resistance_ohm_ref: Ohms::new(0.12),
     };
-    let inductance_result = fluxkit::core::PhaseInductanceCalibrationResult {
+    let inductance_result = PhaseInductanceCalibrationResult {
         phase_inductance_h: Henries::new(30.0e-6),
     };
-    let flux_linkage_result = fluxkit::core::FluxLinkageCalibrationResult {
+    let flux_linkage_result = FluxLinkageCalibrationResult {
         flux_linkage_weber: Webers::new(0.005),
     };
 
@@ -546,16 +579,19 @@ fn motor_calibration_results_apply_through_public_record() {
             d_inductance_h: Henries::new(1.0e-3),
             q_inductance_h: Henries::new(1.0e-3),
             flux_linkage_weber: Webers::new(0.001),
+            electrical_direction: ElectricalDirection::Positive,
             electrical_angle_offset: ElectricalAngle::new(0.0),
         },
         MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: None,
+            max_winding_temperature_c: None,
         },
     );
     calibration.apply_to_motor_params(&mut motor);
 
     assert_eq!(motor.pole_pairs, 7);
+    assert_eq!(motor.electrical_direction, ElectricalDirection::Positive);
     assert_eq!(motor.electrical_angle_offset, ElectricalAngle::new(0.15));
     assert_eq!(motor.phase_resistance_ohm_ref, Ohms::new(0.12));
     assert_eq!(motor.d_inductance_h, Henries::new(30.0e-6));
@@ -567,6 +603,7 @@ fn motor_calibration_results_apply_through_public_record() {
 fn motor_calibration_builds_params_from_limits() {
     let calibration = fluxkit::MotorCalibrationResult {
         pole_pairs: 7,
+        electrical_direction: ElectricalDirection::Positive,
         electrical_angle_offset: ElectricalAngle::new(0.15),
         phase_resistance_ohm_ref: Ohms::new(0.12),
         phase_inductance_h: Henries::new(30.0e-6),
@@ -576,9 +613,11 @@ fn motor_calibration_builds_params_from_limits() {
     let motor = calibration.into_motor_params(MotorLimits {
         max_phase_current: Amps::new(10.0),
         max_mech_speed: Some(RadPerSec::new(150.0)),
+        max_winding_temperature_c: None,
     });
 
     assert_eq!(motor.pole_pairs, 7);
+    assert_eq!(motor.electrical_direction, ElectricalDirection::Positive);
     assert_eq!(motor.electrical_angle_offset, ElectricalAngle::new(0.15));
     assert_eq!(motor.phase_resistance_ohm_ref, Ohms::new(0.12));
     assert_eq!(motor.d_inductance_h, Henries::new(30.0e-6));
@@ -588,7 +627,7 @@ fn motor_calibration_builds_params_from_limits() {
 }
 
 #[test]
-fn motor_calibration_system_recovers_pole_pairs_and_offset_through_public_wrapper() {
+fn motor_calibration_runtime_recovers_pole_pairs_and_offset_through_public_wrapper() {
     let params = plant_params();
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new(
@@ -607,15 +646,17 @@ fn motor_calibration_system_recovers_pole_pairs_and_offset_through_public_wrappe
         rotor_bias: -0.11,
     }));
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let mut system = MotorCalibrationSystem::new(
+    let system = MotorCalibrationRuntime::new(
         pwm,
         current,
         bus,
         rotor,
         temp,
-        fluxkit::math::Svpwm,
+        Svpwm,
+        PassThroughEstimator::new(),
         MotorCalibrationRequest {
             pole_pairs: None,
+            electrical_direction: None,
             electrical_angle_offset: None,
             phase_resistance_ohm_ref: Some(params.phase_resistance_ohm_ref),
             phase_inductance_h: Some(params.d_inductance_h),
@@ -631,23 +672,27 @@ fn motor_calibration_system_recovers_pole_pairs_and_offset_through_public_wrappe
     )
     .unwrap();
     let align_stator_angle =
-        fluxkit::core::PolePairsAndOffsetCalibrationConfig::default_for_sweep().align_stator_angle;
+        PolePairsAndOffsetCalibrationConfig::default_for_sweep().align_stator_angle;
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
 
     assert_eq!(result.pole_pairs, params.pole_pairs);
+    assert_eq!(result.electrical_direction, params.electrical_direction);
     let harness = shared.borrow();
-    let last_mechanical_angle = ContinuousMechanicalAngle::new(fluxkit::math::angle::wrap(
+    let last_mechanical_angle = ContinuousMechanicalAngle::new(fluxkit::angle::wrap(
         harness.plant.state().mechanical_angle.get() + harness.rotor_bias,
     ));
-    let reconstructed = fluxkit::math::angle::wrap(
-        fluxkit::math::angle::mechanical_to_electrical(
+    let reconstructed = fluxkit::angle::wrap(
+        fluxkit::angle::mechanical_to_electrical_with_direction(
             last_mechanical_angle,
             result.pole_pairs as u32,
+            result.electrical_direction,
         )
         .get()
             + result.electrical_angle_offset.get()
@@ -657,7 +702,57 @@ fn motor_calibration_system_recovers_pole_pairs_and_offset_through_public_wrappe
 }
 
 #[test]
-fn calibration_systems_report_current_or_next_phase() {
+fn motor_calibration_runtime_recovers_negative_electrical_direction() {
+    let mut params = plant_params();
+    params.electrical_direction = ElectricalDirection::Negative;
+    let shared = Rc::new(RefCell::new(SimHarness {
+        plant: PmsmModel::new_zeroed(params).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+        rotor_bias: 0.0,
+    }));
+
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
+    let system = MotorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        temp,
+        Svpwm,
+        PassThroughEstimator::new(),
+        MotorCalibrationRequest {
+            pole_pairs: None,
+            electrical_direction: None,
+            electrical_angle_offset: None,
+            phase_resistance_ohm_ref: Some(params.phase_resistance_ohm_ref),
+            phase_inductance_h: Some(params.d_inductance_h),
+            flux_linkage_weber: Some(params.flux_linkage_weber),
+        },
+        MotorCalibrationLimits {
+            max_align_voltage_mag: Volts::new(2.5),
+            max_spin_voltage_mag: Volts::new(3.0),
+            max_electrical_velocity: RadPerSec::new(10.0),
+            timeout_seconds: 4.0,
+        },
+        FAST_DT_SECONDS,
+    )
+    .unwrap();
+
+    let (handle, ticker) = system.split().expect("calibration should split once");
+    let result = loop {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
+            break result;
+        }
+    };
+
+    assert_eq!(result.electrical_direction, ElectricalDirection::Negative);
+}
+
+#[test]
+fn calibration_runtimes_report_current_or_next_phase() {
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new_zeroed(plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
@@ -667,15 +762,17 @@ fn calibration_systems_report_current_or_next_phase() {
     }));
 
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let motor = MotorCalibrationSystem::new(
+    let motor = MotorCalibrationRuntime::new(
         pwm,
         current,
         bus,
         rotor,
         temp,
-        fluxkit::math::Svpwm,
+        Svpwm,
+        PassThroughEstimator::new(),
         MotorCalibrationRequest {
             pole_pairs: None,
+            electrical_direction: None,
             electrical_angle_offset: None,
             phase_resistance_ohm_ref: Some(Ohms::new(0.12)),
             phase_inductance_h: Some(Henries::new(0.000_03)),
@@ -690,17 +787,25 @@ fn calibration_systems_report_current_or_next_phase() {
         FAST_DT_SECONDS,
     )
     .unwrap();
+    let (motor_handle, _motor_ticker) = motor.split().expect("calibration should split once");
     assert_eq!(
-        motor.phase(),
+        motor_handle.status().phase,
         Some(MotorCalibrationPhase::PolePairsAndOffset)
     );
+    assert_eq!(motor_handle.status().result, None);
 
-    let actuator = ActuatorCalibrationSystem::new(
-        motor_hardware(&shared),
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let actuator = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
         controller_motor_params(),
         inverter_params(),
         current_loop_config(),
-        fluxkit::math::Svpwm,
+        Svpwm,
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -721,11 +826,107 @@ fn calibration_systems_report_current_or_next_phase() {
         FAST_DT_SECONDS,
     )
     .unwrap();
-    assert_eq!(actuator.phase(), Some(ActuatorCalibrationPhase::Friction));
+    let (actuator_handle, _actuator_ticker) =
+        actuator.split().expect("calibration should split once");
+    assert_eq!(
+        actuator_handle.status().phase,
+        Some(ActuatorCalibrationPhase::Friction)
+    );
+    assert_eq!(actuator_handle.status().result, None);
 }
 
 #[test]
-fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
+fn calibration_handles_publish_completion() {
+    let shared = Rc::new(RefCell::new(SimHarness {
+        plant: PmsmModel::new_zeroed(plant_params()).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+        rotor_bias: 0.0,
+    }));
+
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
+    let motor = MotorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        temp,
+        Svpwm,
+        PassThroughEstimator::new(),
+        MotorCalibrationRequest::all(),
+        MotorCalibrationLimits {
+            max_align_voltage_mag: Volts::new(2.0),
+            max_spin_voltage_mag: Volts::new(3.0),
+            max_electrical_velocity: RadPerSec::new(60.0),
+            timeout_seconds: 6.0,
+        },
+        FAST_DT_SECONDS,
+    )
+    .unwrap();
+
+    let (motor_handle, motor_ticker) = motor.split().expect("calibration should split once");
+    loop {
+        motor_ticker.tick().unwrap();
+        if motor_handle.status().result.is_some() {
+            break;
+        }
+    }
+
+    let motor_status = motor_handle.status();
+    assert_eq!(motor_status.fault_latched, false);
+    assert_eq!(motor_status.phase, None);
+    let motor_result = motor_status
+        .result
+        .expect("motor result should be published");
+
+    let motor_params = motor_result.into_motor_params(MotorLimits {
+        max_phase_current: Amps::new(10.0),
+        max_mech_speed: Some(RadPerSec::new(150.0)),
+        max_winding_temperature_c: None,
+    });
+
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let actuator = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
+        motor_params,
+        inverter_params(),
+        current_loop_config(),
+        Svpwm,
+        PassThroughEstimator::new(),
+        PassThroughEstimator::new(),
+        ActuatorCalibrationRequest::all(),
+        ActuatorCalibrationLimits {
+            max_velocity_target: RadPerSec::new(10.0),
+            max_torque_target: NewtonMeters::new(0.3),
+            timeout_seconds: 20.0,
+        },
+        FAST_DT_SECONDS,
+    )
+    .unwrap();
+
+    let (actuator_handle, actuator_ticker) =
+        actuator.split().expect("calibration should split once");
+    loop {
+        actuator_ticker.tick().unwrap();
+        if actuator_handle.status().result.is_some() {
+            break;
+        }
+    }
+
+    let actuator_status = actuator_handle.status();
+    assert_eq!(actuator_status.fault_latched, false);
+    assert_eq!(actuator_status.phase, None);
+    assert!(actuator_status.result.is_some());
+}
+
+#[test]
+fn motor_calibration_runtime_recovers_flux_linkage_through_public_wrapper() {
     let params = plant_params();
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new(
@@ -744,15 +945,17 @@ fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
         rotor_bias: 0.0,
     }));
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let mut system = MotorCalibrationSystem::new(
+    let system = MotorCalibrationRuntime::new(
         pwm,
         current,
         bus,
         rotor,
         temp,
-        fluxkit::math::Svpwm,
+        Svpwm,
+        PassThroughEstimator::new(),
         MotorCalibrationRequest {
             pole_pairs: Some(params.pole_pairs),
+            electrical_direction: Some(params.electrical_direction),
             electrical_angle_offset: Some(ElectricalAngle::new(0.0)),
             phase_resistance_ohm_ref: Some(params.phase_resistance_ohm_ref),
             phase_inductance_h: Some(params.d_inductance_h),
@@ -768,8 +971,10 @@ fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
     )
     .unwrap();
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
@@ -778,7 +983,7 @@ fn motor_calibration_system_recovers_flux_linkage_through_public_wrapper() {
 }
 
 #[test]
-fn actuator_calibration_system_recovers_gear_ratio_through_public_wrapper() {
+fn actuator_calibration_runtime_recovers_gear_ratio_through_public_wrapper() {
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new_zeroed(actuator_friction_plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
@@ -787,12 +992,18 @@ fn actuator_calibration_system_recovers_gear_ratio_through_public_wrapper() {
         rotor_bias: 0.0,
     }));
 
-    let mut system = ActuatorCalibrationSystem::new(
-        motor_hardware(&shared),
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let system = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
         controller_motor_params(),
         inverter_params(),
         current_loop_config(),
-        fluxkit::math::Svpwm,
+        Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -814,20 +1025,132 @@ fn actuator_calibration_system_recovers_gear_ratio_through_public_wrapper() {
     )
     .unwrap();
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
 
     assert!((result.gear_ratio - GEAR_RATIO).abs() < 0.05);
-    let motor_system = system.into_motor_system();
-    let (_, controller, _, _) = motor_system.into_parts();
-    assert!((controller.actuator_params().gear_ratio - GEAR_RATIO).abs() < 0.05);
 }
 
 #[test]
-fn actuator_calibration_system_recovers_breakaway_through_public_wrapper() {
+fn actuator_calibration_runtime_faults_on_opposite_output_sensor_direction() {
+    let shared = Rc::new(RefCell::new(SimHarness {
+        plant: PmsmModel::new_zeroed(actuator_friction_plant_params()).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+        rotor_bias: 0.0,
+    }));
+
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
+    let output = SimOutputInverted {
+        shared: Rc::clone(&shared),
+    };
+    let system = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
+        controller_motor_params(),
+        inverter_params(),
+        current_loop_config(),
+        Svpwm,
+        fluxkit::PassThroughEstimator::new(),
+        fluxkit::PassThroughEstimator::new(),
+        ActuatorCalibrationRequest {
+            gear_ratio: None,
+            positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
+            negative_coulomb_torque: Some(NewtonMeters::new(0.05)),
+            positive_viscous_coefficient: Some(0.02),
+            negative_viscous_coefficient: Some(0.03),
+            positive_breakaway_torque: Some(NewtonMeters::ZERO),
+            negative_breakaway_torque: Some(NewtonMeters::ZERO),
+            zero_velocity_blend_band: Some(RadPerSec::new(0.05)),
+        },
+        ActuatorCalibrationLimits {
+            max_velocity_target: RadPerSec::new(10.0),
+            max_torque_target: NewtonMeters::new(0.3),
+            timeout_seconds: 5.0,
+        },
+        FAST_DT_SECONDS,
+    )
+    .unwrap();
+
+    let (handle, ticker) = system.split().expect("calibration should split once");
+    let error = loop {
+        match ticker.tick() {
+            Ok(()) => {}
+            Err(error) => break error,
+        }
+    };
+
+    assert!(matches!(
+        error,
+        fluxkit::ActuatorCalibrationRuntimeError::Calibration(
+            fluxkit::CalibrationError::OppositeDirection
+        )
+    ));
+    assert!(handle.status().fault_latched);
+}
+
+#[test]
+fn extracted_actuator_calibration_marks_handles_and_tickers_inactive() {
+    let shared = Rc::new(RefCell::new(SimHarness {
+        plant: PmsmModel::new_zeroed(actuator_breakaway_plant_params()).unwrap(),
+        bus_voltage: Volts::new(24.0),
+        load_torque: NewtonMeters::ZERO,
+        last_duty: centered_phase_duty(),
+        rotor_bias: 0.0,
+    }));
+    let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
+    let output = SimOutput {
+        shared: Rc::clone(&shared),
+    };
+
+    let system = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
+        controller_motor_params(),
+        inverter_params(),
+        current_loop_config(),
+        Svpwm,
+        PassThroughEstimator::new(),
+        PassThroughEstimator::new(),
+        ActuatorCalibrationRequest::all(),
+        ActuatorCalibrationLimits {
+            max_velocity_target: RadPerSec::new(10.0),
+            max_torque_target: NewtonMeters::new(0.3),
+            timeout_seconds: 5.0,
+        },
+        FAST_DT_SECONDS,
+    )
+    .unwrap();
+
+    let (handle, ticker) = system.split().expect("calibration should split once");
+
+    let _parts = system
+        .try_into_parts()
+        .expect("runtime parts should be available");
+
+    assert!(!handle.status().active);
+    assert!(matches!(
+        ticker.tick(),
+        Err(fluxkit::ActuatorCalibrationRuntimeError::Inactive)
+    ));
+}
+
+#[test]
+fn actuator_calibration_runtime_recovers_breakaway_through_public_wrapper() {
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new_zeroed(actuator_breakaway_plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
@@ -836,12 +1159,18 @@ fn actuator_calibration_system_recovers_breakaway_through_public_wrapper() {
         rotor_bias: 0.0,
     }));
 
-    let mut system = ActuatorCalibrationSystem::new(
-        motor_hardware(&shared),
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let system = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
         controller_motor_params(),
         inverter_params(),
         current_loop_config(),
-        fluxkit::math::Svpwm,
+        Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -863,8 +1192,10 @@ fn actuator_calibration_system_recovers_breakaway_through_public_wrapper() {
     )
     .unwrap();
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
@@ -873,7 +1204,7 @@ fn actuator_calibration_system_recovers_breakaway_through_public_wrapper() {
 }
 
 #[test]
-fn actuator_calibration_system_recovers_zero_velocity_blend_band_through_public_wrapper() {
+fn actuator_calibration_runtime_recovers_zero_velocity_blend_band_through_public_wrapper() {
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new_zeroed(actuator_breakaway_plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
@@ -882,12 +1213,18 @@ fn actuator_calibration_system_recovers_zero_velocity_blend_band_through_public_
         rotor_bias: 0.0,
     }));
 
-    let mut system = ActuatorCalibrationSystem::new(
-        motor_hardware(&shared),
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let system = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
         controller_motor_params(),
         inverter_params(),
         current_loop_config(),
-        fluxkit::math::Svpwm,
+        Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -909,8 +1246,10 @@ fn actuator_calibration_system_recovers_zero_velocity_blend_band_through_public_
     )
     .unwrap();
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
@@ -918,7 +1257,7 @@ fn actuator_calibration_system_recovers_zero_velocity_blend_band_through_public_
 }
 
 #[test]
-fn motor_calibration_system_runs_request_driven_campaign() {
+fn motor_calibration_runtime_runs_request_driven_campaign() {
     let params = plant_params();
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new(
@@ -937,14 +1276,15 @@ fn motor_calibration_system_runs_request_driven_campaign() {
         rotor_bias: 0.21,
     }));
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let mut system = MotorCalibrationSystem::new(
+    let system = MotorCalibrationRuntime::new(
         pwm,
         current,
         bus,
         rotor,
         temp,
-        fluxkit::math::Svpwm,
-        MotorCalibrationRequest::default(),
+        Svpwm,
+        PassThroughEstimator::new(),
+        MotorCalibrationRequest::all(),
         MotorCalibrationLimits {
             max_align_voltage_mag: Volts::new(2.0),
             max_spin_voltage_mag: Volts::new(3.0),
@@ -955,8 +1295,10 @@ fn motor_calibration_system_runs_request_driven_campaign() {
     )
     .unwrap();
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
@@ -997,14 +1339,15 @@ fn motor_calibration_result_can_be_sent_from_irq_thread_to_main_context() {
     thread::scope(|scope| {
         scope.spawn(move || {
             let (pwm, current, bus, rotor, temp) = threaded_calibration_hardware(&shared_for_irq);
-            let mut system = MotorCalibrationSystem::new(
+            let system = MotorCalibrationRuntime::new(
                 pwm,
                 current,
                 bus,
                 rotor,
                 temp,
-                fluxkit::math::Svpwm,
-                MotorCalibrationRequest::default(),
+                Svpwm,
+                PassThroughEstimator::new(),
+                MotorCalibrationRequest::all(),
                 MotorCalibrationLimits {
                     max_align_voltage_mag: Volts::new(2.0),
                     max_spin_voltage_mag: Volts::new(3.0),
@@ -1015,8 +1358,10 @@ fn motor_calibration_result_can_be_sent_from_irq_thread_to_main_context() {
             )
             .unwrap();
 
+            let (handle, ticker) = system.split().expect("calibration should split once");
             let result = loop {
-                if let Some(result) = system.tick().unwrap() {
+                ticker.tick().unwrap();
+                if let Some(result) = handle.status().result {
                     break result;
                 }
             };
@@ -1028,6 +1373,7 @@ fn motor_calibration_result_can_be_sent_from_irq_thread_to_main_context() {
         let motor_params = result.into_motor_params(MotorLimits {
             max_phase_current: Amps::new(10.0),
             max_mech_speed: Some(RadPerSec::new(150.0)),
+            max_winding_temperature_c: None,
         });
 
         assert_eq!(motor_params.pole_pairs, params.pole_pairs);
@@ -1046,7 +1392,7 @@ fn motor_calibration_result_can_be_sent_from_irq_thread_to_main_context() {
 }
 
 #[test]
-fn actuator_calibration_system_applies_provided_and_measured_values_through_live_controller() {
+fn actuator_calibration_runtime_applies_provided_and_measured_values_through_live_controller() {
     let shared = Rc::new(RefCell::new(SimHarness {
         plant: PmsmModel::new_zeroed(actuator_breakaway_plant_params()).unwrap(),
         bus_voltage: Volts::new(24.0),
@@ -1055,12 +1401,18 @@ fn actuator_calibration_system_applies_provided_and_measured_values_through_live
         rotor_bias: 0.0,
     }));
 
-    let mut system = ActuatorCalibrationSystem::new(
-        motor_hardware(&shared),
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let system = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
         controller_motor_params(),
         inverter_params(),
         current_loop_config(),
-        fluxkit::math::Svpwm,
+        Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -1082,8 +1434,10 @@ fn actuator_calibration_system_applies_provided_and_measured_values_through_live
     )
     .unwrap();
 
+    let (handle, ticker) = system.split().expect("calibration should split once");
     let result = loop {
-        if let Some(result) = system.tick().unwrap() {
+        ticker.tick().unwrap();
+        if let Some(result) = handle.status().result {
             break result;
         }
     };
@@ -1093,20 +1447,6 @@ fn actuator_calibration_system_applies_provided_and_measured_values_through_live
     assert!((result.negative_coulomb_torque.get() - 0.05).abs() < 1.0e-6);
     assert!(result.positive_breakaway_torque.get().is_finite());
     assert!(result.zero_velocity_blend_band.get().is_finite());
-    let motor_system = system.into_motor_system();
-    let (_, controller, _, _) = motor_system.into_parts();
-    assert!((controller.actuator_params().gear_ratio - GEAR_RATIO).abs() < 1.0e-6);
-    assert!(
-        (controller
-            .actuator_params()
-            .compensation
-            .friction
-            .positive_coulomb_torque
-            .get()
-            - 0.04)
-            .abs()
-            < 1.0e-6
-    );
 }
 
 #[test]
@@ -1166,6 +1506,7 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
         d_inductance_h: Henries::new(0.000_03),
         q_inductance_h: Henries::new(0.000_03),
         flux_linkage_weber: Webers::new(0.005),
+        electrical_direction: ElectricalDirection::Positive,
         thermal: ThermalPlantParams::default_for_ambient(WINDING_TEMP_C),
         actuator: ActuatorPlantParams {
             gear_ratio: GEAR_RATIO,
@@ -1198,14 +1539,15 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
     }));
 
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let mut motor_calibration = MotorCalibrationSystem::new(
+    let motor_calibration = MotorCalibrationRuntime::new(
         pwm,
         current,
         bus,
         rotor,
         temp,
-        fluxkit::math::Svpwm,
-        MotorCalibrationRequest::default(),
+        Svpwm,
+        PassThroughEstimator::new(),
+        MotorCalibrationRequest::all(),
         MotorCalibrationLimits {
             max_align_voltage_mag: Volts::new(2.0),
             max_spin_voltage_mag: Volts::new(3.0),
@@ -1216,8 +1558,12 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
     )
     .unwrap();
 
+    let (motor_handle, motor_ticker) = motor_calibration
+        .split()
+        .expect("calibration should split once");
     let motor_result = loop {
-        if let Some(result) = motor_calibration.tick().unwrap() {
+        motor_ticker.tick().unwrap();
+        if let Some(result) = motor_handle.status().result {
             break result;
         }
     };
@@ -1236,17 +1582,24 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
     let motor_params = motor_result.into_motor_params(MotorLimits {
         max_phase_current: Amps::new(10.0),
         max_mech_speed: Some(RadPerSec::new(150.0)),
+        max_winding_temperature_c: None,
     });
 
-    let mut actuator_calibration = ActuatorCalibrationSystem::new(
-        motor_hardware(&shared),
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let actuator_calibration = ActuatorCalibrationRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
         motor_params,
         inverter_params(),
         current_loop_config(),
-        fluxkit::math::Svpwm,
+        Svpwm,
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
-        ActuatorCalibrationRequest::default(),
+        ActuatorCalibrationRequest::all(),
         ActuatorCalibrationLimits {
             max_velocity_target: RadPerSec::new(10.0),
             max_torque_target: NewtonMeters::new(0.3),
@@ -1256,8 +1609,12 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
     )
     .unwrap();
 
+    let (actuator_handle, actuator_ticker) = actuator_calibration
+        .split()
+        .expect("calibration should split once");
     let actuator_result = loop {
-        if let Some(result) = actuator_calibration.tick().unwrap() {
+        actuator_ticker.tick().unwrap();
+        if let Some(result) = actuator_handle.status().result {
             break result;
         }
     };
@@ -1279,34 +1636,36 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
         NewtonMeters::new(0.3),
     );
 
-    let controller = fluxkit::MotorController::new(
-        motor_params,
-        inverter_params(),
-        actuator_params,
-        current_loop_config(),
-    );
-    let mut runtime = MotorSystem::new(
-        motor_hardware(&shared),
-        controller,
+    let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
+    let runtime = MotorRuntime::new(
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
+        fluxkit::MotorRuntimeParams::new(
+            motor_params,
+            inverter_params(),
+            actuator_params,
+            current_loop_config(),
+            FAST_DT_SECONDS,
+        ),
+        Svpwm,
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
-        FAST_DT_SECONDS,
     );
 
-    let handle = runtime.handle();
-    handle.set_command(MotorCommand {
-        mode: ControlMode::Velocity,
-        output_velocity_target: RadPerSec::new(2.0),
-        ..MotorCommand::default()
-    });
+    let (handle, runtime_ticker) = runtime.split().expect("runtime should split once");
+    handle.set_command(MotorCommand::Velocity(RadPerSec::new(2.0)));
     handle.arm();
 
     for _ in 0..100_000 {
-        let _ = runtime.tick().unwrap();
+        runtime_ticker.tick().unwrap();
     }
 
-    let status = runtime.handle().status().controller;
-    assert_eq!(runtime.handle().status().fault_latched, false);
+    let status = handle.status().controller;
+    assert_eq!(handle.status().fault_latched, false);
     assert_eq!(status.active_error, None);
     assert!((status.last_output_mechanical_velocity.get() - 2.0).abs() < 0.25);
 }
