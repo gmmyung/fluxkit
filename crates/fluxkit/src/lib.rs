@@ -181,8 +181,8 @@ pub use fluxkit_hal::{
 pub use fluxkit_math::{
     Abc, Amps, ContinuousMechanicalAngle, Dq, Duty, ElectricalAngle, ElectricalDirection, Henries,
     Hertz, MechanicalAngle, MechanicalMotionEstimate, MechanicalMotionSample, MechanicalMotionSeed,
-    Modulator, NewtonMeters, Ohms, PassThroughEstimator, PhaseDuty, RadPerSec, SinePwm, Svpwm,
-    Volts, Webers, WrappedEstimator, angle, units,
+    Modulator, NewtonMeters, Ohms, PassThroughEstimator, PhaseDuty, PllEstimator,
+    PllEstimatorConfig, RadPerSec, SinePwm, Svpwm, Volts, Webers, WrappedEstimator, angle, units,
 };
 pub use system::MotorRuntimeError;
 pub use system::{

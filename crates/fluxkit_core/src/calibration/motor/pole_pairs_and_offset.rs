@@ -49,16 +49,16 @@ impl PolePairsAndOffsetCalibrationConfig {
     /// Returns a conservative default suitable for slow host-side testing.
     pub fn default_for_sweep() -> Self {
         Self {
-            align_voltage_mag: Volts::new(1.0),
+            align_voltage_mag: Volts::new(1.5),
             align_stator_angle: ElectricalAngle::new(0.0),
             sweep_electrical_velocity: RadPerSec::new(8.0),
-            sweep_electrical_cycles: 3.0,
+            sweep_electrical_cycles: 6.0,
             settle_velocity_threshold: RadPerSec::new(0.05),
             initial_settle_time_seconds: 0.05,
             final_settle_time_seconds: 0.05,
             pole_pair_rounding_tolerance: 0.2,
             max_pole_pairs: 64,
-            timeout_seconds: 5.0,
+            timeout_seconds: 6.0,
         }
     }
 }
@@ -371,5 +371,48 @@ mod tests {
         assert_eq!(calibrator.error(), None);
         let result = calibrator.result().unwrap();
         assert_eq!(result.pole_pairs, 7);
+    }
+
+    #[test]
+    fn default_sweep_supports_fourteen_pole_pairs() {
+        let config = PolePairsAndOffsetCalibrationConfig::default_for_sweep();
+        let mut calibrator = PolePairsAndOffsetCalibrator::new(config).unwrap();
+        let pole_pairs = 14.0_f32;
+        let encoder_bias = -0.15_f32;
+        let dt = 0.001;
+        let mut commanded_electrical_angle = config.align_stator_angle.get();
+
+        for step in 0..10_000 {
+            let electrical_velocity = if step < 100 {
+                0.0
+            } else if step
+                < 100
+                    + ((config.sweep_electrical_cycles * TAU)
+                        / config.sweep_electrical_velocity.get().abs()
+                        / dt) as usize
+            {
+                config.sweep_electrical_velocity.get()
+            } else {
+                0.0
+            };
+
+            commanded_electrical_angle += electrical_velocity * dt;
+            let mechanical_angle =
+                MechanicalAngle::new(wrap(commanded_electrical_angle / pole_pairs + encoder_bias));
+            let velocity = RadPerSec::new(electrical_velocity / pole_pairs);
+            let _ = calibrator.tick(PolePairsAndOffsetCalibrationInput {
+                mechanical_angle,
+                mechanical_velocity: velocity,
+                dt_seconds: dt,
+            });
+
+            if calibrator.result().is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(calibrator.error(), None);
+        let result = calibrator.result().unwrap();
+        assert_eq!(result.pole_pairs, 14);
     }
 }
