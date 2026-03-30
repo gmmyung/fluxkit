@@ -84,6 +84,7 @@ use fluxkit_math::{
 };
 
 use crate::CapabilitySplitError;
+use crate::capability::{split_once, take_active_inner};
 
 /// Private hardware handles owned by one motor-control runtime.
 #[derive(Debug)]
@@ -616,12 +617,10 @@ where
         ),
         CapabilitySplitError,
     > {
-        if !critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active) {
-            return Err(CapabilitySplitError::Inactive);
-        }
-        if self.split_taken.replace(true) {
-            return Err(CapabilitySplitError::AlreadySplit);
-        }
+        split_once(
+            critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active),
+            &self.split_taken,
+        )?;
         Ok((
             MotorHandle {
                 shared: &self.shared,
@@ -718,16 +717,17 @@ where
                 shared.status.armed = armed;
             }
         });
-        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
-            .ok_or_else(|| {
-                let active =
-                    critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active);
+        let mut inner = take_active_inner(
+            &self.inner,
+            || critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active),
+            |active| {
                 if active {
                     MotorRuntimeError::Busy
                 } else {
                     MotorRuntimeError::Inactive
                 }
-            })?;
+            },
+        )?;
         {
             let mut runtime = RuntimeLoop {
                 runtime: &mut inner,
@@ -806,16 +806,17 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
-            .ok_or_else(|| {
-                let active =
-                    critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active);
+        let mut inner = take_active_inner(
+            self.inner,
+            || critical_section::with(|cs| self.shared.borrow(cs).borrow().status.active),
+            |active| {
                 if active {
                     MotorRuntimeError::Busy
                 } else {
                     MotorRuntimeError::Inactive
                 }
-            })?;
+            },
+        )?;
         let result = {
             let mut runtime = RuntimeLoop {
                 runtime: &mut inner,

@@ -1,4 +1,9 @@
-use core::fmt;
+use core::{
+    cell::{Cell, RefCell},
+    fmt,
+};
+
+use critical_section::Mutex;
 
 /// Failure returned when a runtime or calibration owner cannot be split into
 /// its unique handle and ticker capabilities.
@@ -22,3 +27,27 @@ impl fmt::Display for CapabilitySplitError {
 }
 
 impl core::error::Error for CapabilitySplitError {}
+
+#[inline]
+pub(crate) fn split_once(
+    active: bool,
+    split_taken: &Cell<bool>,
+) -> Result<(), CapabilitySplitError> {
+    if !active {
+        return Err(CapabilitySplitError::Inactive);
+    }
+    if split_taken.replace(true) {
+        return Err(CapabilitySplitError::AlreadySplit);
+    }
+    Ok(())
+}
+
+#[inline]
+pub(crate) fn take_active_inner<T, E>(
+    inner: &Mutex<RefCell<Option<T>>>,
+    is_active: impl FnOnce() -> bool,
+    error_from_active: impl FnOnce(bool) -> E,
+) -> Result<T, E> {
+    critical_section::with(|cs| inner.borrow(cs).borrow_mut().take())
+        .ok_or_else(|| error_from_active(is_active()))
+}

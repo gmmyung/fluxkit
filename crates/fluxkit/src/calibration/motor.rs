@@ -21,6 +21,7 @@ use fluxkit_math::{
 
 use super::shared::{RoutineState, SharedStatus, read_status, write_status};
 use crate::CapabilitySplitError;
+use crate::capability::{split_once, take_active_inner};
 use crate::system::MechanicalMotionEstimator;
 
 /// HAL and integration failures that can occur outside the pure calibration procedures.
@@ -718,12 +719,7 @@ where
         ),
         CapabilitySplitError,
     > {
-        if !read_status(&self.shared).active {
-            return Err(CapabilitySplitError::Inactive);
-        }
-        if self.split_taken.replace(true) {
-            return Err(CapabilitySplitError::AlreadySplit);
-        }
+        split_once(read_status(&self.shared).active, &self.split_taken)?;
         Ok((
             MotorCalibrationHandle {
                 shared: &self.shared,
@@ -750,14 +746,17 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
-            .ok_or_else(|| {
-                if read_status(&self.shared).active {
+        let mut inner = take_active_inner(
+            &self.inner,
+            || read_status(&self.shared).active,
+            |active| {
+                if active {
                     MotorCalibrationRuntimeError::Busy
                 } else {
                     MotorCalibrationRuntimeError::Inactive
                 }
-            })?;
+            },
+        )?;
         let result = inner.tick_active_routine(routine, dt_seconds);
         critical_section::with(|cs| {
             *self.inner.borrow(cs).borrow_mut() = Some(inner);
@@ -1366,14 +1365,17 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())
-            .ok_or_else(|| {
-                if read_status(self.shared).active {
+        let mut inner = take_active_inner(
+            self.inner,
+            || read_status(self.shared).active,
+            |active| {
+                if active {
                     MotorCalibrationRuntimeError::Busy
                 } else {
                     MotorCalibrationRuntimeError::Inactive
                 }
-            })?;
+            },
+        )?;
         let result = inner.tick(self.shared);
         critical_section::with(|cs| {
             *self.inner.borrow(cs).borrow_mut() = Some(inner);
