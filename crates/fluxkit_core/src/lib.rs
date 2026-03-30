@@ -24,6 +24,9 @@
 #![doc = "\n"]
 #![doc = include_str!("../../../docs/plots/closed_loop_current.svg")]
 
+#[macro_use]
+mod logging;
+
 pub mod actuator;
 pub mod calibration;
 pub mod config;

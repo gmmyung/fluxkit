@@ -181,7 +181,9 @@ pub use actuator::{
     ActuatorCalibrationRuntimeError, ActuatorCalibrationStatus, ActuatorCalibrationTicker,
 };
 pub use motor::{
-    MotorCalibrationHandle, MotorCalibrationLimits, MotorCalibrationParts, MotorCalibrationPhase,
-    MotorCalibrationRequest, MotorCalibrationResult, MotorCalibrationRuntime,
-    MotorCalibrationRuntimeError, MotorCalibrationStatus, MotorCalibrationTicker,
+    FluxLinkageRoutineConfig, MotorCalibrationConfig, MotorCalibrationHandle,
+    MotorCalibrationLimits, MotorCalibrationParts, MotorCalibrationPhase, MotorCalibrationRequest,
+    MotorCalibrationResult, MotorCalibrationRuntime, MotorCalibrationRuntimeError,
+    MotorCalibrationStatus, MotorCalibrationTicker, PhaseInductanceRoutineConfig,
+    PhaseResistanceRoutineConfig, PolePairsAndOffsetRoutineConfig,
 };

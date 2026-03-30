@@ -20,6 +20,8 @@ use fluxkit_math::{
 
 use crate::calibration::shared::CalibrationError;
 
+const DIQ_DT_FILTER_TAU_SECONDS: f32 = 1.0e-3;
+
 /// Static configuration for flux-linkage calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -49,6 +51,8 @@ pub struct FluxLinkageCalibrationConfig {
     pub initial_settle_time_seconds: f32,
     /// Minimum electrical speed required to accept flux-linkage samples.
     pub min_electrical_velocity: RadPerSec,
+    /// Warmup time for the filtered `di_q/dt` estimate before flux samples are accepted.
+    pub derivative_warmup_time_seconds: f32,
     /// Sampling window for averaging the flux-linkage estimate.
     pub sample_time_seconds: f32,
     /// Absolute timeout for the whole procedure.
@@ -68,10 +72,11 @@ impl FluxLinkageCalibrationConfig {
             spin_voltage_mag: Volts::new(2.0),
             align_stator_angle: ElectricalAngle::new(0.0),
             spin_electrical_velocity: RadPerSec::new(20.0),
-            initial_settle_velocity_threshold: RadPerSec::new(0.05),
-            initial_settle_time_seconds: 0.05,
+            initial_settle_velocity_threshold: RadPerSec::new(1.0),
+            initial_settle_time_seconds: 0.1,
             min_electrical_velocity: RadPerSec::new(8.0),
-            sample_time_seconds: 0.05,
+            derivative_warmup_time_seconds: 0.02,
+            sample_time_seconds: 1.0,
             timeout_seconds: 3.0,
         }
     }
@@ -114,8 +119,11 @@ pub struct FluxLinkageCalibrator {
     last_command_angle: Option<ElectricalAngle>,
     sample_seconds: f32,
     sample_count: u32,
+    rejected_sample_count: u32,
     flux_integral: f32,
     last_sample_iq: Option<f32>,
+    filtered_diq_dt: Option<f32>,
+    derivative_warmup_seconds: f32,
     result: Option<FluxLinkageCalibrationResult>,
     error: Option<CalibrationError>,
 }
@@ -136,8 +144,11 @@ impl FluxLinkageCalibrator {
             last_command_angle: None,
             sample_seconds: 0.0,
             sample_count: 0,
+            rejected_sample_count: 0,
             flux_integral: 0.0,
             last_sample_iq: None,
+            filtered_diq_dt: None,
+            derivative_warmup_seconds: 0.0,
             result: None,
             error: None,
         })
@@ -179,12 +190,18 @@ impl FluxLinkageCalibrator {
         }
 
         if !validate_input(input) {
+            fluxkit_warn!("flux linkage calibration invalid input");
             self.error = Some(CalibrationError::InvalidInput);
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
 
         self.elapsed_seconds += input.dt_seconds;
         if self.elapsed_seconds >= self.config.timeout_seconds {
+            fluxkit_warn!(
+                "flux linkage calibration timeout elapsed_s={} timeout_s={}",
+                self.elapsed_seconds,
+                self.config.timeout_seconds
+            );
             self.error = Some(CalibrationError::Timeout);
             return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
         }
@@ -203,8 +220,10 @@ impl FluxLinkageCalibrator {
             }
 
             self.spinning = true;
+            self.settled_seconds = 0.0;
             self.command_angle = self.config.align_stator_angle;
             self.last_command_angle = None;
+            self.reset_sampling_state();
         } else {
             self.process_spin_sample(input);
         }
@@ -238,6 +257,13 @@ impl FluxLinkageCalibrator {
         .get();
 
         if !omega_e.is_finite() || omega_e.abs() < self.config.min_electrical_velocity.get() {
+            self.settled_seconds = 0.0;
+            self.reset_sampling_state();
+            return;
+        }
+
+        self.settled_seconds += input.dt_seconds;
+        if self.settled_seconds < self.config.initial_settle_time_seconds {
             self.reset_sampling_state();
             return;
         }
@@ -249,7 +275,17 @@ impl FluxLinkageCalibrator {
         };
         self.last_sample_iq = Some(iq);
 
-        let diq_dt = (iq - last_iq) / input.dt_seconds;
+        let raw_diq_dt = (iq - last_iq) / input.dt_seconds;
+        let diq_dt = low_pass_update(
+            &mut self.filtered_diq_dt,
+            raw_diq_dt,
+            input.dt_seconds,
+            DIQ_DT_FILTER_TAU_SECONDS,
+        );
+        self.derivative_warmup_seconds += input.dt_seconds;
+        if self.derivative_warmup_seconds < self.config.derivative_warmup_time_seconds {
+            return;
+        }
         let inductance = self.config.phase_inductance_h.get();
         let estimate = (applied_dq.q
             - self.config.phase_resistance_ohm.get() * current_dq.q
@@ -258,7 +294,7 @@ impl FluxLinkageCalibrator {
             - inductance * current_dq.d;
 
         if !estimate.is_finite() || estimate <= 0.0 {
-            self.error = Some(CalibrationError::IndeterminateEstimate);
+            self.rejected_sample_count += 1;
             return;
         }
 
@@ -269,6 +305,13 @@ impl FluxLinkageCalibrator {
         if self.sample_seconds >= self.config.sample_time_seconds {
             let mean_flux = self.flux_integral / self.sample_seconds;
             if !mean_flux.is_finite() || mean_flux <= 0.0 || self.sample_count == 0 {
+                fluxkit_warn!(
+                    "flux linkage calibration indeterminate mean estimate={} sample_s={} sample_count={} rejected_sample_count={}",
+                    mean_flux,
+                    self.sample_seconds,
+                    self.sample_count,
+                    self.rejected_sample_count
+                );
                 self.error = Some(CalibrationError::IndeterminateEstimate);
                 return;
             }
@@ -291,9 +334,32 @@ impl FluxLinkageCalibrator {
     fn reset_sampling_state(&mut self) {
         self.sample_seconds = 0.0;
         self.sample_count = 0;
+        self.rejected_sample_count = 0;
         self.flux_integral = 0.0;
         self.last_sample_iq = None;
+        self.filtered_diq_dt = None;
+        self.derivative_warmup_seconds = 0.0;
     }
+}
+
+fn low_pass_update(state: &mut Option<f32>, sample: f32, dt: f32, tau: f32) -> f32 {
+    if !sample.is_finite() || !dt.is_finite() || dt <= 0.0 {
+        return sample;
+    }
+
+    let Some(previous) = *state else {
+        *state = Some(sample);
+        return sample;
+    };
+
+    let alpha = if tau <= 0.0 || !tau.is_finite() {
+        1.0
+    } else {
+        dt / (tau + dt)
+    };
+    let filtered = previous + alpha.clamp(0.0, 1.0) * (sample - previous);
+    *state = Some(filtered);
+    filtered
 }
 
 fn rotor_electrical_angle(
@@ -334,6 +400,8 @@ fn validate_config(config: FluxLinkageCalibrationConfig) -> bool {
         && config.initial_settle_time_seconds > 0.0
         && config.min_electrical_velocity.get().is_finite()
         && config.min_electrical_velocity.get() > 0.0
+        && config.derivative_warmup_time_seconds.is_finite()
+        && config.derivative_warmup_time_seconds >= 0.0
         && config.sample_time_seconds.is_finite()
         && config.sample_time_seconds > 0.0
         && config.timeout_seconds.is_finite()

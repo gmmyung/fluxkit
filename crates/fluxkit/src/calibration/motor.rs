@@ -164,6 +164,194 @@ pub struct MotorCalibrationLimits {
     pub timeout_seconds: f32,
 }
 
+/// Wrapper-facing tuning for pole-pair and electrical-offset calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PolePairsAndOffsetRoutineConfig {
+    /// Magnitude of the stator-frame alignment and sweep vector.
+    pub align_voltage_mag: Volts,
+    /// Initial stator-frame angle used before the sweep starts.
+    pub align_stator_angle: ElectricalAngle,
+    /// Signed electrical sweep speed.
+    pub sweep_electrical_velocity: RadPerSec,
+    /// Number of electrical cycles to sweep through.
+    pub sweep_electrical_cycles: f32,
+    /// Maximum acceptable rotor speed during the settle phases.
+    pub settle_velocity_threshold: RadPerSec,
+    /// Continuous settle time required before the sweep starts.
+    pub initial_settle_time_seconds: f32,
+    /// Continuous settle time required after the sweep ends.
+    pub final_settle_time_seconds: f32,
+    /// Maximum allowed deviation from an integer pole-pair estimate.
+    pub pole_pair_rounding_tolerance: f32,
+    /// Upper bound for the resolved pole-pair count.
+    pub max_pole_pairs: u8,
+    /// Absolute timeout for this routine.
+    pub timeout_seconds: f32,
+}
+
+impl Default for PolePairsAndOffsetRoutineConfig {
+    fn default() -> Self {
+        Self {
+            align_voltage_mag: Volts::new(2.5),
+            align_stator_angle: ElectricalAngle::new(0.0),
+            sweep_electrical_velocity: RadPerSec::new(10.0),
+            sweep_electrical_cycles: 3.0,
+            settle_velocity_threshold: RadPerSec::new(1.0),
+            initial_settle_time_seconds: 0.05,
+            final_settle_time_seconds: 0.05,
+            pole_pair_rounding_tolerance: 0.1,
+            max_pole_pairs: 32,
+            timeout_seconds: 4.0,
+        }
+    }
+}
+
+/// Wrapper-facing tuning for phase-resistance calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PhaseResistanceRoutineConfig {
+    /// Base hold voltage used for the first resistance measurement.
+    pub align_voltage_mag: Volts,
+    /// Added voltage between repeated measurements.
+    pub voltage_increment_mag: Volts,
+    /// Stator-frame angle of the hold vector.
+    pub align_stator_angle: ElectricalAngle,
+    /// Maximum mechanical speed considered settled.
+    pub settle_velocity_threshold: RadPerSec,
+    /// Continuous settle time required before each measurement.
+    pub settle_time_seconds: f32,
+    /// Averaging window for each steady-state current measurement.
+    pub sample_time_seconds: f32,
+    /// Number of resistance measurements to average.
+    pub measurement_count: u16,
+    /// Minimum usable projected current magnitude.
+    pub min_projected_current: fluxkit_math::Amps,
+    /// Absolute timeout for this routine.
+    pub timeout_seconds: f32,
+}
+
+impl Default for PhaseResistanceRoutineConfig {
+    fn default() -> Self {
+        let cfg = fluxkit_core::PhaseResistanceCalibrationConfig::default_for_hold();
+        Self {
+            align_voltage_mag: cfg.align_voltage_mag,
+            voltage_increment_mag: cfg.voltage_increment_mag,
+            align_stator_angle: cfg.align_stator_angle,
+            settle_velocity_threshold: cfg.settle_velocity_threshold,
+            settle_time_seconds: cfg.settle_time_seconds,
+            sample_time_seconds: cfg.sample_time_seconds,
+            measurement_count: cfg.measurement_count,
+            min_projected_current: cfg.min_projected_current,
+            timeout_seconds: cfg.timeout_seconds,
+        }
+    }
+}
+
+/// Wrapper-facing tuning for phase-inductance calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PhaseInductanceRoutineConfig {
+    /// Hold voltage used before pulse measurement begins.
+    pub hold_voltage_mag: Volts,
+    /// `d`-axis pulse voltage used during the repeated RL measurement.
+    pub step_voltage_mag: Volts,
+    /// Stator-frame angle of the initial hold vector.
+    pub align_stator_angle: ElectricalAngle,
+    /// Maximum mechanical speed considered settled before pulses start.
+    pub settle_velocity_threshold: RadPerSec,
+    /// Continuous settle time required before pulse measurement begins.
+    pub settle_time_seconds: f32,
+    /// Duration of each pulse on/off window.
+    pub sample_time_seconds: f32,
+    /// Number of repeated `0 -> +V -> 0` pulse cycles.
+    pub repeat_count: u16,
+    /// Minimum usable `d`-axis current rise during positive pulse windows.
+    pub min_projected_current_step: fluxkit_math::Amps,
+    /// Absolute timeout for this routine.
+    pub timeout_seconds: f32,
+}
+
+impl Default for PhaseInductanceRoutineConfig {
+    fn default() -> Self {
+        let cfg = fluxkit_core::PhaseInductanceCalibrationConfig::default_for_hold();
+        Self {
+            hold_voltage_mag: cfg.hold_voltage_mag,
+            step_voltage_mag: cfg.step_voltage_mag,
+            align_stator_angle: cfg.align_stator_angle,
+            settle_velocity_threshold: cfg.settle_velocity_threshold,
+            settle_time_seconds: cfg.settle_time_seconds,
+            sample_time_seconds: cfg.sample_time_seconds,
+            repeat_count: cfg.repeat_count,
+            min_projected_current_step: cfg.min_projected_current_step,
+            timeout_seconds: cfg.timeout_seconds,
+        }
+    }
+}
+
+/// Wrapper-facing tuning for flux-linkage calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FluxLinkageRoutineConfig {
+    /// Alignment voltage used before the electrical spin starts.
+    pub align_voltage_mag: Volts,
+    /// Voltage magnitude of the rotating stator vector during the spin.
+    pub spin_voltage_mag: Volts,
+    /// Initial stator-frame alignment angle.
+    pub align_stator_angle: ElectricalAngle,
+    /// Commanded electrical angular velocity during the spin.
+    pub spin_electrical_velocity: RadPerSec,
+    /// Maximum mechanical speed considered settled before the spin begins.
+    pub initial_settle_velocity_threshold: RadPerSec,
+    /// Continuous settle time required before the spin begins.
+    pub initial_settle_time_seconds: f32,
+    /// Minimum electrical speed required before flux-linkage samples are accepted.
+    pub min_electrical_velocity: RadPerSec,
+    /// Warmup time for the filtered `di_q/dt` estimate before flux samples are accepted.
+    pub derivative_warmup_time_seconds: f32,
+    /// Averaging window for the flux-linkage estimate.
+    pub sample_time_seconds: f32,
+    /// Absolute timeout for this routine.
+    pub timeout_seconds: f32,
+}
+
+impl Default for FluxLinkageRoutineConfig {
+    fn default() -> Self {
+        let cfg = fluxkit_core::FluxLinkageCalibrationConfig::default_for_spin();
+        Self {
+            align_voltage_mag: cfg.align_voltage_mag,
+            spin_voltage_mag: cfg.spin_voltage_mag,
+            align_stator_angle: cfg.align_stator_angle,
+            spin_electrical_velocity: cfg.spin_electrical_velocity,
+            initial_settle_velocity_threshold: cfg.initial_settle_velocity_threshold,
+            initial_settle_time_seconds: cfg.initial_settle_time_seconds,
+            min_electrical_velocity: cfg.min_electrical_velocity,
+            derivative_warmup_time_seconds: cfg.derivative_warmup_time_seconds,
+            sample_time_seconds: cfg.sample_time_seconds,
+            timeout_seconds: cfg.timeout_seconds,
+        }
+    }
+}
+
+/// Public wrapper-facing configuration for the motor-side calibration campaign.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MotorCalibrationConfig {
+    /// Tuning for pole-pair and electrical-offset calibration.
+    pub pole_pairs_and_offset: PolePairsAndOffsetRoutineConfig,
+    /// Tuning for phase-resistance calibration.
+    pub phase_resistance: PhaseResistanceRoutineConfig,
+    /// Tuning for phase-inductance calibration.
+    pub phase_inductance: PhaseInductanceRoutineConfig,
+    /// Tuning for flux-linkage calibration.
+    pub flux_linkage: FluxLinkageRoutineConfig,
+}
+
 /// Current or next request-driven motor-calibration phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -240,6 +428,16 @@ pub struct MotorCalibrationStatus {
     pub active: bool,
     /// Current or next phase while calibration is in progress.
     pub phase: Option<MotorCalibrationPhase>,
+    /// Latest resolved electrical pole-pair count once that stage has completed.
+    pub pole_pairs: Option<u8>,
+    /// Latest resolved electrical mapping direction once that stage has completed.
+    pub electrical_direction: Option<ElectricalDirection>,
+    /// Latest resolved electrical zero offset once that stage has completed.
+    pub electrical_angle_offset: Option<ElectricalAngle>,
+    /// Latest resolved phase resistance once that stage has completed.
+    pub phase_resistance_ohm_ref: Option<Ohms>,
+    /// Latest resolved common phase inductance once that stage has completed.
+    pub phase_inductance_h: Option<Henries>,
     /// Final resolved result once calibration completes.
     pub result: Option<MotorCalibrationResult>,
     /// `true` when the calibration runtime has latched a terminal fault.
@@ -306,6 +504,7 @@ struct InnerMotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEs
     temp: TEMP,
     modulator: MOD,
     rotor_estimator: RotorEst,
+    config: MotorCalibrationConfig,
     limits: MotorCalibrationLimits,
     dt_seconds: f32,
     pole_pairs: Option<u8>,
@@ -364,7 +563,37 @@ where
         limits: MotorCalibrationLimits,
         dt_seconds: f32,
     ) -> Result<Self, CalibrationError> {
-        Self::from_parts(
+        Self::new_with_config(
+            pwm,
+            current,
+            bus,
+            rotor,
+            temp,
+            modulator,
+            rotor_estimator,
+            request,
+            limits,
+            MotorCalibrationConfig::default(),
+            dt_seconds,
+        )
+    }
+
+    /// Creates a new request-driven motor-calibration runtime with explicit
+    /// routine tuning.
+    pub fn new_with_config(
+        pwm: PWM,
+        current: CURRENT,
+        bus: BUS,
+        rotor: ROTOR,
+        temp: TEMP,
+        modulator: MOD,
+        rotor_estimator: RotorEst,
+        request: MotorCalibrationRequest,
+        limits: MotorCalibrationLimits,
+        config: MotorCalibrationConfig,
+        dt_seconds: f32,
+    ) -> Result<Self, CalibrationError> {
+        Self::from_parts_with_config(
             MotorCalibrationParts {
                 pwm,
                 current,
@@ -376,20 +605,24 @@ where
             },
             request,
             limits,
+            config,
             dt_seconds,
         )
     }
 
-    /// Creates a new request-driven motor-calibration runtime from owned parts.
-    pub fn from_parts(
+    /// Creates a new request-driven motor-calibration runtime from owned parts
+    /// with explicit routine tuning.
+    pub fn from_parts_with_config(
         parts: MotorCalibrationParts<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>,
         request: MotorCalibrationRequest,
         limits: MotorCalibrationLimits,
+        config: MotorCalibrationConfig,
         dt_seconds: f32,
     ) -> Result<Self, CalibrationError> {
         if !validate_limits(limits)
             || !validate_request(request)
             || !validate_dt_seconds(dt_seconds)
+            || !validate_config(config, limits)
         {
             return Err(CalibrationError::InvalidConfiguration);
         }
@@ -403,6 +636,7 @@ where
                 temp: parts.temp,
                 modulator: parts.modulator,
                 rotor_estimator: parts.rotor_estimator,
+                config,
                 limits,
                 dt_seconds,
                 pole_pairs: request.pole_pairs,
@@ -417,12 +651,41 @@ where
                 status: MotorCalibrationStatus {
                     active: true,
                     phase: next_phase_for_request(request),
+                    pole_pairs: request.pole_pairs,
+                    electrical_direction: request.electrical_direction,
+                    electrical_angle_offset: request.electrical_angle_offset,
+                    phase_resistance_ohm_ref: request.phase_resistance_ohm_ref,
+                    phase_inductance_h: request.phase_inductance_h,
                     result: None,
                     fault_latched: false,
                 },
             })),
             split_taken: Cell::new(false),
         })
+    }
+
+    /// Creates a new request-driven motor-calibration runtime from owned parts.
+    pub fn from_parts(
+        parts: MotorCalibrationParts<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEst>,
+        request: MotorCalibrationRequest,
+        limits: MotorCalibrationLimits,
+        dt_seconds: f32,
+    ) -> Result<Self, CalibrationError> {
+        Self::from_parts_with_config(
+            MotorCalibrationParts {
+                pwm: parts.pwm,
+                current: parts.current,
+                bus: parts.bus,
+                rotor: parts.rotor,
+                temp: parts.temp,
+                modulator: parts.modulator,
+                rotor_estimator: parts.rotor_estimator,
+            },
+            request,
+            limits,
+            MotorCalibrationConfig::default(),
+            dt_seconds,
+        )
     }
 
     /// Attempts to take ownership of the active calibration parts for reuse in another phase.
@@ -602,6 +865,11 @@ where
             *status = MotorCalibrationStatus {
                 active: true,
                 phase: self.phase(),
+                pole_pairs: self.pole_pairs,
+                electrical_direction: self.electrical_direction,
+                electrical_angle_offset: self.electrical_angle_offset,
+                phase_resistance_ohm_ref: self.phase_resistance_ohm_ref,
+                phase_inductance_h: self.phase_inductance_h,
                 result: self.resolve_calibration().ok(),
                 fault_latched,
             };
@@ -662,62 +930,44 @@ where
             || self.electrical_direction.is_none()
             || self.electrical_angle_offset.is_none()
         {
-            let mut cfg = fluxkit_core::PolePairsAndOffsetCalibrationConfig::default_for_sweep();
-            cfg.align_voltage_mag = min_volts(cfg.align_voltage_mag, limits.max_align_voltage_mag);
-            cfg.sweep_electrical_velocity = clamp_abs_rad_per_sec(
-                cfg.sweep_electrical_velocity,
-                limits.max_electrical_velocity,
-            );
-            cfg.timeout_seconds = cfg.timeout_seconds.min(limits.timeout_seconds);
+            let cfg = self.config.pole_pairs_and_offset.to_core(limits);
             return PolePairsAndOffsetCalibrator::new(cfg)
                 .map(MotorCalibrationRoutine::PolePairsAndOffset)
                 .map(Some);
         }
 
         if self.phase_resistance_ohm_ref.is_none() {
-            let mut cfg = fluxkit_core::PhaseResistanceCalibrationConfig::default_for_hold();
-            cfg.align_voltage_mag = min_volts(cfg.align_voltage_mag, limits.max_align_voltage_mag);
-            cfg.timeout_seconds = cfg.timeout_seconds.min(limits.timeout_seconds);
+            let cfg = self.config.phase_resistance.to_core(limits);
             return PhaseResistanceCalibrator::new(cfg)
                 .map(MotorCalibrationRoutine::PhaseResistance)
                 .map(Some);
         }
 
         if self.phase_inductance_h.is_none() {
-            let mut cfg = fluxkit_core::PhaseInductanceCalibrationConfig::default_for_hold();
-            cfg.phase_resistance_ohm = self
-                .phase_resistance_ohm_ref
-                .expect("phase resistance resolved before inductance");
-            cfg.hold_voltage_mag = min_volts(cfg.hold_voltage_mag, limits.max_align_voltage_mag);
-            cfg.step_voltage_mag = min_volts(cfg.step_voltage_mag, limits.max_align_voltage_mag);
-            cfg.timeout_seconds = cfg.timeout_seconds.min(limits.timeout_seconds);
+            let cfg = self.config.phase_inductance.to_core(
+                limits,
+                self.phase_resistance_ohm_ref
+                    .expect("phase resistance resolved before inductance"),
+            );
             return PhaseInductanceCalibrator::new(cfg)
                 .map(MotorCalibrationRoutine::PhaseInductance)
                 .map(Some);
         }
 
         if self.flux_linkage_weber.is_none() {
-            let mut cfg = fluxkit_core::FluxLinkageCalibrationConfig::default_for_spin();
-            cfg.phase_resistance_ohm = self
-                .phase_resistance_ohm_ref
-                .expect("phase resistance resolved before flux linkage");
-            cfg.phase_inductance_h = self
-                .phase_inductance_h
-                .expect("phase inductance resolved before flux linkage");
-            cfg.pole_pairs = self
-                .pole_pairs
-                .expect("electrical mapping resolved before flux linkage");
-            cfg.electrical_direction = self
-                .electrical_direction
-                .expect("electrical mapping resolved before flux linkage");
-            cfg.electrical_angle_offset = self
-                .electrical_angle_offset
-                .expect("electrical mapping resolved before flux linkage");
-            cfg.align_voltage_mag = min_volts(cfg.align_voltage_mag, limits.max_align_voltage_mag);
-            cfg.spin_voltage_mag = min_volts(cfg.spin_voltage_mag, limits.max_spin_voltage_mag);
-            cfg.spin_electrical_velocity =
-                clamp_abs_rad_per_sec(cfg.spin_electrical_velocity, limits.max_electrical_velocity);
-            cfg.timeout_seconds = cfg.timeout_seconds.min(limits.timeout_seconds);
+            let cfg = self.config.flux_linkage.to_core(
+                limits,
+                self.phase_resistance_ohm_ref
+                    .expect("phase resistance resolved before flux linkage"),
+                self.phase_inductance_h
+                    .expect("phase inductance resolved before flux linkage"),
+                self.pole_pairs
+                    .expect("electrical mapping resolved before flux linkage"),
+                self.electrical_direction
+                    .expect("electrical mapping resolved before flux linkage"),
+                self.electrical_angle_offset
+                    .expect("electrical mapping resolved before flux linkage"),
+            );
             return FluxLinkageCalibrator::new(cfg)
                 .map(MotorCalibrationRoutine::FluxLinkage)
                 .map(Some);
@@ -871,13 +1121,32 @@ where
             TEMP::Error,
         >,
     > {
+        let pole_pairs =
+            self.pole_pairs
+                .expect("electrical mapping resolved before inductance") as u32;
+        let electrical_direction = self
+            .electrical_direction
+            .expect("electrical mapping resolved before inductance");
+        let electrical_angle_offset = self
+            .electrical_angle_offset
+            .expect("electrical mapping resolved before inductance");
         self.tick_alpha_beta_routine(
             calibrator,
             dt_seconds,
             true,
             |calibrator, rotor, current, dt| {
+                let electrical_angle = fluxkit_math::ElectricalAngle::new(
+                    fluxkit_math::angle::mechanical_to_electrical_with_direction(
+                        rotor.unwrapped(),
+                        pole_pairs,
+                        electrical_direction,
+                    )
+                    .get()
+                        + electrical_angle_offset.get(),
+                );
                 calibrator.tick(PhaseInductanceCalibrationInput {
                     phase_currents: current.expect("phase current required").currents,
+                    electrical_angle,
                     mechanical_velocity: rotor.velocity(),
                     dt_seconds: dt,
                 })
@@ -1137,6 +1406,110 @@ fn min_volts(a: Volts, b: Volts) -> Volts {
     Volts::new(a.get().min(b.get()))
 }
 
+impl PolePairsAndOffsetRoutineConfig {
+    fn to_core(
+        self,
+        limits: MotorCalibrationLimits,
+    ) -> fluxkit_core::PolePairsAndOffsetCalibrationConfig {
+        fluxkit_core::PolePairsAndOffsetCalibrationConfig {
+            align_voltage_mag: min_volts(self.align_voltage_mag, limits.max_align_voltage_mag),
+            align_stator_angle: self.align_stator_angle,
+            sweep_electrical_velocity: clamp_abs_rad_per_sec(
+                self.sweep_electrical_velocity,
+                limits.max_electrical_velocity,
+            ),
+            sweep_electrical_cycles: self.sweep_electrical_cycles,
+            settle_velocity_threshold: self.settle_velocity_threshold,
+            initial_settle_time_seconds: self.initial_settle_time_seconds,
+            final_settle_time_seconds: self.final_settle_time_seconds,
+            pole_pair_rounding_tolerance: self.pole_pair_rounding_tolerance,
+            max_pole_pairs: self.max_pole_pairs,
+            timeout_seconds: self.timeout_seconds.min(limits.timeout_seconds),
+        }
+    }
+}
+
+impl PhaseResistanceRoutineConfig {
+    fn to_core(
+        self,
+        limits: MotorCalibrationLimits,
+    ) -> fluxkit_core::PhaseResistanceCalibrationConfig {
+        let align_voltage_mag = min_volts(self.align_voltage_mag, limits.max_align_voltage_mag);
+        let voltage_increment_mag = if self.measurement_count > 1 {
+            let remaining = (limits.max_align_voltage_mag.get() - align_voltage_mag.get()).max(0.0);
+            let max_increment = remaining / (self.measurement_count - 1) as f32;
+            Volts::new(self.voltage_increment_mag.get().min(max_increment))
+        } else {
+            Volts::ZERO
+        };
+        fluxkit_core::PhaseResistanceCalibrationConfig {
+            align_voltage_mag,
+            voltage_increment_mag,
+            align_stator_angle: self.align_stator_angle,
+            settle_velocity_threshold: self.settle_velocity_threshold,
+            settle_time_seconds: self.settle_time_seconds,
+            sample_time_seconds: self.sample_time_seconds,
+            measurement_count: self.measurement_count,
+            min_projected_current: self.min_projected_current,
+            timeout_seconds: self.timeout_seconds.min(limits.timeout_seconds),
+        }
+    }
+}
+
+impl PhaseInductanceRoutineConfig {
+    fn to_core(
+        self,
+        limits: MotorCalibrationLimits,
+        phase_resistance_ohm: Ohms,
+    ) -> fluxkit_core::PhaseInductanceCalibrationConfig {
+        fluxkit_core::PhaseInductanceCalibrationConfig {
+            phase_resistance_ohm,
+            hold_voltage_mag: min_volts(self.hold_voltage_mag, limits.max_align_voltage_mag),
+            step_voltage_mag: min_volts(self.step_voltage_mag, limits.max_align_voltage_mag),
+            align_stator_angle: self.align_stator_angle,
+            settle_velocity_threshold: self.settle_velocity_threshold,
+            settle_time_seconds: self.settle_time_seconds,
+            sample_time_seconds: self.sample_time_seconds,
+            repeat_count: self.repeat_count,
+            min_projected_current_step: self.min_projected_current_step,
+            timeout_seconds: self.timeout_seconds.min(limits.timeout_seconds),
+        }
+    }
+}
+
+impl FluxLinkageRoutineConfig {
+    fn to_core(
+        self,
+        limits: MotorCalibrationLimits,
+        phase_resistance_ohm: Ohms,
+        phase_inductance_h: Henries,
+        pole_pairs: u8,
+        electrical_direction: ElectricalDirection,
+        electrical_angle_offset: ElectricalAngle,
+    ) -> fluxkit_core::FluxLinkageCalibrationConfig {
+        fluxkit_core::FluxLinkageCalibrationConfig {
+            phase_resistance_ohm,
+            phase_inductance_h,
+            pole_pairs,
+            electrical_direction,
+            electrical_angle_offset,
+            align_voltage_mag: min_volts(self.align_voltage_mag, limits.max_align_voltage_mag),
+            spin_voltage_mag: min_volts(self.spin_voltage_mag, limits.max_spin_voltage_mag),
+            align_stator_angle: self.align_stator_angle,
+            spin_electrical_velocity: clamp_abs_rad_per_sec(
+                self.spin_electrical_velocity,
+                limits.max_electrical_velocity,
+            ),
+            initial_settle_velocity_threshold: self.initial_settle_velocity_threshold,
+            initial_settle_time_seconds: self.initial_settle_time_seconds,
+            min_electrical_velocity: self.min_electrical_velocity,
+            derivative_warmup_time_seconds: self.derivative_warmup_time_seconds,
+            sample_time_seconds: self.sample_time_seconds,
+            timeout_seconds: self.timeout_seconds.min(limits.timeout_seconds),
+        }
+    }
+}
+
 #[inline]
 fn clamp_abs_rad_per_sec(value: RadPerSec, limit: RadPerSec) -> RadPerSec {
     let capped = value.get().abs().min(limit.get().abs());
@@ -1164,6 +1537,23 @@ fn validate_request(request: MotorCalibrationRequest) -> bool {
 #[inline]
 fn validate_dt_seconds(dt_seconds: f32) -> bool {
     dt_seconds.is_finite() && dt_seconds > 0.0
+}
+
+#[inline]
+fn validate_config(config: MotorCalibrationConfig, limits: MotorCalibrationLimits) -> bool {
+    PolePairsAndOffsetCalibrator::new(config.pole_pairs_and_offset.to_core(limits)).is_ok()
+        && PhaseResistanceCalibrator::new(config.phase_resistance.to_core(limits)).is_ok()
+        && PhaseInductanceCalibrator::new(config.phase_inductance.to_core(limits, Ohms::new(0.1)))
+            .is_ok()
+        && FluxLinkageCalibrator::new(config.flux_linkage.to_core(
+            limits,
+            Ohms::new(0.1),
+            Henries::new(30.0e-6),
+            7,
+            ElectricalDirection::Positive,
+            ElectricalAngle::new(0.0),
+        ))
+        .is_ok()
 }
 
 impl From<&MotorCalibrationRoutine> for MotorCalibrationPhase {
@@ -1200,7 +1590,7 @@ mod tests {
         units::{Amps, Duty, RadPerSec, Volts},
     };
 
-    use super::{MotorCalibrationRuntime, MotorCalibrationRuntimeError};
+    use super::{MotorCalibrationConfig, MotorCalibrationRuntime, MotorCalibrationRuntimeError};
 
     #[derive(Debug)]
     struct FakePwm {
@@ -1499,6 +1889,37 @@ mod tests {
         assert!(matches!(
             ticker.tick(),
             Err(MotorCalibrationRuntimeError::Inactive)
+        ));
+    }
+
+    #[test]
+    fn wrapper_rejects_invalid_public_motor_calibration_config() {
+        let (pwm, current, bus, rotor, temp) = hardware();
+        let mut config = MotorCalibrationConfig::default();
+        config.phase_resistance.measurement_count = 0;
+
+        let result = MotorCalibrationRuntime::new_with_config(
+            pwm,
+            current,
+            bus,
+            rotor,
+            temp,
+            Svpwm,
+            PassThroughEstimator::new(),
+            super::MotorCalibrationRequest::all(),
+            super::MotorCalibrationLimits {
+                max_align_voltage_mag: Volts::new(2.0),
+                max_spin_voltage_mag: Volts::new(3.0),
+                max_electrical_velocity: RadPerSec::new(60.0),
+                timeout_seconds: 2.0,
+            },
+            config,
+            0.005,
+        );
+
+        assert!(matches!(
+            result,
+            Err(fluxkit_core::CalibrationError::InvalidConfiguration)
         ));
     }
 }

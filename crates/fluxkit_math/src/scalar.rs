@@ -50,3 +50,32 @@ pub fn sqrt(x: Real) -> Real {
     let refined = 0.5 * (estimate + x / estimate);
     0.5 * (refined + x / refined)
 }
+
+/// Natural logarithm helper backed by `micromath`.
+#[inline]
+pub fn ln(x: Real) -> Real {
+    if !x.is_finite() || x < 0.0 {
+        return Real::NAN;
+    }
+    if x == 0.0 {
+        return Real::NEG_INFINITY;
+    }
+
+    let estimate = micromath::F32Ext::ln(x);
+    if !estimate.is_finite() {
+        return estimate;
+    }
+
+    let exp0 = micromath::F32Ext::exp(estimate);
+    if !exp0.is_finite() || exp0 <= 0.0 {
+        return estimate;
+    }
+
+    let refined = estimate - 1.0 + x / exp0;
+    let exp1 = micromath::F32Ext::exp(refined);
+    if !exp1.is_finite() || exp1 <= 0.0 {
+        return refined;
+    }
+
+    refined - 1.0 + x / exp1
+}

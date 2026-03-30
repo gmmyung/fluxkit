@@ -338,6 +338,7 @@ dependencies = [
  "aquamarine",
  "defmt 0.3.100",
  "fluxkit_math",
+ "log",
  "serde",
 ]
 

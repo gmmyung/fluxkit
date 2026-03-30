@@ -15,7 +15,7 @@ use fluxkit_core::{
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle, ElectricalAngle, MechanicalAngle,
-    angle::{mechanical_to_electrical, wrap},
+    angle::{mechanical_to_electrical, mechanical_to_electrical_with_direction, wrap},
     inverse_clarke, inverse_park,
     units::{Henries, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
 };
@@ -213,10 +213,12 @@ fn magnetic_hold_recovers_phase_resistance() {
     .unwrap();
     let mut calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
         align_voltage_mag: Volts::new(1.0),
+        voltage_increment_mag: Volts::new(0.25),
         align_stator_angle: ElectricalAngle::new(0.0),
         settle_velocity_threshold: RadPerSec::new(0.03),
         settle_time_seconds: 0.03,
         sample_time_seconds: 0.05,
+        measurement_count: 3,
         min_projected_current: fluxkit_math::Amps::new(0.2),
         timeout_seconds: 1.0,
     })
@@ -277,6 +279,7 @@ fn magnetic_hold_recovers_phase_inductance() {
         settle_velocity_threshold: RadPerSec::new(0.03),
         settle_time_seconds: 0.03,
         sample_time_seconds: 200.0e-6,
+        repeat_count: 100,
         min_projected_current_step: fluxkit_math::Amps::new(0.05),
         timeout_seconds: 1.0,
     })
@@ -288,8 +291,17 @@ fn magnetic_hold_recovers_phase_inductance() {
     );
 
     for _ in 0..40_000 {
+        let electrical_angle = ElectricalAngle::new(
+            mechanical_to_electrical_with_direction(
+                plant.state().mechanical_angle,
+                params.pole_pairs as u32,
+                params.electrical_direction,
+            )
+            .get(),
+        );
         let command = calibrator.tick(PhaseInductanceCalibrationInput {
             phase_currents,
+            electrical_angle,
             mechanical_velocity: plant.state().mechanical_velocity,
             dt_seconds: FAST_DT_SECONDS,
         });
@@ -403,6 +415,7 @@ fn controlled_spin_recovers_flux_linkage() {
         initial_settle_velocity_threshold: RadPerSec::new(0.03),
         initial_settle_time_seconds: 0.03,
         min_electrical_velocity: RadPerSec::new(8.0),
+        derivative_warmup_time_seconds: 0.02,
         sample_time_seconds: 0.05,
         timeout_seconds: 2.0,
     })

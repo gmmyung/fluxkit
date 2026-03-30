@@ -9,6 +9,7 @@ repository = ""
 [features]
 default = []
 defmt = ["dep:defmt", "fluxkit_core/defmt", "fluxkit_hal/defmt", "fluxkit_math/defmt"]
+log = ["fluxkit_core/log"]
 serde = ["dep:serde", "fluxkit_core/serde", "fluxkit_hal/serde", "fluxkit_math/serde"]
 
 [dependencies]

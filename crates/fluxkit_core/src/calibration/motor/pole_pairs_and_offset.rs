@@ -53,7 +53,7 @@ impl PolePairsAndOffsetCalibrationConfig {
             align_stator_angle: ElectricalAngle::new(0.0),
             sweep_electrical_velocity: RadPerSec::new(4.0),
             sweep_electrical_cycles: 6.0,
-            settle_velocity_threshold: RadPerSec::new(5.0),
+            settle_velocity_threshold: RadPerSec::new(1.0),
             initial_settle_time_seconds: 0.05,
             final_settle_time_seconds: 0.05,
             pole_pair_rounding_tolerance: 0.2,
@@ -207,6 +207,10 @@ impl PolePairsAndOffsetCalibrator {
                 self.update_settle_timer(input.mechanical_velocity, input.dt_seconds);
                 if self.settled_seconds >= self.config.final_settle_time_seconds {
                     let Some(start_mechanical_angle) = self.start_unwrapped_mechanical_angle else {
+                        fluxkit_warn!(
+                            "pole-pair calibration indeterminate missing start angle final_settle_s={}",
+                            self.settled_seconds
+                        );
                         self.error = Some(CalibrationError::IndeterminateEstimate);
                         return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
                     };
@@ -216,6 +220,11 @@ impl PolePairsAndOffsetCalibrator {
                     let signed_target_travel =
                         self.config.sweep_electrical_cycles * self.config.sweep_direction() * TAU;
                     if mechanical_travel.abs() < f32::EPSILON {
+                        fluxkit_warn!(
+                            "pole-pair calibration indeterminate zero mechanical_travel={} target_travel={}",
+                            mechanical_travel,
+                            signed_target_travel
+                        );
                         self.error = Some(CalibrationError::IndeterminateEstimate);
                         return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
                     }
@@ -223,11 +232,19 @@ impl PolePairsAndOffsetCalibrator {
                     let ratio = signed_target_travel / mechanical_travel;
                     let rounded = (ratio.abs() + 0.5) as u32 as f32;
                     if !ratio.is_finite()
-                        || mechanical_travel.abs() < 0.25 * TAU
                         || rounded < 1.0
                         || rounded > self.config.max_pole_pairs as f32
                         || (ratio.abs() - rounded).abs() > self.config.pole_pair_rounding_tolerance
                     {
+                        fluxkit_warn!(
+                            "pole-pair calibration indeterminate invalid ratio={} rounded={} mechanical_travel={} target_travel={} tolerance={} max_pole_pairs={}",
+                            ratio,
+                            rounded,
+                            mechanical_travel,
+                            signed_target_travel,
+                            self.config.pole_pair_rounding_tolerance,
+                            self.config.max_pole_pairs
+                        );
                         self.error = Some(CalibrationError::IndeterminateEstimate);
                         return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
                     }

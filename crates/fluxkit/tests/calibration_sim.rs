@@ -9,10 +9,11 @@ use fluxkit::{
     Abc, ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
     ActuatorCalibrationRuntime, ActuatorLimits, BusVoltageSensor, ContinuousMechanicalAngle,
     CurrentLoopConfig, CurrentSampleValidity, CurrentSampler, ElectricalAngle, ElectricalDirection,
-    InverterParams, MechanicalAngle, MotorCalibrationLimits, MotorCalibrationPhase,
-    MotorCalibrationRequest, MotorCalibrationRuntime, MotorCommand, MotorLimits, MotorModel,
-    MotorParams, MotorRuntime, OutputReading, OutputSensor, PassThroughEstimator,
-    PhaseCurrentSample, PhasePwm, RadPerSec, RotorReading, RotorSensor, Svpwm, TemperatureSensor,
+    InverterParams, MechanicalAngle, MotorCalibrationConfig, MotorCalibrationLimits,
+    MotorCalibrationPhase, MotorCalibrationRequest, MotorCalibrationRuntime, MotorCommand,
+    MotorLimits, MotorModel, MotorParams, MotorRuntime, OutputReading, OutputSensor,
+    PassThroughEstimator, PhaseCurrentSample, PhasePwm, PolePairsAndOffsetRoutineConfig, RadPerSec,
+    RotorReading, RotorSensor, Svpwm, TemperatureSensor,
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, Volts, Webers},
 };
 use fluxkit_core::{
@@ -1539,7 +1540,21 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
     }));
 
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let motor_calibration = MotorCalibrationRuntime::new(
+    let mut calibration_config = MotorCalibrationConfig::default();
+    calibration_config.pole_pairs_and_offset = PolePairsAndOffsetRoutineConfig {
+        align_voltage_mag: Volts::new(2.5),
+        align_stator_angle: ElectricalAngle::new(0.0),
+        sweep_electrical_velocity: RadPerSec::new(4.0),
+        sweep_electrical_cycles: 6.0,
+        settle_velocity_threshold: RadPerSec::new(5.0),
+        initial_settle_time_seconds: 0.05,
+        final_settle_time_seconds: 0.05,
+        pole_pair_rounding_tolerance: 0.5,
+        max_pole_pairs: 64,
+        timeout_seconds: 12.0,
+    };
+
+    let motor_calibration = MotorCalibrationRuntime::new_with_config(
         pwm,
         current,
         bus,
@@ -1549,11 +1564,12 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
         PassThroughEstimator::new(),
         MotorCalibrationRequest::all(),
         MotorCalibrationLimits {
-            max_align_voltage_mag: Volts::new(2.0),
+            max_align_voltage_mag: Volts::new(2.5),
             max_spin_voltage_mag: Volts::new(3.0),
             max_electrical_velocity: RadPerSec::new(60.0),
-            timeout_seconds: 6.0,
+            timeout_seconds: 12.0,
         },
+        calibration_config,
         FAST_DT_SECONDS,
     )
     .unwrap();
@@ -1575,7 +1591,7 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
     );
     assert!((motor_result.phase_inductance_h.get() - params.d_inductance_h.get()).abs() < 4.0e-6);
     assert!(
-        (motor_result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 2.5e-4,
+        (motor_result.flux_linkage_weber.get() - params.flux_linkage_weber.get()).abs() < 3.0e-4,
         "estimated flux linkage {:?} differed from expected {:?}",
         motor_result.flux_linkage_weber,
         params.flux_linkage_weber

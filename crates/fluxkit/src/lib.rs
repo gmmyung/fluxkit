@@ -163,9 +163,11 @@ pub use calibration::{
     ActuatorCalibrationHandle, ActuatorCalibrationLimits, ActuatorCalibrationPhase,
     ActuatorCalibrationRequest, ActuatorCalibrationResult, ActuatorCalibrationRuntime,
     ActuatorCalibrationRuntimeError, ActuatorCalibrationStatus, ActuatorCalibrationTicker,
-    MotorCalibrationHandle, MotorCalibrationLimits, MotorCalibrationParts, MotorCalibrationPhase,
-    MotorCalibrationRequest, MotorCalibrationResult, MotorCalibrationRuntime,
-    MotorCalibrationRuntimeError, MotorCalibrationStatus, MotorCalibrationTicker,
+    FluxLinkageRoutineConfig, MotorCalibrationConfig, MotorCalibrationHandle,
+    MotorCalibrationLimits, MotorCalibrationParts, MotorCalibrationPhase, MotorCalibrationRequest,
+    MotorCalibrationResult, MotorCalibrationRuntime, MotorCalibrationRuntimeError,
+    MotorCalibrationStatus, MotorCalibrationTicker, PhaseInductanceRoutineConfig,
+    PhaseResistanceRoutineConfig, PolePairsAndOffsetRoutineConfig,
 };
 pub use capability::CapabilitySplitError;
 pub use fluxkit_core::{

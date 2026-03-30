@@ -1,9 +1,16 @@
-//! Phase-resistance calibration via magnetic hold and steady current.
+//! Phase-resistance calibration via repeated magnetic hold and steady current.
 //!
-//! The procedure applies a fixed stator-frame voltage vector, waits for the
-//! rotor to settle against that field, then averages the projected steady-state
-//! current along the commanded vector. Under near-zero mechanical speed,
-//! `R ~= V / I` for that stationary excitation.
+//! The procedure applies a stator-frame voltage vector, waits for the rotor to
+//! settle against that field, then averages the projected steady-state current
+//! along the commanded vector. It repeats that measurement for several voltage
+//! levels separated by a fixed increment, then averages the resulting ohmic
+//! estimates. Under near-zero mechanical speed, `R ~= V / I` for each
+//! stationary excitation.
+//!
+//! The estimate is intentionally sign-sensitive: the projected current must
+//! align with the commanded stator vector. A clearly opposite-signed steady
+//! current is rejected as a calibration fault instead of being folded back into
+//! a positive resistance magnitude.
 
 use fluxkit_math::{
     AlphaBeta, ElectricalAngle,
@@ -25,6 +32,9 @@ use crate::{
 pub struct PhaseResistanceCalibrationConfig {
     /// Magnitude of the fixed stator-frame voltage vector.
     pub align_voltage_mag: Volts,
+    /// Increment applied to the excitation magnitude between repeated
+    /// resistance measurements.
+    pub voltage_increment_mag: Volts,
     /// Stator-frame angle of the excitation vector.
     pub align_stator_angle: ElectricalAngle,
     /// Maximum mechanical speed considered "settled".
@@ -33,6 +43,8 @@ pub struct PhaseResistanceCalibrationConfig {
     pub settle_time_seconds: f32,
     /// Averaging window for the projected steady-state current.
     pub sample_time_seconds: f32,
+    /// Number of repeated resistance measurements to average.
+    pub measurement_count: u16,
     /// Minimum usable projected current magnitude.
     pub min_projected_current: Amps,
     /// Absolute timeout for the whole procedure.
@@ -44,11 +56,13 @@ impl PhaseResistanceCalibrationConfig {
     /// simulator-backed tests.
     pub fn default_for_hold() -> Self {
         Self {
-            align_voltage_mag: Volts::new(1.0),
+            align_voltage_mag: Volts::new(2.0),
+            voltage_increment_mag: Volts::new(0.25),
             align_stator_angle: ElectricalAngle::new(0.0),
-            settle_velocity_threshold: RadPerSec::new(0.05),
+            settle_velocity_threshold: RadPerSec::new(1.0),
             settle_time_seconds: 0.05,
             sample_time_seconds: 0.05,
+            measurement_count: 3,
             min_projected_current: Amps::new(0.1),
             timeout_seconds: 2.0,
         }
@@ -87,8 +101,10 @@ pub struct PhaseResistanceCalibrationResult {
 pub struct PhaseResistanceCalibrator {
     config: PhaseResistanceCalibrationConfig,
     timing: HoldTiming,
+    measurement_index: u16,
     sample_seconds: f32,
     projected_current_integral: f32,
+    normalized_resistance_sum: f32,
     result: Option<PhaseResistanceCalibrationResult>,
     error: Option<CalibrationError>,
 }
@@ -103,8 +119,10 @@ impl PhaseResistanceCalibrator {
         Ok(Self {
             config,
             timing: HoldTiming::new(),
+            measurement_index: 0,
             sample_seconds: 0.0,
             projected_current_integral: 0.0,
+            normalized_resistance_sum: 0.0,
             result: None,
             error: None,
         })
@@ -130,7 +148,7 @@ impl PhaseResistanceCalibrator {
         }
 
         let (s, c) = sin_cos(self.config.align_stator_angle.get());
-        let mag = self.config.align_voltage_mag.get();
+        let mag = self.current_align_voltage_mag();
         AlphaBeta::new(Volts::new(mag * c), Volts::new(mag * s))
     }
 
@@ -176,30 +194,84 @@ impl PhaseResistanceCalibrator {
 
         if self.sample_seconds >= self.config.sample_time_seconds {
             let mean_current = self.projected_current_integral / self.sample_seconds;
-            if !mean_current.is_finite()
-                || mean_current.abs() < self.config.min_projected_current.get()
-            {
+            if !mean_current.is_finite() {
+                fluxkit_warn!(
+                    "phase resistance calibration indeterminate non-finite mean_current={} sample_s={} measurement_index={}",
+                    mean_current,
+                    self.sample_seconds,
+                    self.measurement_index
+                );
                 self.error = Some(CalibrationError::IndeterminateEstimate);
                 return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
             }
 
-            let measured_resistance =
-                self.config.align_voltage_mag.get().abs() / mean_current.abs();
+            if mean_current <= -self.config.min_projected_current.get() {
+                self.error = Some(CalibrationError::OppositeDirection);
+                return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
+            }
+
+            if mean_current < self.config.min_projected_current.get() {
+                fluxkit_warn!(
+                    "phase resistance calibration indeterminate insufficient mean_current={} min_projected_current={} sample_s={} measurement_index={}",
+                    mean_current,
+                    self.config.min_projected_current.get(),
+                    self.sample_seconds,
+                    self.measurement_index
+                );
+                self.error = Some(CalibrationError::IndeterminateEstimate);
+                return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
+            }
+
+            let measured_resistance = self.current_align_voltage_mag() / mean_current;
             let reference_scale = 1.0
                 + PHASE_RESISTANCE_TEMP_COEFF_PER_C
                     * (input.winding_temperature_c - PHASE_RESISTANCE_REFERENCE_TEMP_C);
             if !reference_scale.is_finite() || reference_scale <= 0.0 {
+                fluxkit_warn!(
+                    "phase resistance calibration indeterminate invalid reference_scale={} winding_temp_c={}",
+                    reference_scale,
+                    input.winding_temperature_c
+                );
                 self.error = Some(CalibrationError::IndeterminateEstimate);
                 return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
             }
 
-            self.result = Some(PhaseResistanceCalibrationResult {
-                phase_resistance_ohm_ref: Ohms::new(measured_resistance / reference_scale),
-            });
-            return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
+            self.normalized_resistance_sum += measured_resistance / reference_scale;
+            self.measurement_index += 1;
+
+            if self.measurement_index >= self.config.measurement_count {
+                let mean_resistance =
+                    self.normalized_resistance_sum / self.measurement_index as f32;
+                if !mean_resistance.is_finite() || mean_resistance <= 0.0 {
+                    fluxkit_warn!(
+                        "phase resistance calibration indeterminate invalid mean_resistance={} measurement_count={} normalized_sum={}",
+                        mean_resistance,
+                        self.measurement_index,
+                        self.normalized_resistance_sum
+                    );
+                    self.error = Some(CalibrationError::IndeterminateEstimate);
+                    return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
+                }
+
+                self.result = Some(PhaseResistanceCalibrationResult {
+                    phase_resistance_ohm_ref: Ohms::new(mean_resistance),
+                });
+                return AlphaBeta::new(Volts::ZERO, Volts::ZERO);
+            }
+
+            self.timing.reset_settle();
+            self.sample_seconds = 0.0;
+            self.projected_current_integral = 0.0;
+            return self.commanded_voltage_alpha_beta();
         }
 
         self.commanded_voltage_alpha_beta()
+    }
+
+    #[inline]
+    fn current_align_voltage_mag(&self) -> f32 {
+        self.config.align_voltage_mag.get()
+            + self.config.voltage_increment_mag.get() * self.measurement_index as f32
     }
 }
 
@@ -211,6 +283,8 @@ fn project_alpha_beta_current(phase_currents: Abc<Amps>, unit: AlphaBeta<f32>) -
 fn validate_config(config: PhaseResistanceCalibrationConfig) -> bool {
     config.align_voltage_mag.get().is_finite()
         && config.align_voltage_mag.get() > 0.0
+        && config.voltage_increment_mag.get().is_finite()
+        && config.voltage_increment_mag.get() >= 0.0
         && config.align_stator_angle.get().is_finite()
         && config.settle_velocity_threshold.get().is_finite()
         && config.settle_velocity_threshold.get() >= 0.0
@@ -218,10 +292,13 @@ fn validate_config(config: PhaseResistanceCalibrationConfig) -> bool {
         && config.settle_time_seconds > 0.0
         && config.sample_time_seconds.is_finite()
         && config.sample_time_seconds > 0.0
+        && config.measurement_count > 0
         && config.min_projected_current.get().is_finite()
         && config.min_projected_current.get() > 0.0
         && config.timeout_seconds.is_finite()
-        && config.timeout_seconds > (config.settle_time_seconds + config.sample_time_seconds)
+        && config.timeout_seconds
+            > config.measurement_count as f32
+                * (config.settle_time_seconds + config.sample_time_seconds)
 }
 
 fn validate_input(input: PhaseResistanceCalibrationInput) -> bool {
@@ -246,8 +323,11 @@ mod tests {
     #[test]
     fn completes_from_steady_projected_current() {
         let mut calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
+            align_voltage_mag: fluxkit_math::units::Volts::new(1.0),
+            voltage_increment_mag: fluxkit_math::units::Volts::ZERO,
             settle_time_seconds: 0.01,
             sample_time_seconds: 0.02,
+            measurement_count: 1,
             timeout_seconds: 1.0,
             ..PhaseResistanceCalibrationConfig::default_for_hold()
         })
@@ -271,11 +351,53 @@ mod tests {
     }
 
     #[test]
+    fn averages_multiple_steady_state_measurements() {
+        let mut calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
+            align_voltage_mag: fluxkit_math::units::Volts::new(1.0),
+            voltage_increment_mag: fluxkit_math::units::Volts::new(0.25),
+            settle_time_seconds: 0.01,
+            sample_time_seconds: 0.02,
+            measurement_count: 3,
+            timeout_seconds: 1.0,
+            ..PhaseResistanceCalibrationConfig::default_for_hold()
+        })
+        .unwrap();
+
+        let projected_currents = [2.0, 2.5, 3.0];
+        let mut stage_index = 0usize;
+
+        for tick in 0..24 {
+            let projected_current = projected_currents[stage_index];
+            let _ = calibrator.tick(PhaseResistanceCalibrationInput {
+                phase_currents: Abc::new(
+                    Amps::new(projected_current),
+                    Amps::new(-0.5 * projected_current),
+                    Amps::new(-0.5 * projected_current),
+                ),
+                mechanical_velocity: fluxkit_math::units::RadPerSec::ZERO,
+                winding_temperature_c: 25.0,
+                dt_seconds: 0.005,
+            });
+            if calibrator.result().is_some() {
+                break;
+            }
+            if stage_index < projected_currents.len() - 1 && (tick + 1) % 5 == 0 {
+                stage_index += 1;
+            }
+        }
+
+        assert_eq!(calibrator.error(), None);
+        let result = calibrator.result().unwrap();
+        assert!((result.phase_resistance_ohm_ref.get() - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
     fn times_out_when_rotor_never_settles() {
         let mut calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
             settle_velocity_threshold: fluxkit_math::units::RadPerSec::new(0.01),
             settle_time_seconds: 0.02,
             sample_time_seconds: 0.02,
+            measurement_count: 1,
             timeout_seconds: 0.05,
             ..PhaseResistanceCalibrationConfig::default_for_hold()
         })
@@ -291,5 +413,38 @@ mod tests {
         }
 
         assert_eq!(calibrator.error(), Some(CalibrationError::Timeout));
+    }
+
+    #[test]
+    fn rejects_opposite_signed_steady_current() {
+        let mut calibrator = PhaseResistanceCalibrator::new(PhaseResistanceCalibrationConfig {
+            align_voltage_mag: fluxkit_math::units::Volts::new(1.0),
+            voltage_increment_mag: fluxkit_math::units::Volts::ZERO,
+            settle_time_seconds: 0.01,
+            sample_time_seconds: 0.02,
+            measurement_count: 1,
+            timeout_seconds: 1.0,
+            min_projected_current: Amps::new(0.1),
+            ..PhaseResistanceCalibrationConfig::default_for_hold()
+        })
+        .unwrap();
+
+        for _ in 0..8 {
+            let _ = calibrator.tick(PhaseResistanceCalibrationInput {
+                phase_currents: Abc::new(Amps::new(-2.0), Amps::new(1.0), Amps::new(1.0)),
+                mechanical_velocity: fluxkit_math::units::RadPerSec::ZERO,
+                winding_temperature_c: 25.0,
+                dt_seconds: 0.005,
+            });
+            if calibrator.error().is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(calibrator.result(), None);
+        assert_eq!(
+            calibrator.error(),
+            Some(CalibrationError::OppositeDirection)
+        );
     }
 }

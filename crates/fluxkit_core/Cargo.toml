@@ -9,10 +9,12 @@ repository = ""
 [features]
 default = []
 defmt = ["dep:defmt", "fluxkit_math/defmt"]
+log = ["dep:log"]
 serde = ["dep:serde", "fluxkit_math/serde"]
 
 [dependencies]
 aquamarine = "0.6"
 defmt = { version = "0.3", optional = true }
 fluxkit_math = { path = "../fluxkit_math" }
+log = { version = "0.4", default-features = false, optional = true }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
