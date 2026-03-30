@@ -13,6 +13,41 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
+    fn finish_cycle_result(
+        &mut self,
+        result: Result<
+            MotorRuntimeOutput,
+            MotorRuntimeError<
+                PWM::Error,
+                CURRENT::Error,
+                BUS::Error,
+                ROTOR::Error,
+                OUTPUT::Error,
+                TEMP::Error,
+            >,
+        >,
+    ) -> Result<
+        (),
+        MotorRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
+    > {
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if !matches!(error, MotorRuntimeError::InvalidCurrentSample) {
+                    let _ = self.fault_and_neutral();
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn sync_runtime_requests(
         &mut self,
     ) -> Result<
@@ -147,15 +182,7 @@ where
             TEMP::Error,
         >,
     > {
-        match self.execute_fast_cycle(self.runtime.dt_seconds) {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                if !matches!(error, MotorRuntimeError::InvalidCurrentSample) {
-                    let _ = self.fault_and_neutral();
-                }
-                Err(error)
-            }
-        }
+        self.finish_cycle_result(self.execute_fast_cycle(self.runtime.dt_seconds))
     }
 
     /// Samples hardware, runs one owned controller cycle, and applies duty.

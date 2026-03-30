@@ -23,6 +23,43 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
+    fn publish_tick_result(
+        &self,
+        shared: &Mutex<RefCell<SharedStatus<ActuatorCalibrationStatus>>>,
+        result: Result<
+            Option<()>,
+            ActuatorCalibrationRuntimeError<
+                PWM::Error,
+                CURRENT::Error,
+                BUS::Error,
+                ROTOR::Error,
+                OUTPUT::Error,
+                TEMP::Error,
+            >,
+        >,
+    ) -> Result<
+        (),
+        ActuatorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
+    > {
+        match result {
+            Ok(_) => {
+                self.publish_status(shared, false);
+                Ok(())
+            }
+            Err(error) => {
+                self.publish_status(shared, true);
+                Err(error)
+            }
+        }
+    }
+
     fn phase(&self) -> Option<ActuatorCalibrationPhase> {
         self.active_routine
             .as_ref()
@@ -44,17 +81,7 @@ where
             TEMP::Error,
         >,
     > {
-        let result = self.tick_inner();
-        match result {
-            Ok(_) => {
-                self.publish_status(shared, false);
-                Ok(())
-            }
-            Err(error) => {
-                self.publish_status(shared, true);
-                Err(error)
-            }
-        }
+        self.publish_tick_result(shared, self.tick_inner())
     }
 
     fn tick_inner(
@@ -470,7 +497,7 @@ where
             Command,
         ),
     {
-        if let Some(result) = self.preflight(calibrator)? {
+        if let Some(result) = self.finish_routine_state(calibrator)? {
             return Ok(result);
         }
 
@@ -484,7 +511,7 @@ where
             .tick()
             .map_err(ActuatorCalibrationRuntimeError::Motor)?;
 
-        self.postflight(calibrator)
+        self.finish_routine_state(calibrator)
     }
 
     fn prepare_motor(
@@ -516,42 +543,7 @@ where
         Ok(())
     }
 
-    fn preflight<R, Cal>(
-        &mut self,
-        calibrator: &Cal,
-    ) -> Result<
-        Option<Option<PartialActuatorCalibration>>,
-        ActuatorCalibrationRuntimeError<
-            PWM::Error,
-            CURRENT::Error,
-            BUS::Error,
-            ROTOR::Error,
-            OUTPUT::Error,
-            TEMP::Error,
-        >,
-    >
-    where
-        Cal: RoutineState<R>,
-        R: Into<PartialActuatorCalibration>,
-    {
-        if let Some(result) = calibrator.result() {
-            self.motor_system
-                .set_armed_immediate(false)
-                .map_err(ActuatorCalibrationRuntimeError::Motor)?;
-            let delta = result.into();
-            self.apply_live_calibration(&delta);
-            return Ok(Some(Some(delta)));
-        }
-        if let Some(error) = calibrator.error() {
-            self.motor_system
-                .set_armed_immediate(false)
-                .map_err(ActuatorCalibrationRuntimeError::Motor)?;
-            return Err(ActuatorCalibrationRuntimeError::Calibration(error));
-        }
-        Ok(None)
-    }
-
-    fn postflight<R, Cal>(
+    fn finish_routine_state<R, Cal>(
         &mut self,
         calibrator: &Cal,
     ) -> Result<
@@ -575,15 +567,15 @@ where
                 .map_err(ActuatorCalibrationRuntimeError::Motor)?;
             let delta = result.into();
             self.apply_live_calibration(&delta);
-            Ok(Some(delta))
-        } else if let Some(error) = calibrator.error() {
+            return Ok(Some(delta));
+        }
+        if let Some(error) = calibrator.error() {
             self.motor_system
                 .set_armed_immediate(false)
                 .map_err(ActuatorCalibrationRuntimeError::Motor)?;
-            Err(ActuatorCalibrationRuntimeError::Calibration(error))
-        } else {
-            Ok(None)
+            return Err(ActuatorCalibrationRuntimeError::Calibration(error));
         }
+        Ok(None)
     }
 
     fn apply_live_calibration(&mut self, calibration: &PartialActuatorCalibration) {

@@ -11,6 +11,41 @@ where
     MOD: Modulator,
     RotorEst: MechanicalMotionEstimator,
 {
+    fn publish_tick_result(
+        &self,
+        shared: &Mutex<RefCell<SharedStatus<MotorCalibrationStatus>>>,
+        result: Result<
+            Option<()>,
+            MotorCalibrationRuntimeError<
+                PWM::Error,
+                CURRENT::Error,
+                BUS::Error,
+                ROTOR::Error,
+                TEMP::Error,
+            >,
+        >,
+    ) -> Result<
+        (),
+        MotorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            TEMP::Error,
+        >,
+    > {
+        match result {
+            Ok(_) => {
+                self.publish_status(shared, false);
+                Ok(())
+            }
+            Err(error) => {
+                self.publish_status(shared, true);
+                Err(error)
+            }
+        }
+    }
+
     /// Advances the request-driven motor calibration campaign by one fixed-period step.
     pub fn tick(
         &mut self,
@@ -25,17 +60,7 @@ where
             TEMP::Error,
         >,
     > {
-        let result = self.tick_inner();
-        match result {
-            Ok(_) => {
-                self.publish_status(shared, false);
-                Ok(())
-            }
-            Err(error) => {
-                self.publish_status(shared, true);
-                Err(error)
-            }
-        }
+        self.publish_tick_result(shared, self.tick_inner())
     }
 
     fn phase(&self) -> Option<MotorCalibrationPhase> {
@@ -442,7 +467,7 @@ where
             f32,
         ) -> AlphaBeta<Volts>,
     {
-        if let Some(result) = self.preflight(calibrator)? {
+        if let Some(result) = self.finish_routine_state(calibrator)? {
             return Ok(result);
         }
 
@@ -469,7 +494,7 @@ where
 
         let command = build_command(calibrator, rotor_motion, current, dt_seconds);
         self.apply_alpha_beta_command(command, bus_voltage)?;
-        self.postflight(calibrator)
+        self.finish_routine_state(calibrator)
     }
 
     fn sample_valid_current(
@@ -521,34 +546,7 @@ where
             .map_err(MotorCalibrationRuntimeError::Pwm)
     }
 
-    fn preflight<R, Cal>(
-        &mut self,
-        calibrator: &Cal,
-    ) -> Result<
-        Option<Option<R>>,
-        MotorCalibrationRuntimeError<
-            PWM::Error,
-            CURRENT::Error,
-            BUS::Error,
-            ROTOR::Error,
-            TEMP::Error,
-        >,
-    >
-    where
-        Cal: RoutineState<R>,
-    {
-        if let Some(result) = calibrator.result() {
-            self.set_neutral()?;
-            return Ok(Some(Some(result)));
-        }
-        if let Some(error) = calibrator.error() {
-            self.set_neutral()?;
-            return Err(MotorCalibrationRuntimeError::Calibration(error));
-        }
-        Ok(None)
-    }
-
-    fn postflight<R, Cal>(
+    fn finish_routine_state<R, Cal>(
         &mut self,
         calibrator: &Cal,
     ) -> Result<
@@ -566,13 +564,13 @@ where
     {
         if let Some(result) = calibrator.result() {
             self.set_neutral()?;
-            Ok(Some(result))
-        } else if let Some(error) = calibrator.error() {
-            self.set_neutral()?;
-            Err(MotorCalibrationRuntimeError::Calibration(error))
-        } else {
-            Ok(None)
+            return Ok(Some(result));
         }
+        if let Some(error) = calibrator.error() {
+            self.set_neutral()?;
+            return Err(MotorCalibrationRuntimeError::Calibration(error));
+        }
+        Ok(None)
     }
 }
 
