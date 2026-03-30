@@ -41,6 +41,7 @@
               just
               llvm
               pkg-config
+              zsh
             ]);
 
             shellHook = ''
@@ -48,7 +49,11 @@
               export LLVM_COV="${pkgs.llvm}/bin/llvm-cov"
               export LLVM_PROFDATA="${pkgs.llvm}/bin/llvm-profdata"
               export RUST_BACKTRACE=1
+              export SHELL="${pkgs.zsh}/bin/zsh"
               echo "driverdriver dev shell (${system})"
+              if [ -n "${PS1:-}" ]; then
+                exec ${pkgs.zsh}/bin/zsh
+              fi
             '';
           };
         });
