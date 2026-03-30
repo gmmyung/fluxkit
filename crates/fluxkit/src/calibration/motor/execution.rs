@@ -60,7 +60,8 @@ where
             TEMP::Error,
         >,
     > {
-        self.publish_tick_result(shared, self.tick_inner())
+        let result = self.tick_inner();
+        self.publish_tick_result(shared, result)
     }
 
     fn phase(&self) -> Option<MotorCalibrationPhase> {
@@ -90,7 +91,8 @@ where
             .active_routine
             .take()
             .expect("active routine must exist");
-        self.finish_routine_step(routine, self.tick_active_routine(&mut routine, self.dt_seconds)?)
+        let delta = self.tick_active_routine(&mut routine, self.dt_seconds)?;
+        self.finish_routine_step(routine, delta)
     }
 
     fn publish_status(
@@ -184,7 +186,7 @@ where
             .map_err(MotorCalibrationRuntimeError::Pwm)
     }
 
-    fn tick_active_routine(
+    pub(crate) fn tick_active_routine(
         &mut self,
         routine: &mut MotorCalibrationRoutine,
         dt_seconds: f32,
@@ -500,7 +502,7 @@ where
         ) -> AlphaBeta<Volts>,
     {
         if let Some(result) = self.finish_routine_state(calibrator)? {
-            return Ok(result);
+            return Ok(Some(result));
         }
 
         let bus_voltage = self

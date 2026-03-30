@@ -81,7 +81,8 @@ where
             TEMP::Error,
         >,
     > {
-        self.publish_tick_result(shared, self.tick_inner())
+        let result = self.tick_inner();
+        self.publish_tick_result(shared, result)
     }
 
     fn tick_inner(
@@ -108,7 +109,8 @@ where
             .active_routine
             .take()
             .expect("active routine must exist");
-        self.finish_routine_step(routine, self.tick_active_routine(&mut routine)?)
+        let delta = self.tick_active_routine(&mut routine)?;
+        self.finish_routine_step(routine, delta)
     }
 
     fn publish_status(
@@ -328,7 +330,7 @@ where
         }
     }
 
-    fn partial_calibration(&self) -> PartialActuatorCalibration {
+    pub(crate) fn partial_calibration(&self) -> PartialActuatorCalibration {
         PartialActuatorCalibration {
             gear_ratio: self.gear_ratio,
             friction: fluxkit_core::ActuatorFrictionCalibration {
@@ -532,7 +534,7 @@ where
         ),
     {
         if let Some(result) = self.finish_routine_state(calibrator)? {
-            return Ok(result);
+            return Ok(Some(result));
         }
 
         self.prepare_motor(require_friction_disabled)?;
@@ -612,7 +614,7 @@ where
         Ok(None)
     }
 
-    fn apply_live_calibration(&mut self, calibration: &PartialActuatorCalibration) {
+    pub(crate) fn apply_live_calibration(&mut self, calibration: &PartialActuatorCalibration) {
         self.motor_system.apply_actuator_calibration(calibration);
     }
 }

@@ -48,7 +48,7 @@ where
         }
     }
 
-    fn sync_runtime_requests(
+    pub(crate) fn sync_runtime_requests(
         &mut self,
     ) -> Result<
         bool,
@@ -119,7 +119,7 @@ where
         Ok(self.runtime.pwm_armed)
     }
 
-    fn publish_runtime_status(&self, last_fast_output: Option<MotorRuntimeOutput>) {
+    pub(crate) fn publish_runtime_status(&self, last_fast_output: Option<MotorRuntimeOutput>) {
         critical_section::with(|cs| {
             let mut shared = self.shared.borrow(cs).borrow_mut();
             if let Some(output) = last_fast_output {
@@ -182,7 +182,8 @@ where
             TEMP::Error,
         >,
     > {
-        self.finish_cycle_result(self.execute_fast_cycle(self.runtime.dt_seconds))
+        let result = self.execute_fast_cycle(self.runtime.dt_seconds);
+        self.finish_cycle_result(result)
     }
 
     /// Samples hardware, runs one owned controller cycle, and applies duty.

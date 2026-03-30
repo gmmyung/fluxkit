@@ -192,7 +192,7 @@ where
     }
 
     #[cfg(test)]
-    fn tick_active_routine_for_test(
+    pub(crate) fn tick_active_routine_for_test(
         &self,
         routine: &mut MotorCalibrationRoutine,
         dt_seconds: f32,

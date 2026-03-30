@@ -51,8 +51,9 @@
               export RUST_BACKTRACE=1
               export SHELL="${pkgs.zsh}/bin/zsh"
               echo "driverdriver dev shell (${system})"
-              if [ -n "${PS1:-}" ]; then
-                exec ${pkgs.zsh}/bin/zsh
+              if [ -t 0 ] && [ -t 1 ] && [ -n "''${PS1:-}" ] && [ -z "''${FLUXKIT_DEV_SHELL_ZSH:-}" ]; then
+                export FLUXKIT_DEV_SHELL_ZSH=1
+                exec ${pkgs.zsh}/bin/zsh -i
               fi
             '';
           };
