@@ -79,7 +79,10 @@ where
             return Err(CalibrationError::InvalidConfiguration);
         }
 
-        let motor_system = MotorRuntime::from_parts(parts, dt_seconds);
+        let motor_system = MotorRuntime::from_parts(parts, dt_seconds)
+            .map_err(|_| CalibrationError::InvalidConfiguration)?;
+        let current_phase = next_phase_for_request(request);
+        let resolved_result = resolved_result_for_request(request);
 
         let mut inner = InnerActuatorCalibrationRuntime {
             motor_system,
@@ -93,6 +96,8 @@ where
             positive_viscous_coefficient: request.positive_viscous_coefficient,
             negative_viscous_coefficient: request.negative_viscous_coefficient,
             zero_velocity_blend_band: request.zero_velocity_blend_band,
+            current_phase,
+            resolved_result,
             active_routine: None,
         };
         let partial = inner.partial_calibration();
@@ -102,8 +107,8 @@ where
             shared: Mutex::new(RefCell::new(SharedStatus {
                 status: ActuatorCalibrationStatus {
                     active: true,
-                    phase: next_phase_for_request(request),
-                    result: None,
+                    phase: current_phase,
+                    result: resolved_result,
                     fault_latched: false,
                 },
             })),

@@ -125,8 +125,9 @@ where
             if let Some(output) = last_fast_output {
                 shared.status.last_fast_output = Some(output);
             }
-            shared.status.controller = self.runtime.controller.status();
-            shared.status.fault_latched |= self.runtime.controller.status().active_error.is_some();
+            let controller_status = self.runtime.controller.status();
+            shared.status.controller = controller_status;
+            shared.status.fault_latched |= controller_status.active_error.is_some();
         });
     }
 

@@ -64,13 +64,6 @@ where
         self.publish_tick_result(shared, result)
     }
 
-    fn phase(&self) -> Option<MotorCalibrationPhase> {
-        self.active_routine
-            .as_ref()
-            .map(MotorCalibrationPhase::from)
-            .or_else(|| self.next_phase())
-    }
-
     fn tick_inner(
         &mut self,
     ) -> Result<
@@ -103,13 +96,13 @@ where
         write_status(shared, |status| {
             *status = MotorCalibrationStatus {
                 active: true,
-                phase: self.phase(),
+                phase: self.current_phase,
                 pole_pairs: self.pole_pairs,
                 electrical_direction: self.electrical_direction,
                 electrical_angle_offset: self.electrical_angle_offset,
                 phase_resistance_ohm_ref: self.phase_resistance_ohm_ref,
                 phase_inductance_h: self.phase_inductance_h,
-                result: self.resolve_calibration().ok(),
+                result: self.resolved_result,
                 fault_latched,
             };
         });
@@ -135,11 +128,13 @@ where
             .build_next_routine()
             .map_err(MotorCalibrationRuntimeError::Calibration)?;
         if self.active_routine.is_some() {
+            self.refresh_phase();
             return Ok(false);
         }
 
-        self.resolve_calibration()
+        self.cache_resolved_calibration()
             .map_err(MotorCalibrationRuntimeError::Calibration)?;
+        self.refresh_phase();
         Ok(true)
     }
 
@@ -164,6 +159,7 @@ where
             }
         } else {
             self.active_routine = Some(routine);
+            self.refresh_phase();
         }
 
         Ok(None)
@@ -288,6 +284,14 @@ where
         None
     }
 
+    fn refresh_phase(&mut self) {
+        self.current_phase = self
+            .active_routine
+            .as_ref()
+            .map(MotorCalibrationPhase::from)
+            .or_else(|| self.next_phase());
+    }
+
     fn merge_partial(&mut self, delta: PartialMotorCalibration) {
         if self.pole_pairs.is_none() {
             if let Some(value) = delta.pole_pairs {
@@ -342,6 +346,13 @@ where
                 .flux_linkage_weber
                 .ok_or(CalibrationError::InvalidConfiguration)?,
         })
+    }
+
+    fn cache_resolved_calibration(&mut self) -> Result<(), CalibrationError> {
+        if self.resolved_result.is_none() {
+            self.resolved_result = Some(self.resolve_calibration()?);
+        }
+        Ok(())
     }
 
     fn tick_pole_pairs_and_offset(
@@ -632,13 +643,17 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = take_active_inner(self.inner, || read_status(self.shared).active, |active| {
-            if active {
-                MotorCalibrationRuntimeError::Busy
-            } else {
-                MotorCalibrationRuntimeError::Inactive
-            }
-        })?;
+        let mut inner = take_active_inner(
+            self.inner,
+            || read_status(self.shared).active,
+            |active| {
+                if active {
+                    MotorCalibrationRuntimeError::Busy
+                } else {
+                    MotorCalibrationRuntimeError::Inactive
+                }
+            },
+        )?;
         let result = inner.tick(self.shared);
         critical_section::with(|cs| {
             *self.inner.borrow(cs).borrow_mut() = Some(inner);

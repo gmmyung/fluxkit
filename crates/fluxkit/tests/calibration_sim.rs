@@ -1279,7 +1279,8 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
         Svpwm,
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
 
     let (handle, runtime_ticker) = runtime.split().expect("runtime should split once");
     handle.set_command(MotorCommand::Velocity(RadPerSec::new(2.0)));

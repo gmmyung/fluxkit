@@ -19,7 +19,7 @@ use fluxkit_math::{
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts},
 };
 
-use super::{Hardware, MotorRuntime, MotorRuntimeError};
+use super::{Hardware, MotorRuntime, MotorRuntimeBuildError, MotorRuntimeError};
 
 #[derive(Debug)]
 struct FakePwm {
@@ -278,7 +278,8 @@ fn fast_tick_reads_hal_and_applies_phase_duty() {
         fluxkit_math::Svpwm,
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
     handle.set_command(super::MotorCommand::Current(Dq::new(
         Amps::ZERO,
@@ -319,7 +320,8 @@ fn invalid_current_sample_returns_error_and_forces_neutral_pwm() {
         fluxkit_math::Svpwm,
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
     handle.arm();
     let error = ticker.tick().unwrap_err();
@@ -351,7 +353,8 @@ fn supervisory_work_runs_inside_fast_cycle() {
         fluxkit_math::Svpwm,
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
     handle.set_command(super::MotorCommand::Position(
         ContinuousMechanicalAngle::new(1.0),
@@ -413,7 +416,8 @@ fn explicit_estimators_drive_controller_side_motion_estimates() {
                 RadPerSec::new(1.5),
             ),
         },
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
     handle.set_command(super::MotorCommand::Current(Dq::new(
         Amps::ZERO,
@@ -454,7 +458,8 @@ fn runtime_handle_updates_command_and_receives_status() {
         fluxkit_math::Svpwm,
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
     handle.set_command(super::MotorCommand::Current(Dq::new(
         Amps::ZERO,
@@ -496,7 +501,8 @@ fn over_temperature_latches_runtime_fault_and_centers_output() {
         fluxkit_math::Svpwm,
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
     handle.arm();
     ticker.tick().unwrap();
@@ -537,7 +543,8 @@ fn extracted_runtime_marks_handles_and_tickers_inactive() {
         fluxkit_math::Svpwm,
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
 
     let _parts = system
@@ -548,4 +555,30 @@ fn extracted_runtime_marks_handles_and_tickers_inactive() {
     handle.arm();
     assert!(!handle.status().armed);
     assert!(matches!(ticker.tick(), Err(MotorRuntimeError::Inactive)));
+}
+
+#[test]
+fn runtime_builder_rejects_non_positive_dt_seconds() {
+    let hardware = hardware(CurrentSampleValidity::Valid);
+    let error = MotorRuntime::new(
+        hardware.pwm,
+        hardware.current,
+        hardware.bus,
+        hardware.rotor,
+        hardware.output,
+        hardware.temp,
+        super::MotorRuntimeParams::new(
+            motor_params(),
+            inverter_params(),
+            actuator_params(),
+            current_loop_config(),
+            0.0,
+        ),
+        fluxkit_math::Svpwm,
+        fluxkit_math::PassThroughEstimator::new(),
+        fluxkit_math::PassThroughEstimator::new(),
+    )
+    .expect_err("non-positive dt should be rejected");
+
+    assert_eq!(error, MotorRuntimeBuildError::InvalidDtSeconds);
 }

@@ -160,7 +160,7 @@
 //!     Svpwm,
 //!     PassThroughEstimator::new(),
 //!     PassThroughEstimator::new(),
-//! );
+//! )?;
 //! let (handle, ticker) = runtime.split()?;
 //! handle.set_command(fluxkit::MotorCommand::Velocity(RadPerSec::new(2.0)));
 //! handle.arm();

@@ -20,7 +20,7 @@ where
         modulator: MOD,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
-    ) -> Self {
+    ) -> Result<Self, MotorRuntimeBuildError> {
         Self::from_parts(
             MotorRuntimeParts {
                 pwm,
@@ -45,7 +45,11 @@ where
     pub fn from_parts(
         parts: MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
         dt_seconds: f32,
-    ) -> Self {
+    ) -> Result<Self, MotorRuntimeBuildError> {
+        if !validate_dt_seconds(dt_seconds) {
+            return Err(MotorRuntimeBuildError::InvalidDtSeconds);
+        }
+
         let controller = MotorController::new(
             parts.motor,
             parts.inverter,
@@ -75,8 +79,8 @@ where
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
         dt_seconds: f32,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, MotorRuntimeBuildError> {
+        Ok(Self {
             shared: Mutex::new(RefCell::new(SharedRuntimeState {
                 command: MotorCommand::default(),
                 command_dirty: false,
@@ -98,7 +102,7 @@ where
                 pwm_armed: false,
             }))),
             split_taken: Cell::new(false),
-        }
+        })
     }
 
     /// Splits this runtime into its unique main-context handle and IRQ-side ticker.

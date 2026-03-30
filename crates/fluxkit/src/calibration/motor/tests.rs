@@ -244,6 +244,28 @@ fn phase_reports_next_unresolved_step() {
 }
 
 #[test]
+fn complete_request_publishes_result_immediately() {
+    let (pwm, current, bus, rotor, temp) = hardware();
+    let system = system(pwm, current, bus, rotor, temp);
+
+    let (handle, _ticker) = system.split().expect("calibration should split once");
+    let status = handle.status();
+
+    assert_eq!(status.phase, None);
+    assert_eq!(
+        status.result,
+        Some(super::MotorCalibrationResult {
+            pole_pairs: 7,
+            electrical_direction: fluxkit_math::ElectricalDirection::Positive,
+            electrical_angle_offset: fluxkit_math::ElectricalAngle::new(0.0),
+            phase_resistance_ohm_ref: fluxkit_math::units::Ohms::new(0.12),
+            phase_inductance_h: fluxkit_math::units::Henries::new(30.0e-6),
+            flux_linkage_weber: fluxkit_math::units::Webers::new(0.005),
+        })
+    );
+}
+
+#[test]
 fn inductance_wrapper_rejects_invalid_current_sample() {
     let (pwm, mut current, bus, rotor, temp) = hardware();
     current.sample.validity = CurrentSampleValidity::Invalid;

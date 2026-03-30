@@ -65,7 +65,8 @@ fn motor_runtime_closes_current_loop_against_simulator() {
         Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");
     handle.set_command(MotorCommand::Current(fluxkit::Dq::new(
         Amps::ZERO,
@@ -119,7 +120,8 @@ fn motor_runtime_supports_scoped_irq_thread_usage() {
         Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");
 
     thread::scope(|scope| {
@@ -190,7 +192,8 @@ fn motor_runtime_supports_mit_command() {
         Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");
     handle.set_command(MotorCommand::Mit {
         position: ContinuousMechanicalAngle::new(1.0),
@@ -242,7 +245,8 @@ fn motor_runtime_velocity_mode_tracks_positive_output_speed_with_negative_direct
         Svpwm,
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
-    );
+    )
+    .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");
     handle.set_command(MotorCommand::Velocity(RadPerSec::new(10.0)));
     handle.arm();

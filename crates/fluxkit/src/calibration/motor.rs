@@ -514,6 +514,8 @@ struct InnerMotorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, TEMP, MOD, RotorEs
     phase_resistance_ohm_ref: Option<Ohms>,
     phase_inductance_h: Option<Henries>,
     flux_linkage_weber: Option<Webers>,
+    current_phase: Option<MotorCalibrationPhase>,
+    resolved_result: Option<MotorCalibrationResult>,
     active_routine: Option<MotorCalibrationRoutine>,
 }
 
@@ -557,6 +559,17 @@ fn next_phase_for_request(request: MotorCalibrationRequest) -> Option<MotorCalib
         return Some(MotorCalibrationPhase::FluxLinkage);
     }
     None
+}
+
+fn resolved_result_for_request(request: MotorCalibrationRequest) -> Option<MotorCalibrationResult> {
+    Some(MotorCalibrationResult {
+        pole_pairs: request.pole_pairs?,
+        electrical_direction: request.electrical_direction?,
+        electrical_angle_offset: request.electrical_angle_offset?,
+        phase_resistance_ohm_ref: request.phase_resistance_ohm_ref?,
+        phase_inductance_h: request.phase_inductance_h?,
+        flux_linkage_weber: request.flux_linkage_weber?,
+    })
 }
 
 #[inline]

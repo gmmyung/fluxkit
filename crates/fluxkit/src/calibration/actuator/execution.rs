@@ -60,13 +60,6 @@ where
         }
     }
 
-    fn phase(&self) -> Option<ActuatorCalibrationPhase> {
-        self.active_routine
-            .as_ref()
-            .map(ActuatorCalibrationPhase::from)
-            .or_else(|| self.next_phase())
-    }
-
     pub fn tick(
         &mut self,
         shared: &Mutex<RefCell<SharedStatus<ActuatorCalibrationStatus>>>,
@@ -98,9 +91,6 @@ where
             TEMP::Error,
         >,
     > {
-        let partial = self.partial_calibration();
-        self.apply_live_calibration(&partial);
-
         if self.activate_next_routine_if_needed()? {
             return Ok(Some(()));
         }
@@ -121,8 +111,8 @@ where
         write_status(shared, |status| {
             *status = ActuatorCalibrationStatus {
                 active: true,
-                phase: self.phase(),
-                result: self.resolve_calibration().ok(),
+                phase: self.current_phase,
+                result: self.resolved_result,
                 fault_latched,
             };
         });
@@ -149,11 +139,13 @@ where
             .build_next_routine()
             .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
         if self.active_routine.is_some() {
+            self.refresh_phase();
             return Ok(false);
         }
 
-        self.resolve_calibration()
+        self.cache_resolved_calibration()
             .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
+        self.refresh_phase();
         Ok(true)
     }
 
@@ -179,6 +171,7 @@ where
             }
         } else {
             self.active_routine = Some(routine);
+            self.refresh_phase();
         }
 
         Ok(None)
@@ -202,6 +195,14 @@ where
             return Some(ActuatorCalibrationPhase::BlendBand);
         }
         None
+    }
+
+    fn refresh_phase(&mut self) {
+        self.current_phase = self
+            .active_routine
+            .as_ref()
+            .map(ActuatorCalibrationPhase::from)
+            .or_else(|| self.next_phase());
     }
 
     fn tick_active_routine(
@@ -372,6 +373,13 @@ where
                 .zero_velocity_blend_band
                 .ok_or(CalibrationError::InvalidConfiguration)?,
         })
+    }
+
+    fn cache_resolved_calibration(&mut self) -> Result<(), CalibrationError> {
+        if self.resolved_result.is_none() {
+            self.resolved_result = Some(self.resolve_calibration()?);
+        }
+        Ok(())
     }
 
     fn tick_gear_ratio(
@@ -646,13 +654,17 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = take_active_inner(&self.inner, || read_status(&self.shared).active, |active| {
-            if active {
-                ActuatorCalibrationRuntimeError::Busy
-            } else {
-                ActuatorCalibrationRuntimeError::Inactive
-            }
-        })?;
+        let mut inner = take_active_inner(
+            &self.inner,
+            || read_status(&self.shared).active,
+            |active| {
+                if active {
+                    ActuatorCalibrationRuntimeError::Busy
+                } else {
+                    ActuatorCalibrationRuntimeError::Inactive
+                }
+            },
+        )?;
         let result = inner.tick(self.shared);
         critical_section::with(|cs| {
             *self.inner.borrow(cs).borrow_mut() = Some(inner);

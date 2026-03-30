@@ -680,7 +680,8 @@ fn main_context_loop(plot_path: &str) {
                         ..parts
                     },
                     FAST_DT_SECONDS,
-                );
+                )
+                .expect("valid runtime config");
                 let runtime_system = MOTOR_RUNTIME.init(runtime_system);
                 let (handle, ticker) = runtime_system.split().unwrap();
                 handle.set_command(MotorCommand::Velocity(RadPerSec::new(2.0)));

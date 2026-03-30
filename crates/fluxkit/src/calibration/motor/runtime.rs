@@ -88,6 +88,9 @@ where
             return Err(CalibrationError::InvalidConfiguration);
         }
 
+        let current_phase = next_phase_for_request(request);
+        let resolved_result = resolved_result_for_request(request);
+
         Ok(Self {
             inner: Mutex::new(RefCell::new(Some(InnerMotorCalibrationRuntime {
                 pwm: parts.pwm,
@@ -106,18 +109,20 @@ where
                 phase_resistance_ohm_ref: request.phase_resistance_ohm_ref,
                 phase_inductance_h: request.phase_inductance_h,
                 flux_linkage_weber: request.flux_linkage_weber,
+                current_phase,
+                resolved_result,
                 active_routine: None,
             }))),
             shared: Mutex::new(RefCell::new(SharedStatus {
                 status: MotorCalibrationStatus {
                     active: true,
-                    phase: next_phase_for_request(request),
+                    phase: current_phase,
                     pole_pairs: request.pole_pairs,
                     electrical_direction: request.electrical_direction,
                     electrical_angle_offset: request.electrical_angle_offset,
                     phase_resistance_ohm_ref: request.phase_resistance_ohm_ref,
                     phase_inductance_h: request.phase_inductance_h,
-                    result: None,
+                    result: resolved_result,
                     fault_latched: false,
                 },
             })),
@@ -206,13 +211,17 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = take_active_inner(&self.inner, || read_status(&self.shared).active, |active| {
-            if active {
-                MotorCalibrationRuntimeError::Busy
-            } else {
-                MotorCalibrationRuntimeError::Inactive
-            }
-        })?;
+        let mut inner = take_active_inner(
+            &self.inner,
+            || read_status(&self.shared).active,
+            |active| {
+                if active {
+                    MotorCalibrationRuntimeError::Busy
+                } else {
+                    MotorCalibrationRuntimeError::Inactive
+                }
+            },
+        )?;
         let result = inner.tick_active_routine(routine, dt_seconds);
         critical_section::with(|cs| {
             *self.inner.borrow(cs).borrow_mut() = Some(inner);

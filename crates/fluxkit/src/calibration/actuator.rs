@@ -297,6 +297,8 @@ struct InnerActuatorCalibrationRuntime<
     positive_viscous_coefficient: Option<f32>,
     negative_viscous_coefficient: Option<f32>,
     zero_velocity_blend_band: Option<RadPerSec>,
+    current_phase: Option<ActuatorCalibrationPhase>,
+    resolved_result: Option<ActuatorCalibrationResult>,
     active_routine: Option<ActuatorCalibrationRoutine>,
 }
 
@@ -386,6 +388,21 @@ fn next_phase_for_request(request: ActuatorCalibrationRequest) -> Option<Actuato
         return Some(ActuatorCalibrationPhase::BlendBand);
     }
     None
+}
+
+fn resolved_result_for_request(
+    request: ActuatorCalibrationRequest,
+) -> Option<ActuatorCalibrationResult> {
+    Some(ActuatorCalibrationResult {
+        gear_ratio: request.gear_ratio?,
+        positive_breakaway_torque: request.positive_breakaway_torque?,
+        negative_breakaway_torque: request.negative_breakaway_torque?,
+        positive_coulomb_torque: request.positive_coulomb_torque?,
+        negative_coulomb_torque: request.negative_coulomb_torque?,
+        positive_viscous_coefficient: request.positive_viscous_coefficient?,
+        negative_viscous_coefficient: request.negative_viscous_coefficient?,
+        zero_velocity_blend_band: request.zero_velocity_blend_band?,
+    })
 }
 
 #[inline]

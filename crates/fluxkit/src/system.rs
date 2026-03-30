@@ -50,7 +50,7 @@
 //!     fluxkit::Svpwm,
 //!     fluxkit::PassThroughEstimator::new(),
 //!     fluxkit::PassThroughEstimator::new(),
-//! );
+//! )?;
 //! let (handle, ticker) = runtime.split()?;
 //! handle.set_command(fluxkit::MotorCommand::Velocity(
 //!     fluxkit::RadPerSec::new(2.0),
@@ -145,6 +145,25 @@ where
         }
     }
 }
+
+/// Static runtime-construction failures detected before the control loop starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum MotorRuntimeBuildError {
+    /// The fixed runtime period must be finite and greater than zero.
+    InvalidDtSeconds,
+}
+
+impl fmt::Display for MotorRuntimeBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDtSeconds => f.write_str("invalid runtime dt_seconds"),
+        }
+    }
+}
+
+impl core::error::Error for MotorRuntimeBuildError {}
 
 impl<PwmE, CurrentE, BusE, RotorE, OutputE, TempE> core::error::Error
     for MotorRuntimeError<PwmE, CurrentE, BusE, RotorE, OutputE, TempE>
@@ -351,6 +370,11 @@ impl MotorRuntimeParams {
             dt_seconds,
         }
     }
+}
+
+#[inline]
+fn validate_dt_seconds(dt_seconds: f32) -> bool {
+    dt_seconds.is_finite() && dt_seconds > 0.0
 }
 
 #[derive(Clone, Copy, Debug)]
