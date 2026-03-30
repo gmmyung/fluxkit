@@ -100,37 +100,15 @@ where
         let partial = self.partial_calibration();
         self.apply_live_calibration(&partial);
 
-        if self.active_routine.is_none() {
-            self.active_routine = self
-                .build_next_routine()
-                .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
-            if self.active_routine.is_none() {
-                self.resolve_calibration()
-                    .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
-                return Ok(Some(()));
-            }
+        if self.activate_next_routine_if_needed()? {
+            return Ok(Some(()));
         }
 
         let mut routine = self
             .active_routine
             .take()
             .expect("active routine must exist");
-        if let Some(delta) = self.tick_active_routine(&mut routine)? {
-            self.merge_partial(delta);
-            if self
-                .build_next_routine()
-                .map_err(ActuatorCalibrationRuntimeError::Calibration)?
-                .is_none()
-            {
-                self.resolve_calibration()
-                    .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
-                return Ok(Some(()));
-            }
-        } else {
-            self.active_routine = Some(routine);
-        }
-
-        Ok(None)
+        self.finish_routine_step(routine, self.tick_active_routine(&mut routine)?)
     }
 
     fn publish_status(
@@ -146,6 +124,62 @@ where
                 fault_latched,
             };
         });
+    }
+
+    fn activate_next_routine_if_needed(
+        &mut self,
+    ) -> Result<
+        bool,
+        ActuatorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
+    > {
+        if self.active_routine.is_some() {
+            return Ok(false);
+        }
+
+        self.active_routine = self
+            .build_next_routine()
+            .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
+        if self.active_routine.is_some() {
+            return Ok(false);
+        }
+
+        self.resolve_calibration()
+            .map_err(ActuatorCalibrationRuntimeError::Calibration)?;
+        Ok(true)
+    }
+
+    fn finish_routine_step(
+        &mut self,
+        routine: ActuatorCalibrationRoutine,
+        delta: Option<PartialActuatorCalibration>,
+    ) -> Result<
+        Option<()>,
+        ActuatorCalibrationRuntimeError<
+            PWM::Error,
+            CURRENT::Error,
+            BUS::Error,
+            ROTOR::Error,
+            OUTPUT::Error,
+            TEMP::Error,
+        >,
+    > {
+        if let Some(delta) = delta {
+            self.merge_partial(delta);
+            if self.activate_next_routine_if_needed()? {
+                return Ok(Some(()));
+            }
+        } else {
+            self.active_routine = Some(routine);
+        }
+
+        Ok(None)
     }
 
     fn next_phase(&self) -> Option<ActuatorCalibrationPhase> {
