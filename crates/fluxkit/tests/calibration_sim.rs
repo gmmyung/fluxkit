@@ -1,3 +1,5 @@
+mod support;
+
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -6,15 +8,13 @@ use std::{
 };
 
 use fluxkit::{
-    Abc, ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
-    ActuatorCalibrationRuntime, ActuatorLimits, BusVoltageSensor, ContinuousMechanicalAngle,
-    CurrentLoopConfig, CurrentSampleValidity, CurrentSampler, ElectricalAngle, ElectricalDirection,
-    InverterParams, MechanicalAngle, MotorCalibrationConfig, MotorCalibrationLimits,
-    MotorCalibrationPhase, MotorCalibrationRequest, MotorCalibrationRuntime, MotorCommand,
-    MotorLimits, MotorModel, MotorParams, MotorRuntime, OutputReading, OutputSensor,
-    PassThroughEstimator, PhaseCurrentSample, PhasePwm, PolePairsAndOffsetRoutineConfig, RadPerSec,
-    RotorReading, RotorSensor, Svpwm, TemperatureSensor,
-    units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, Volts, Webers},
+    ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
+    ActuatorCalibrationRuntime, ActuatorLimits, ContinuousMechanicalAngle, ElectricalAngle,
+    ElectricalDirection, MotorCalibrationConfig, MotorCalibrationLimits, MotorCalibrationPhase,
+    MotorCalibrationRequest, MotorCalibrationRuntime, MotorCommand, MotorLimits, MotorModel,
+    MotorParams, MotorRuntime, PassThroughEstimator, PolePairsAndOffsetRoutineConfig, RadPerSec,
+    Svpwm,
+    units::{Amps, Henries, NewtonMeters, Ohms, Volts, Webers},
 };
 use fluxkit_core::{
     FluxLinkageCalibrationResult, MotorCalibration, PhaseInductanceCalibrationResult,
@@ -22,12 +22,13 @@ use fluxkit_core::{
     PolePairsAndOffsetCalibrationResult,
 };
 use fluxkit_hal::centered_phase_duty;
-use fluxkit_math::{inverse_clarke, inverse_park};
 use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState, ThermalPlantParams};
-
-const FAST_DT_SECONDS: f32 = 1.0 / 20_000.0;
-const GEAR_RATIO: f32 = 2.0;
-const WINDING_TEMP_C: f32 = 25.0;
+use support::sim::{
+    FAST_DT_SECONDS, GEAR_RATIO, SimHarness, WINDING_TEMP_C, controller_motor_params,
+    current_loop_config, inverter_params, local_calibration_hardware as calibration_hardware,
+    local_output, local_output_inverted, local_runtime_hardware as runtime_handles,
+    threaded_calibration_hardware,
+};
 
 fn plant_params() -> PmsmParams {
     PmsmParams {
@@ -96,397 +97,6 @@ fn actuator_breakaway_plant_params() -> PmsmParams {
         },
         max_voltage_mag: None,
     }
-}
-
-fn controller_motor_params() -> MotorParams {
-    MotorParams::from_model_and_limits(
-        MotorModel {
-            pole_pairs: 7,
-            phase_resistance_ohm_ref: Ohms::new(0.12),
-            d_inductance_h: Henries::new(0.000_03),
-            q_inductance_h: Henries::new(0.000_03),
-            flux_linkage_weber: Webers::new(0.005),
-            electrical_direction: ElectricalDirection::Positive,
-            electrical_angle_offset: ElectricalAngle::new(0.0),
-        },
-        MotorLimits {
-            max_phase_current: Amps::new(10.0),
-            max_mech_speed: Some(RadPerSec::new(150.0)),
-            max_winding_temperature_c: None,
-        },
-    )
-}
-
-fn inverter_params() -> InverterParams {
-    InverterParams {
-        pwm_frequency_hz: Hertz::new(20_000.0),
-        min_duty: Duty::new(0.0),
-        max_duty: Duty::new(1.0),
-        min_bus_voltage: Volts::new(6.0),
-        max_bus_voltage: Volts::new(60.0),
-        max_voltage_command: Volts::new(24.0),
-    }
-}
-
-fn current_loop_config() -> CurrentLoopConfig {
-    CurrentLoopConfig {
-        kp_d: 0.2,
-        ki_d: 400.0,
-        kp_q: 0.2,
-        ki_q: 400.0,
-        velocity_kp: 0.2,
-        velocity_ki: 8.0,
-        position_kp: 12.0,
-        position_ki: 0.0,
-        max_voltage_mag: Volts::new(12.0),
-        id_ref_default: Amps::ZERO,
-        max_id_target: Amps::new(5.0),
-        max_iq_target: Amps::new(8.0),
-        max_velocity_target: RadPerSec::new(120.0),
-        max_current_ref_derivative_amps_per_sec: 10_000.0,
-        enable_current_feedforward: true,
-    }
-}
-
-#[derive(Debug)]
-struct SimHarness {
-    plant: PmsmModel,
-    bus_voltage: Volts,
-    load_torque: NewtonMeters,
-    last_duty: Abc<Duty>,
-    rotor_bias: f32,
-}
-
-type SharedHarness = Rc<RefCell<SimHarness>>;
-type SharedThreadHarness = Arc<Mutex<SimHarness>>;
-
-fn phase_currents(shared: &SharedHarness) -> Abc<Amps> {
-    let harness = shared.borrow();
-    let state = *harness.plant.state();
-    let electrical_angle = fluxkit::angle::mechanical_to_electrical_with_direction(
-        state.mechanical_angle.wrapped().into(),
-        harness.plant.params().pole_pairs as u32,
-        harness.plant.params().electrical_direction,
-    );
-    inverse_clarke(inverse_park(
-        state.current_dq.map(|current| current.get()),
-        electrical_angle.get(),
-    ))
-    .map(Amps::new)
-}
-
-fn phase_currents_thread(shared: &SharedThreadHarness) -> Abc<Amps> {
-    let harness = shared.lock().unwrap();
-    let state = *harness.plant.state();
-    let electrical_angle = fluxkit::angle::mechanical_to_electrical_with_direction(
-        state.mechanical_angle.wrapped().into(),
-        harness.plant.params().pole_pairs as u32,
-        harness.plant.params().electrical_direction,
-    );
-    inverse_clarke(inverse_park(
-        state.current_dq.map(|current| current.get()),
-        electrical_angle.get(),
-    ))
-    .map(Amps::new)
-}
-
-#[derive(Clone, Debug)]
-struct SimPwm {
-    shared: SharedHarness,
-}
-
-impl PhasePwm for SimPwm {
-    type Error = core::convert::Infallible;
-
-    fn enable(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-    fn disable(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn set_duty(&mut self, a: Duty, b: Duty, c: Duty) -> Result<(), Self::Error> {
-        let duty = Abc::new(a, b, c);
-        let mut harness = self.shared.borrow_mut();
-        harness.last_duty = duty;
-        let bus_voltage = harness.bus_voltage;
-        let load_torque = harness.load_torque;
-        harness
-            .plant
-            .step_phase_duty(duty, bus_voltage, load_torque, FAST_DT_SECONDS)
-            .unwrap();
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SimCurrent {
-    shared: SharedHarness,
-}
-
-impl CurrentSampler for SimCurrent {
-    type Error = core::convert::Infallible;
-
-    fn sample_phase_currents(&mut self) -> Result<PhaseCurrentSample, Self::Error> {
-        Ok(PhaseCurrentSample {
-            currents: phase_currents(&self.shared),
-            validity: CurrentSampleValidity::Valid,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SimBus {
-    shared: SharedHarness,
-}
-
-impl BusVoltageSensor for SimBus {
-    type Error = core::convert::Infallible;
-
-    fn sample_bus_voltage(&mut self) -> Result<Volts, Self::Error> {
-        Ok(self.shared.borrow().bus_voltage)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SimRotor {
-    shared: SharedHarness,
-}
-
-impl RotorSensor for SimRotor {
-    type Error = core::convert::Infallible;
-
-    fn read_rotor(&mut self) -> Result<RotorReading, Self::Error> {
-        let harness = self.shared.borrow();
-        let state = *harness.plant.state();
-        Ok(RotorReading {
-            mechanical_angle: MechanicalAngle::new(
-                state.mechanical_angle.get() + harness.rotor_bias,
-            ),
-            mechanical_velocity: state.mechanical_velocity,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SimTemp {
-    shared: SharedHarness,
-}
-
-impl TemperatureSensor for SimTemp {
-    type Error = core::convert::Infallible;
-
-    fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
-        Ok(self.shared.borrow().plant.winding_temperature_c())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ThreadedSimPwm {
-    shared: SharedThreadHarness,
-}
-
-impl PhasePwm for ThreadedSimPwm {
-    type Error = core::convert::Infallible;
-
-    fn enable(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn disable(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn set_duty(&mut self, a: Duty, b: Duty, c: Duty) -> Result<(), Self::Error> {
-        let duty = Abc::new(a, b, c);
-        let mut harness = self.shared.lock().unwrap();
-        harness.last_duty = duty;
-        let bus_voltage = harness.bus_voltage;
-        let load_torque = harness.load_torque;
-        harness
-            .plant
-            .step_phase_duty(duty, bus_voltage, load_torque, FAST_DT_SECONDS)
-            .unwrap();
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ThreadedSimCurrent {
-    shared: SharedThreadHarness,
-}
-
-impl CurrentSampler for ThreadedSimCurrent {
-    type Error = core::convert::Infallible;
-
-    fn sample_phase_currents(&mut self) -> Result<PhaseCurrentSample, Self::Error> {
-        Ok(PhaseCurrentSample {
-            currents: phase_currents_thread(&self.shared),
-            validity: CurrentSampleValidity::Valid,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ThreadedSimBus {
-    shared: SharedThreadHarness,
-}
-
-impl BusVoltageSensor for ThreadedSimBus {
-    type Error = core::convert::Infallible;
-
-    fn sample_bus_voltage(&mut self) -> Result<Volts, Self::Error> {
-        Ok(self.shared.lock().unwrap().bus_voltage)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ThreadedSimRotor {
-    shared: SharedThreadHarness,
-}
-
-impl RotorSensor for ThreadedSimRotor {
-    type Error = core::convert::Infallible;
-
-    fn read_rotor(&mut self) -> Result<RotorReading, Self::Error> {
-        let harness = self.shared.lock().unwrap();
-        let state = *harness.plant.state();
-        Ok(RotorReading {
-            mechanical_angle: ContinuousMechanicalAngle::new(fluxkit::angle::wrap(
-                state.mechanical_angle.get() + harness.rotor_bias,
-            ))
-            .wrapped(),
-            mechanical_velocity: state.mechanical_velocity,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ThreadedSimTemp {
-    shared: SharedThreadHarness,
-}
-
-impl TemperatureSensor for ThreadedSimTemp {
-    type Error = core::convert::Infallible;
-
-    fn sample_temperature_c(&mut self) -> Result<f32, Self::Error> {
-        Ok(self.shared.lock().unwrap().plant.winding_temperature_c())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SimOutput {
-    shared: SharedHarness,
-}
-
-impl OutputSensor for SimOutput {
-    type Error = core::convert::Infallible;
-
-    fn read_output(&mut self) -> Result<OutputReading, Self::Error> {
-        let harness = self.shared.borrow();
-        let state = *harness.plant.state();
-        Ok(OutputReading {
-            mechanical_angle: ContinuousMechanicalAngle::new(
-                state.mechanical_angle.get() / GEAR_RATIO,
-            )
-            .wrapped(),
-            mechanical_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SimOutputInverted {
-    shared: SharedHarness,
-}
-
-impl OutputSensor for SimOutputInverted {
-    type Error = core::convert::Infallible;
-
-    fn read_output(&mut self) -> Result<OutputReading, Self::Error> {
-        let harness = self.shared.borrow();
-        let state = *harness.plant.state();
-        Ok(OutputReading {
-            mechanical_angle: ContinuousMechanicalAngle::new(
-                -(state.mechanical_angle.get() / GEAR_RATIO),
-            )
-            .wrapped(),
-            mechanical_velocity: RadPerSec::new(-(state.mechanical_velocity.get() / GEAR_RATIO)),
-        })
-    }
-}
-
-fn calibration_hardware(shared: &SharedHarness) -> (SimPwm, SimCurrent, SimBus, SimRotor, SimTemp) {
-    (
-        SimPwm {
-            shared: Rc::clone(shared),
-        },
-        SimCurrent {
-            shared: Rc::clone(shared),
-        },
-        SimBus {
-            shared: Rc::clone(shared),
-        },
-        SimRotor {
-            shared: Rc::clone(shared),
-        },
-        SimTemp {
-            shared: Rc::clone(shared),
-        },
-    )
-}
-
-fn threaded_calibration_hardware(
-    shared: &SharedThreadHarness,
-) -> (
-    ThreadedSimPwm,
-    ThreadedSimCurrent,
-    ThreadedSimBus,
-    ThreadedSimRotor,
-    ThreadedSimTemp,
-) {
-    (
-        ThreadedSimPwm {
-            shared: Arc::clone(shared),
-        },
-        ThreadedSimCurrent {
-            shared: Arc::clone(shared),
-        },
-        ThreadedSimBus {
-            shared: Arc::clone(shared),
-        },
-        ThreadedSimRotor {
-            shared: Arc::clone(shared),
-        },
-        ThreadedSimTemp {
-            shared: Arc::clone(shared),
-        },
-    )
-}
-
-fn runtime_handles(
-    shared: &SharedHarness,
-) -> (SimPwm, SimCurrent, SimBus, SimRotor, SimOutput, SimTemp) {
-    (
-        SimPwm {
-            shared: Rc::clone(shared),
-        },
-        SimCurrent {
-            shared: Rc::clone(shared),
-        },
-        SimBus {
-            shared: Rc::clone(shared),
-        },
-        SimRotor {
-            shared: Rc::clone(shared),
-        },
-        SimOutput {
-            shared: Rc::clone(shared),
-        },
-        SimTemp {
-            shared: Rc::clone(shared),
-        },
-    )
 }
 
 #[test]
@@ -1048,9 +658,7 @@ fn actuator_calibration_runtime_faults_on_opposite_output_sensor_direction() {
     }));
 
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let output = SimOutputInverted {
-        shared: Rc::clone(&shared),
-    };
+    let output = local_output_inverted(&shared);
     let system = ActuatorCalibrationRuntime::new(
         pwm,
         current,
@@ -1110,9 +718,7 @@ fn extracted_actuator_calibration_marks_handles_and_tickers_inactive() {
         rotor_bias: 0.0,
     }));
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
-    let output = SimOutput {
-        shared: Rc::clone(&shared),
-    };
+    let output = local_output(&shared);
 
     let system = ActuatorCalibrationRuntime::new(
         pwm,
