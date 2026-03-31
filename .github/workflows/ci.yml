@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v17
+
+      - name: Enable Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Check Formatting
+        run: XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo fmt --all --check
+
+      - name: Run Workspace Tests
+        run: XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test --workspace
