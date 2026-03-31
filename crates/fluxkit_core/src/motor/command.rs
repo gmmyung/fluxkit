@@ -1,9 +1,10 @@
 use super::support::{current_limit, output_torque_limit, output_velocity_limit};
 use super::*;
 
-impl<M> MotorController<M>
+impl<M, CurrentEst> MotorController<M, CurrentEst>
 where
     M: Modulator,
+    CurrentEst: CurrentEstimator,
 {
     /// Creates a new motor controller with an explicit modulation strategy.
     pub fn new(
@@ -12,6 +13,7 @@ where
         actuator: ActuatorParams,
         config: CurrentLoopConfig,
         modulator: M,
+        current_estimator: CurrentEst,
     ) -> Self {
         let static_voltage_limit = config
             .max_voltage_mag
@@ -34,6 +36,7 @@ where
             actuator,
             config,
             modulator,
+            current_estimator,
             state: MotorState::Disabled,
             mode: ControlMode::Disabled,
             id_target: Amps::new(id_target),
@@ -106,13 +109,14 @@ where
     }
 
     /// Consumes the controller back into its owned construction parts.
-    pub fn into_parts(self) -> MotorControllerParts<M> {
+    pub fn into_parts(self) -> MotorControllerParts<M, CurrentEst> {
         MotorControllerParts {
             motor: self.motor,
             inverter: self.inverter,
             actuator: self.actuator,
             config: self.config,
             modulator: self.modulator,
+            current_estimator: self.current_estimator,
         }
     }
 
@@ -291,6 +295,7 @@ where
         self.q_pi.reset();
         self.velocity_pi.reset();
         self.position_pi.reset();
+        self.current_estimator.reset();
         self.last_current_ref = None;
         self.output_torque_target = NewtonMeters::ZERO;
         self.mit_kp = 0.0;

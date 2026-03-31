@@ -1,6 +1,6 @@
 use super::*;
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
     InnerActuatorCalibrationRuntime<
         PWM,
         CURRENT,
@@ -9,6 +9,7 @@ impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
         OUTPUT,
         TEMP,
         MOD,
+        CurrentEst,
         RotorEst,
         OutputEst,
     >
@@ -20,6 +21,7 @@ where
     OUTPUT: OutputSensor,
     TEMP: TemperatureSensor,
     MOD: Modulator,
+    CurrentEst: CurrentEstimator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
@@ -537,7 +539,18 @@ where
         R: Into<PartialActuatorCalibration>,
         Build: FnOnce(&mut Cal, MotorStatus, f32) -> Command,
         Apply: FnOnce(
-            &mut MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+            &mut MotorRuntime<
+                PWM,
+                CURRENT,
+                BUS,
+                ROTOR,
+                OUTPUT,
+                TEMP,
+                MOD,
+                CurrentEst,
+                RotorEst,
+                OutputEst,
+            >,
             Command,
         ),
     {
@@ -627,8 +640,20 @@ where
     }
 }
 
-impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    ActuatorCalibrationTicker<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+    ActuatorCalibrationTicker<
+        'a,
+        PWM,
+        CURRENT,
+        BUS,
+        ROTOR,
+        OUTPUT,
+        TEMP,
+        MOD,
+        CurrentEst,
+        RotorEst,
+        OutputEst,
+    >
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -637,6 +662,7 @@ where
     OUTPUT: OutputSensor,
     TEMP: TemperatureSensor,
     MOD: Modulator,
+    CurrentEst: CurrentEstimator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {

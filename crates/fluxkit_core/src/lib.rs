@@ -66,6 +66,10 @@ pub use calibration::{
     PolePairsAndOffsetCalibrationResult, PolePairsAndOffsetCalibrator,
 };
 pub use config::{CurrentLoopConfig, CurrentLoopConfigBuilder};
+pub use control::current::{
+    CurrentEstimator, CurrentReference, LpfCurrentEstimator, LpfCurrentEstimatorConfig,
+    PassThroughCurrentEstimator,
+};
 pub use error::Error;
 pub use io::{FastLoopInput, FastLoopOutput, RotorEstimate};
 pub use mode::ControlMode;

@@ -5,6 +5,7 @@ use crate::{
         FrictionCompensation,
     },
     config::CurrentLoopConfig,
+    control::current::CurrentEstimator,
     error::Error,
     io::{FastLoopInput, RotorEstimate},
     mode::ControlMode,
@@ -95,6 +96,23 @@ fn test_input() -> FastLoopInput {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FixedCurrentEstimator {
+    estimated_idq: Dq<Amps>,
+}
+
+impl CurrentEstimator for FixedCurrentEstimator {
+    fn reset(&mut self) {}
+
+    fn output(&self) -> Dq<Amps> {
+        self.estimated_idq
+    }
+
+    fn update(&mut self, _measured_idq: Dq<Amps>, _dt_seconds: f32) -> Dq<Amps> {
+        self.estimated_idq
+    }
+}
+
 #[test]
 fn zero_input_zero_target_returns_neutral_output() {
     let mut controller = MotorController::new(
@@ -103,6 +121,7 @@ fn zero_input_zero_target_returns_neutral_output() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.enable();
@@ -127,6 +146,7 @@ fn invalid_bus_voltage_latches_fault_and_centers_output() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.enable();
@@ -151,6 +171,7 @@ fn invalid_angle_latches_fault() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.enable();
@@ -174,6 +195,7 @@ fn over_temperature_latches_fault_and_centers_output() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.motor.limits.max_winding_temperature_c = Some(80.0);
     controller.set_mode(ControlMode::Current);
@@ -201,6 +223,7 @@ fn positive_iq_target_produces_positive_vq() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.set_iq_target(Amps::new(3.0));
@@ -210,6 +233,35 @@ fn positive_iq_target_produces_positive_vq() {
 
     assert!(output.commanded_vdq.q.get() > 0.0);
     assert_eq!(controller.status().active_error, None);
+}
+
+#[test]
+fn current_estimator_output_drives_current_loop_error() {
+    let mut config = test_config();
+    config.kp_d = 0.0;
+    config.ki_d = 0.0;
+    config.kp_q = 2.0;
+    config.ki_q = 0.0;
+    config.enable_current_feedforward = false;
+
+    let mut controller = MotorController::new(
+        test_motor(),
+        test_inverter(),
+        test_actuator(),
+        config,
+        Svpwm,
+        FixedCurrentEstimator {
+            estimated_idq: Dq::new(Amps::ZERO, Amps::new(2.5)),
+        },
+    );
+    controller.set_mode(ControlMode::Current);
+    controller.set_iq_target(Amps::new(3.0));
+    controller.enable();
+
+    let output = controller.fast_tick(test_input());
+
+    assert_eq!(output.measured_idq, Dq::new(Amps::ZERO, Amps::ZERO));
+    assert!((output.commanded_vdq.q.get() - 1.0).abs() < 1.0e-6);
 }
 
 #[test]
@@ -224,6 +276,7 @@ fn saturation_is_reported_for_aggressive_current_request() {
         test_actuator(),
         config,
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.set_id_target(Amps::new(10.0));
@@ -250,6 +303,7 @@ fn duty_stays_within_configured_duty_window() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.set_iq_target(Amps::new(10.0));
@@ -274,6 +328,7 @@ fn state_transitions_are_explicit() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
 
     assert_eq!(controller.status().state, MotorState::Disabled);
@@ -305,6 +360,7 @@ fn controller_can_use_alternate_modulator() {
         test_actuator(),
         test_config(),
         SinePwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.set_iq_target(Amps::new(3.0));
@@ -330,6 +386,7 @@ fn torque_mode_updates_iq_target_in_supervisory_update() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Torque);
     controller.set_torque_target(NewtonMeters::new(1.5));
@@ -363,6 +420,7 @@ fn torque_mode_adds_bounded_friction_compensation() {
         actuator,
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Torque);
     controller.set_torque_target(NewtonMeters::new(0.2));
@@ -419,6 +477,7 @@ fn breakaway_compensation_only_fills_missing_margin() {
         actuator,
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Torque);
     controller.set_torque_target(NewtonMeters::new(0.25));
@@ -462,6 +521,7 @@ fn torque_mode_friction_compensation_tracks_measured_velocity_for_viscous_drag()
         actuator,
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Torque);
     controller.set_torque_target(NewtonMeters::new(0.2));
@@ -496,6 +556,7 @@ fn velocity_mode_generates_positive_q_current_target() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Velocity);
     controller.set_velocity_target(RadPerSec::new(20.0));
@@ -515,6 +576,7 @@ fn mit_mode_generates_positive_q_current_target() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Mit);
     controller.set_mit_command(
@@ -541,6 +603,7 @@ fn position_mode_runs_position_and_velocity_loops_in_supervisory_update() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Position);
     controller.set_position_target(ContinuousMechanicalAngle::new(1.0));
@@ -561,6 +624,7 @@ fn wrapped_encoder_angle_is_unwrapped_for_multi_turn_positioning() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Position);
     controller.enable();
@@ -590,6 +654,7 @@ fn open_loop_voltage_mode_bypasses_current_pi() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::OpenLoopVoltage);
     controller.set_open_loop_voltage_target(Dq::new(Volts::new(0.0), Volts::new(3.0)));
@@ -613,6 +678,7 @@ fn current_feedforward_adds_back_emf_compensation() {
         test_actuator(),
         test_config(),
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.enable();
@@ -638,6 +704,7 @@ fn current_feedforward_adds_reference_derivative_term_on_step() {
         test_actuator(),
         config,
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.enable();
@@ -662,8 +729,14 @@ fn current_reference_derivative_feedforward_is_clamped() {
     config.max_current_ref_derivative_amps_per_sec = 1_000.0;
 
     let motor = test_motor();
-    let mut controller =
-        MotorController::new(motor, test_inverter(), test_actuator(), config, Svpwm);
+    let mut controller = MotorController::new(
+        motor,
+        test_inverter(),
+        test_actuator(),
+        config,
+        Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
+    );
     controller.set_mode(ControlMode::Current);
     controller.enable();
     controller.fast_tick(test_input());
@@ -687,6 +760,7 @@ fn modulation_limit_tracks_selected_modulator() {
         test_actuator(),
         config,
         SinePwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     sine_controller.set_mode(ControlMode::OpenLoopVoltage);
     sine_controller.set_open_loop_voltage_target(Dq::new(Volts::ZERO, Volts::new(13.0)));
@@ -698,6 +772,7 @@ fn modulation_limit_tracks_selected_modulator() {
         test_actuator(),
         config,
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     svpwm_controller.set_mode(ControlMode::OpenLoopVoltage);
     svpwm_controller.set_open_loop_voltage_target(Dq::new(Volts::ZERO, Volts::new(13.0)));
@@ -721,6 +796,7 @@ fn feedforward_can_be_disabled() {
         test_actuator(),
         config,
         Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
     );
     controller.set_mode(ControlMode::Current);
     controller.enable();

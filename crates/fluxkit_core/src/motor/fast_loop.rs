@@ -1,9 +1,10 @@
 use super::support::{dq_is_finite, duty_is_finite};
 use super::*;
 
-impl<M> MotorController<M>
+impl<M, CurrentEst> MotorController<M, CurrentEst>
 where
     M: Modulator,
+    CurrentEst: CurrentEstimator,
 {
     pub(super) fn fast_tick(&mut self, input: FastLoopInput) -> FastLoopOutput {
         self.status.last_bus_voltage = input.bus_voltage;
@@ -55,6 +56,16 @@ where
             return self.neutral_output(Error::NonFiniteComputation);
         }
 
+        let estimated_idq = self
+            .current_estimator
+            .update(measured_idq, input.dt_seconds);
+        let estimated_idq_f32 = estimated_idq.map(|current| current.get());
+        if !dq_is_finite(estimated_idq_f32.d, estimated_idq_f32.q) {
+            self.latch_error(Error::NonFiniteComputation);
+            self.refresh_status();
+            return self.neutral_output(Error::NonFiniteComputation);
+        }
+
         if self.state == MotorState::Disabled || self.mode == ControlMode::Disabled {
             self.refresh_status();
             return FastLoopOutput {
@@ -73,7 +84,7 @@ where
             | ControlMode::Mit
             | ControlMode::Velocity
             | ControlMode::Position => self.run_current_control(
-                measured_idq_f32,
+                estimated_idq_f32,
                 measured_idq,
                 electrical_angle.get(),
                 input.bus_voltage,

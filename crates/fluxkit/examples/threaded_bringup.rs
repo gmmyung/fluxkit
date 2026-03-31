@@ -7,8 +7,9 @@ use fluxkit::{
     ActuatorLimits, ActuatorParams, BusVoltageSensor, ContinuousMechanicalAngle, CurrentLoopConfig,
     CurrentSampleValidity, CurrentSampler, Dq, InverterParams, MotorCalibrationLimits,
     MotorCalibrationRequest, MotorCalibrationResult, MotorCalibrationRuntime, MotorCommand,
-    MotorLimits, MotorRuntime, OutputReading, OutputSensor, PassThroughEstimator,
-    PhaseCurrentSample, PhasePwm, RadPerSec, RotorReading, RotorSensor, Svpwm, TemperatureSensor,
+    MotorLimits, MotorRuntime, OutputReading, OutputSensor, PassThroughCurrentEstimator,
+    PassThroughEstimator, PhaseCurrentSample, PhasePwm, RadPerSec, RotorReading, RotorSensor,
+    Svpwm, TemperatureSensor,
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, Volts, Webers},
 };
 use fluxkit_hal::centered_phase_duty;
@@ -284,6 +285,7 @@ type ExampleActuatorCalibrationRuntime<'a> = ActuatorCalibrationRuntime<
     SimOutput<'a>,
     SimTemp<'a>,
     Svpwm,
+    PassThroughCurrentEstimator,
     PassThroughEstimator,
     PassThroughEstimator,
 >;
@@ -295,6 +297,7 @@ type ExampleMotorRuntime<'a> = MotorRuntime<
     SimOutput<'a>,
     SimTemp<'a>,
     Svpwm,
+    PassThroughCurrentEstimator,
     PassThroughEstimator,
     PassThroughEstimator,
 >;
@@ -318,6 +321,7 @@ type ExampleActuatorCalibrationTicker<'a> = fluxkit::ActuatorCalibrationTicker<
     SimOutput<'a>,
     SimTemp<'a>,
     Svpwm,
+    PassThroughCurrentEstimator,
     PassThroughEstimator,
     PassThroughEstimator,
 >;
@@ -331,6 +335,7 @@ type ExampleMotorTicker<'a> = fluxkit::MotorTicker<
     SimOutput<'a>,
     SimTemp<'a>,
     Svpwm,
+    PassThroughCurrentEstimator,
     PassThroughEstimator,
     PassThroughEstimator,
 >;
@@ -605,6 +610,7 @@ fn main_context_loop(plot_path: &str) {
                         ),
                         current_loop: current_loop_config(result),
                         modulator: parts.modulator,
+                        current_estimator: PassThroughCurrentEstimator::new(),
                         rotor_estimator: parts.rotor_estimator,
                         output_estimator: PassThroughEstimator::new(),
                     },

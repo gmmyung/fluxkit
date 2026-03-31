@@ -63,6 +63,7 @@ fn motor_runtime_closes_current_loop_against_simulator() {
             FAST_DT_SECONDS,
         ),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
     )
@@ -118,6 +119,7 @@ fn motor_runtime_supports_scoped_irq_thread_usage() {
             FAST_DT_SECONDS,
         ),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
     )
@@ -190,6 +192,7 @@ fn motor_runtime_supports_mit_command() {
             FAST_DT_SECONDS,
         ),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
     )
@@ -243,6 +246,7 @@ fn motor_runtime_velocity_mode_tracks_positive_output_speed_with_negative_direct
             FAST_DT_SECONDS,
         ),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
     )

@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         actuator_params_disabled(),
         config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut compensated = MotorController::new(
         motor_params(),
@@ -55,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         actuator_params_compensated(),
         config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut uncompensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();
     let mut compensated_plant = PmsmModel::new_zeroed(plant_params()).unwrap();

@@ -1,7 +1,7 @@
 use super::*;
 
-impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    RuntimeLoop<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+    RuntimeLoop<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -10,6 +10,7 @@ where
     OUTPUT: OutputSensor,
     TEMP: TemperatureSensor,
     MOD: Modulator,
+    CurrentEst: CurrentEstimator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
@@ -126,6 +127,7 @@ where
                 shared.status.last_fast_output = Some(output);
             }
             let controller_status = self.runtime.controller.status();
+            shared.status.output_velocity = controller_status.last_output_mechanical_velocity;
             shared.status.controller = controller_status;
             shared.status.fault_latched |= controller_status.active_error.is_some();
         });
@@ -204,7 +206,7 @@ where
     > {
         let armed = self.sync_runtime_requests()?;
         if !armed {
-            let output = MotorRuntimeOutput::from(FastLoopOutput {
+            let output = MotorRuntimeOutput::from_fast_loop(FastLoopOutput {
                 phase_duty: fluxkit_hal::centered_phase_duty(),
                 measured_idq: fluxkit_math::frame::Dq::new(Amps::ZERO, Amps::ZERO),
                 commanded_vdq: fluxkit_math::frame::Dq::new(Volts::ZERO, Volts::ZERO),
@@ -290,7 +292,7 @@ where
             .set_phase_duty(output.phase_duty)
             .map_err(MotorRuntimeError::Pwm)?;
 
-        let output = MotorRuntimeOutput::from(output);
+        let output = MotorRuntimeOutput::from_fast_loop(output);
         self.publish_runtime_status(Some(output));
         Ok(output)
     }

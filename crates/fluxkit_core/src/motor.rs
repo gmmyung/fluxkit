@@ -14,7 +14,7 @@ use crate::{
     actuator::{ActuatorCompensationTelemetry, ActuatorParams},
     calibration::ActuatorCalibration,
     config::CurrentLoopConfig,
-    control::current::CurrentReference,
+    control::current::{CurrentEstimator, CurrentReference, PassThroughCurrentEstimator},
     error::Error,
     io::{FastLoopInput, FastLoopOutput, RotorEstimate},
     mode::ControlMode,
@@ -98,12 +98,13 @@ mod tests;
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct MotorController<M = Svpwm> {
+pub struct MotorController<M = Svpwm, CurrentEst = PassThroughCurrentEstimator> {
     motor: MotorParams,
     inverter: InverterParams,
     actuator: ActuatorParams,
     config: CurrentLoopConfig,
     modulator: M,
+    current_estimator: CurrentEst,
     state: MotorState,
     mode: ControlMode,
     id_target: Amps,
@@ -162,7 +163,7 @@ pub enum ControllerCommand {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct MotorControllerParts<M = Svpwm> {
+pub struct MotorControllerParts<M = Svpwm, CurrentEst = PassThroughCurrentEstimator> {
     /// Motor electrical model and limits.
     pub motor: MotorParams,
     /// Inverter configuration.
@@ -173,4 +174,6 @@ pub struct MotorControllerParts<M = Svpwm> {
     pub config: CurrentLoopConfig,
     /// Configured modulation strategy.
     pub modulator: M,
+    /// Current estimator state used by the current loop.
+    pub current_estimator: CurrentEst,
 }

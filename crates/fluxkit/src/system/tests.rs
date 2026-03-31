@@ -276,6 +276,7 @@ fn fast_tick_reads_hal_and_applies_phase_duty() {
             0.000_05,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
     )
@@ -318,6 +319,7 @@ fn invalid_current_sample_returns_error_and_forces_neutral_pwm() {
             0.000_05,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
     )
@@ -351,6 +353,7 @@ fn supervisory_work_runs_inside_fast_cycle() {
             0.000_05,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
     )
@@ -402,6 +405,7 @@ fn explicit_estimators_drive_controller_side_motion_estimates() {
             0.000_05,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         FixedEstimator {
             output: AngularEstimate::new(
                 MechanicalAngle::new(0.3),
@@ -436,6 +440,7 @@ fn explicit_estimators_drive_controller_side_motion_estimates() {
         ContinuousMechanicalAngle::new(2.6)
     );
     assert_eq!(status.last_output_mechanical_velocity, RadPerSec::new(1.5));
+    assert_eq!(handle.status().output_velocity, RadPerSec::new(1.5));
 }
 
 #[test]
@@ -456,6 +461,7 @@ fn runtime_handle_updates_command_and_receives_status() {
             0.000_05,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
     )
@@ -471,6 +477,7 @@ fn runtime_handle_updates_command_and_receives_status() {
 
     assert_eq!(status.controller.mode, ControlMode::Current);
     assert!(status.last_fast_output.is_some());
+    assert_eq!(status.output_velocity, RadPerSec::ZERO);
     assert_eq!(
         handle.command(),
         super::MotorCommand::Current(Dq::new(Amps::ZERO, Amps::new(2.0)))
@@ -499,6 +506,7 @@ fn over_temperature_latches_runtime_fault_and_centers_output() {
             0.000_05,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
     )
@@ -541,6 +549,7 @@ fn extracted_runtime_marks_handles_and_tickers_inactive() {
             0.000_05,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
     )
@@ -575,6 +584,7 @@ fn runtime_builder_rejects_non_positive_dt_seconds() {
             0.0,
         ),
         fluxkit_math::Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
         fluxkit_math::PassThroughEstimator::new(),
     )

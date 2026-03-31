@@ -61,8 +61,14 @@ fn main() {
         fluxkit_core::ActuatorCompensationConfig::disabled(),
     );
 
-    let mut controller =
-        MotorController::new(motor, inverter, actuator, config, fluxkit_math::Svpwm);
+    let mut controller = MotorController::new(
+        motor,
+        inverter,
+        actuator,
+        config,
+        fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
+    );
     controller.apply_command(fluxkit_core::motor::ControllerCommand::Current(Dq::new(
         Amps::ZERO,
         Amps::ZERO,

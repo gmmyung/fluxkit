@@ -417,6 +417,7 @@ fn calibration_runtimes_report_current_or_next_phase() {
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -509,6 +510,7 @@ fn calibration_handles_publish_completion() {
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
         ActuatorCalibrationRequest::all(),
@@ -615,6 +617,7 @@ fn actuator_calibration_runtime_recovers_gear_ratio_through_public_wrapper() {
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -670,6 +673,7 @@ fn actuator_calibration_runtime_faults_on_opposite_output_sensor_direction() {
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -731,6 +735,7 @@ fn extracted_actuator_calibration_marks_handles_and_tickers_inactive() {
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
         ActuatorCalibrationRequest::all(),
@@ -778,6 +783,7 @@ fn actuator_calibration_runtime_recovers_breakaway_through_public_wrapper() {
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -832,6 +838,7 @@ fn actuator_calibration_runtime_recovers_zero_velocity_blend_band_through_public
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -1020,6 +1027,7 @@ fn actuator_calibration_runtime_applies_provided_and_measured_values_through_liv
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         fluxkit::PassThroughEstimator::new(),
         ActuatorCalibrationRequest {
@@ -1222,6 +1230,7 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
         inverter_params(),
         current_loop_config(),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
         ActuatorCalibrationRequest::all(),
@@ -1277,6 +1286,7 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
             FAST_DT_SECONDS,
         ),
         Svpwm,
+        fluxkit::PassThroughCurrentEstimator::new(),
         PassThroughEstimator::new(),
         PassThroughEstimator::new(),
     )

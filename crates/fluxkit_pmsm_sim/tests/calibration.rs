@@ -463,6 +463,7 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
         actuator_params_calibrating(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut plant = PmsmModel::new_zeroed(plant_params_with_asymmetric_friction()).unwrap();
     let mut calibrator = ActuatorFrictionCalibrator::new(
@@ -533,6 +534,7 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
         actuator_params_unknown_ratio(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut plant = PmsmModel::new_zeroed(plant_params_with_asymmetric_friction()).unwrap();
     let mut calibrator = ActuatorGearRatioCalibrator::new(
@@ -586,6 +588,7 @@ fn torque_ramp_recovers_actuator_breakaway() {
         actuator_params_calibrating(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut plant = PmsmModel::new_zeroed(plant_params_with_breakaway()).unwrap();
     let mut calibrator = ActuatorBreakawayCalibrator::new(ActuatorBreakawayCalibrationConfig {
@@ -654,6 +657,7 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
         actuator_params_calibrating(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut calibrator = ActuatorBlendBandCalibrator::new(
         ActuatorBlendBandCalibrationConfig::default_for_release_ramp(),

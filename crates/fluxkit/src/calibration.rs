@@ -47,7 +47,7 @@
 //! use fluxkit::{
 //!     ActuatorCalibrationLimits, ActuatorCalibrationRequest, ActuatorCalibrationRuntime,
 //!     MotorCalibrationLimits, MotorCalibrationRequest, MotorCalibrationRuntime, MotorLimits,
-//!     MotorRuntime, MotorRuntimeParams, PassThroughEstimator, Svpwm,
+//!     MotorRuntime, MotorRuntimeParams, PassThroughCurrentEstimator, PassThroughEstimator, Svpwm,
 //!     units::{Amps, NewtonMeters, RadPerSec, Volts},
 //! };
 //!
@@ -115,6 +115,7 @@
 //!     inverter_params(),
 //!     current_loop_config(),
 //!     Svpwm,
+//!     PassThroughCurrentEstimator::new(),
 //!     PassThroughEstimator::new(),
 //!     PassThroughEstimator::new(),
 //!     ActuatorCalibrationRequest::all(),
@@ -158,6 +159,7 @@
 //!         DT,
 //!     ),
 //!     Svpwm,
+//!     PassThroughCurrentEstimator::new(),
 //!     PassThroughEstimator::new(),
 //!     PassThroughEstimator::new(),
 //! )?;

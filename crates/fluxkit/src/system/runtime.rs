@@ -1,9 +1,10 @@
 use super::*;
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+    MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
 where
     MOD: Modulator,
+    CurrentEst: CurrentEstimator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
@@ -18,6 +19,7 @@ where
         temp: TEMP,
         params: MotorRuntimeParams,
         modulator: MOD,
+        current_estimator: CurrentEst,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
     ) -> Result<Self, MotorRuntimeBuildError> {
@@ -34,6 +36,7 @@ where
                 actuator: params.actuator,
                 current_loop: params.current_loop,
                 modulator,
+                current_estimator,
                 rotor_estimator,
                 output_estimator,
             },
@@ -43,7 +46,18 @@ where
 
     /// Creates a runtime from previously owned runtime parts and a loop period.
     pub fn from_parts(
-        parts: MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+        parts: MotorRuntimeParts<
+            PWM,
+            CURRENT,
+            BUS,
+            ROTOR,
+            OUTPUT,
+            TEMP,
+            MOD,
+            CurrentEst,
+            RotorEst,
+            OutputEst,
+        >,
         dt_seconds: f32,
     ) -> Result<Self, MotorRuntimeBuildError> {
         if !validate_dt_seconds(dt_seconds) {
@@ -56,6 +70,7 @@ where
             parts.actuator,
             parts.current_loop,
             parts.modulator,
+            parts.current_estimator,
         );
         Self::from_controller_parts(
             Hardware {
@@ -75,7 +90,7 @@ where
 
     fn from_controller_parts(
         hardware: Hardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
-        controller: MotorController<MOD>,
+        controller: MotorController<MOD, CurrentEst>,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
         dt_seconds: f32,
@@ -87,6 +102,7 @@ where
                 status: MotorRuntimeStatus {
                     active: true,
                     controller: controller.status(),
+                    output_velocity: RadPerSec::ZERO,
                     last_fast_output: None,
                     armed: false,
                     fault_latched: false,
@@ -114,7 +130,19 @@ where
     ) -> Result<
         (
             MotorHandle<'_>,
-            MotorTicker<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+            MotorTicker<
+                '_,
+                PWM,
+                CURRENT,
+                BUS,
+                ROTOR,
+                OUTPUT,
+                TEMP,
+                MOD,
+                CurrentEst,
+                RotorEst,
+                OutputEst,
+            >,
         ),
         CapabilitySplitError,
     > {
@@ -133,7 +161,8 @@ where
     #[inline]
     pub(crate) fn ticker_internal(
         &self,
-    ) -> MotorTicker<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+    ) -> MotorTicker<'_, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+    {
         MotorTicker {
             inner: &self.inner,
             shared: &self.shared,
@@ -143,8 +172,20 @@ where
     /// Attempts to take ownership of the active runtime parts for reuse in another phase.
     pub fn try_into_parts(
         &self,
-    ) -> Option<MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>>
-    {
+    ) -> Option<
+        MotorRuntimeParts<
+            PWM,
+            CURRENT,
+            BUS,
+            ROTOR,
+            OUTPUT,
+            TEMP,
+            MOD,
+            CurrentEst,
+            RotorEst,
+            OutputEst,
+        >,
+    > {
         let InnerMotorRuntime {
             hardware,
             controller,
@@ -164,6 +205,7 @@ where
             actuator,
             config,
             modulator,
+            current_estimator,
         } = controller.into_parts();
         Some(MotorRuntimeParts {
             pwm: hardware.pwm,
@@ -177,14 +219,15 @@ where
             actuator,
             current_loop: config,
             modulator,
+            current_estimator,
             rotor_estimator,
             output_estimator,
         })
     }
 }
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+    MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -193,6 +236,7 @@ where
     OUTPUT: OutputSensor,
     TEMP: TemperatureSensor,
     MOD: Modulator,
+    CurrentEst: CurrentEstimator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
@@ -280,8 +324,8 @@ where
     }
 }
 
-impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    MotorTicker<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+    MotorTicker<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -290,6 +334,7 @@ where
     OUTPUT: OutputSensor,
     TEMP: TemperatureSensor,
     MOD: Modulator,
+    CurrentEst: CurrentEstimator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {

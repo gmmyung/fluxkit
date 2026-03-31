@@ -108,7 +108,8 @@
 //!
 //! ```ignore
 //! use fluxkit::{
-//!     MotorCommand, MotorRuntime, MotorRuntimeParams, PassThroughEstimator, Svpwm, units::RadPerSec,
+//!     MotorCommand, MotorRuntime, MotorRuntimeParams, PassThroughCurrentEstimator,
+//!     PassThroughEstimator, Svpwm, units::RadPerSec,
 //! };
 //!
 //! # let pwm = todo!();
@@ -136,6 +137,7 @@
 //!         1.0 / 20_000.0,
 //!     ),
 //!     Svpwm,
+//!     PassThroughCurrentEstimator::new(),
 //!     PassThroughEstimator::new(),
 //!     PassThroughEstimator::new(),
 //! )?;
@@ -172,9 +174,10 @@ pub use calibration::{
 pub use capability::CapabilitySplitError;
 pub use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorLimits,
-    ActuatorModel, ActuatorParams, CalibrationError, ControlMode, CurrentLoopConfig,
-    CurrentLoopConfigBuilder, Error, FrictionCompensation, InverterParams, MotorLimits, MotorModel,
-    MotorParams, MotorState, MotorStatus, RotorEstimate,
+    ActuatorModel, ActuatorParams, CalibrationError, ControlMode, CurrentEstimator,
+    CurrentLoopConfig, CurrentLoopConfigBuilder, Error, FrictionCompensation, InverterParams,
+    LpfCurrentEstimator, LpfCurrentEstimatorConfig, MotorLimits, MotorModel, MotorParams,
+    MotorState, MotorStatus, PassThroughCurrentEstimator, RotorEstimate,
 };
 pub use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,

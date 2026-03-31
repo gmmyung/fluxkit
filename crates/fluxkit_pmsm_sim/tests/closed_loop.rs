@@ -196,6 +196,7 @@ fn current_mode_drives_positive_q_current_into_the_plant() {
         actuator_params(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut plant = PmsmModel::new_zeroed(plant_params()).unwrap();
 
@@ -239,6 +240,7 @@ fn position_mode_tracks_output_axis_feedback() {
         actuator_params(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut plant = PmsmModel::new_zeroed(plant_params()).unwrap();
 
@@ -285,6 +287,7 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
         actuator_params(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut compensated = MotorController::new(
         motor_params(),
@@ -292,6 +295,7 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
         actuator_params_with_friction_compensation(),
         current_loop_config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut uncompensated_plant =
         PmsmModel::new_zeroed(plant_params_with_output_inertia()).unwrap();

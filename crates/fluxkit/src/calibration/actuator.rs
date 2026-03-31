@@ -8,7 +8,8 @@ use fluxkit_core::{
     ActuatorCalibration as PartialActuatorCalibration, ActuatorCalibrationRoutine,
     ActuatorCompensationConfig, ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrator,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrator, ActuatorLimits, ActuatorModel,
-    ActuatorParams, CalibrationError, CurrentLoopConfig, InverterParams, MotorParams, MotorStatus,
+    ActuatorParams, CalibrationError, CurrentEstimator, CurrentLoopConfig, InverterParams,
+    MotorParams, MotorStatus,
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampler, OutputSensor, PhasePwm, RotorSensor, TemperatureSensor,
@@ -283,10 +284,12 @@ struct InnerActuatorCalibrationRuntime<
     OUTPUT,
     TEMP,
     MOD,
+    CurrentEst,
     RotorEst,
     OutputEst,
 > {
-    motor_system: MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+    motor_system:
+        MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>,
     limits: ActuatorCalibrationLimits,
     dt_seconds: f32,
     gear_ratio: Option<f32>,
@@ -312,6 +315,7 @@ pub struct ActuatorCalibrationRuntime<
     OUTPUT,
     TEMP,
     MOD,
+    CurrentEst,
     RotorEst,
     OutputEst,
 > {
@@ -326,6 +330,7 @@ pub struct ActuatorCalibrationRuntime<
                     OUTPUT,
                     TEMP,
                     MOD,
+                    CurrentEst,
                     RotorEst,
                     OutputEst,
                 >,
@@ -347,6 +352,7 @@ pub struct ActuatorCalibrationTicker<
     OUTPUT,
     TEMP,
     MOD,
+    CurrentEst,
     RotorEst,
     OutputEst,
 > {
@@ -361,6 +367,7 @@ pub struct ActuatorCalibrationTicker<
                     OUTPUT,
                     TEMP,
                     MOD,
+                    CurrentEst,
                     RotorEst,
                     OutputEst,
                 >,

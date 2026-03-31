@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         actuator_params(),
         config(),
         fluxkit_math::Svpwm,
+        fluxkit_core::PassThroughCurrentEstimator::new(),
     );
     let mut plant = PmsmModel::new_zeroed(plant_params())?;
     let mut samples = Vec::with_capacity(40_000);

@@ -3,9 +3,10 @@ use super::support::{
 };
 use super::*;
 
-impl<M> MotorController<M>
+impl<M, CurrentEst> MotorController<M, CurrentEst>
 where
     M: Modulator,
+    CurrentEst: CurrentEstimator,
 {
     pub(super) fn update_supervisory_references(&mut self, dt_seconds: f32) {
         if self.active_error.is_some() || self.state == MotorState::Disabled {

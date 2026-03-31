@@ -48,6 +48,7 @@
 //!         1.0 / 20_000.0,
 //!     ),
 //!     fluxkit::Svpwm,
+//!     fluxkit::PassThroughCurrentEstimator::new(),
 //!     fluxkit::PassThroughEstimator::new(),
 //!     fluxkit::PassThroughEstimator::new(),
 //! )?;
@@ -69,8 +70,9 @@ use core::fmt;
 use critical_section::Mutex;
 use fluxkit_core::motor::{ControllerCommand, MotorControllerParts};
 use fluxkit_core::{
-    ActuatorCalibration, ActuatorEstimate, ActuatorParams, CurrentLoopConfig, FastLoopInput,
-    FastLoopOutput, InverterParams, MotorController, MotorParams, MotorStatus, RotorEstimate,
+    ActuatorCalibration, ActuatorEstimate, ActuatorParams, CurrentEstimator, CurrentLoopConfig,
+    FastLoopInput, FastLoopOutput, InverterParams, MotorController, MotorParams, MotorStatus,
+    RotorEstimate,
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputSensor, PhasePwm, RotorSensor,
@@ -276,8 +278,9 @@ pub struct MotorRuntimeOutput {
     pub saturated: bool,
 }
 
-impl From<FastLoopOutput> for MotorRuntimeOutput {
-    fn from(output: FastLoopOutput) -> Self {
+impl MotorRuntimeOutput {
+    #[inline]
+    fn from_fast_loop(output: FastLoopOutput) -> Self {
         Self {
             phase_duty: output.phase_duty,
             measured_idq: output.measured_idq,
@@ -296,6 +299,8 @@ pub struct MotorRuntimeStatus {
     pub active: bool,
     /// Latest controller status snapshot.
     pub controller: MotorStatus,
+    /// Latest output-axis mechanical velocity shared with non-IRQ code.
+    pub output_velocity: RadPerSec,
     /// Latest runtime output, if the runtime has run at least one cycle.
     pub last_fast_output: Option<MotorRuntimeOutput>,
     /// `true` when runtime arming is requested.
@@ -323,7 +328,18 @@ pub struct MotorRuntimeParams {
 
 /// Owned runtime parts that can be moved between project phases.
 #[derive(Debug)]
-pub struct MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+pub struct MotorRuntimeParts<
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    CurrentEst,
+    RotorEst,
+    OutputEst,
+> {
     /// PWM output handle.
     pub pwm: PWM,
     /// Phase-current sampler.
@@ -346,6 +362,8 @@ pub struct MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorE
     pub current_loop: CurrentLoopConfig,
     /// Modulation strategy.
     pub modulator: MOD,
+    /// Current-estimator state used by the controller.
+    pub current_estimator: CurrentEst,
     /// Rotor motion estimator state.
     pub rotor_estimator: RotorEst,
     /// Output motion estimator state.
@@ -464,9 +482,20 @@ impl<'a> MotorHandle<'a> {
 }
 
 #[derive(Debug)]
-struct InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+struct InnerMotorRuntime<
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    CurrentEst,
+    RotorEst,
+    OutputEst,
+> {
     hardware: Hardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
-    controller: MotorController<MOD>,
+    controller: MotorController<MOD, CurrentEst>,
     rotor_estimator: RotorEst,
     output_estimator: OutputEst,
     dt_seconds: f32,
@@ -474,19 +503,52 @@ struct InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, 
 }
 
 #[derive(Debug)]
-struct RuntimeLoop<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
-    runtime:
-        &'a mut InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+struct RuntimeLoop<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+{
+    runtime: &'a mut InnerMotorRuntime<
+        PWM,
+        CURRENT,
+        BUS,
+        ROTOR,
+        OUTPUT,
+        TEMP,
+        MOD,
+        CurrentEst,
+        RotorEst,
+        OutputEst,
+    >,
     shared: &'a Mutex<RefCell<SharedRuntimeState>>,
 }
 
 /// Main-context owner of one active motor runtime.
 #[derive(Debug)]
-pub struct MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+pub struct MotorRuntime<
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    CurrentEst,
+    RotorEst,
+    OutputEst,
+> {
     inner: Mutex<
         RefCell<
             Option<
-                InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+                InnerMotorRuntime<
+                    PWM,
+                    CURRENT,
+                    BUS,
+                    ROTOR,
+                    OUTPUT,
+                    TEMP,
+                    MOD,
+                    CurrentEst,
+                    RotorEst,
+                    OutputEst,
+                >,
             >,
         >,
     >,
@@ -496,11 +558,34 @@ pub struct MotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, O
 
 /// IRQ-side execution capability for one active motor runtime.
 #[derive(Debug)]
-pub struct MotorTicker<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst> {
+pub struct MotorTicker<
+    'a,
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    CurrentEst,
+    RotorEst,
+    OutputEst,
+> {
     inner: &'a Mutex<
         RefCell<
             Option<
-                InnerMotorRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+                InnerMotorRuntime<
+                    PWM,
+                    CURRENT,
+                    BUS,
+                    ROTOR,
+                    OUTPUT,
+                    TEMP,
+                    MOD,
+                    CurrentEst,
+                    RotorEst,
+                    OutputEst,
+                >,
             >,
         >,
     >,

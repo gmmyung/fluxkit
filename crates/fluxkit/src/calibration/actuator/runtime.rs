@@ -1,7 +1,18 @@
 use super::*;
 
-impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
-    ActuatorCalibrationRuntime<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>
+impl<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
+    ActuatorCalibrationRuntime<
+        PWM,
+        CURRENT,
+        BUS,
+        ROTOR,
+        OUTPUT,
+        TEMP,
+        MOD,
+        CurrentEst,
+        RotorEst,
+        OutputEst,
+    >
 where
     PWM: PhasePwm,
     CURRENT: CurrentSampler,
@@ -10,6 +21,7 @@ where
     OUTPUT: OutputSensor,
     TEMP: TemperatureSensor,
     MOD: Modulator,
+    CurrentEst: CurrentEstimator,
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
@@ -40,6 +52,7 @@ where
         inverter: InverterParams,
         config: CurrentLoopConfig,
         modulator: MOD,
+        current_estimator: CurrentEst,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
         request: ActuatorCalibrationRequest,
@@ -59,6 +72,7 @@ where
                 actuator: placeholder_actuator_params(limits),
                 current_loop: config,
                 modulator,
+                current_estimator,
                 rotor_estimator,
                 output_estimator,
             },
@@ -70,7 +84,18 @@ where
 
     /// Creates a new actuator-calibration runtime from owned runtime parts.
     pub fn from_parts(
-        parts: MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>,
+        parts: MotorRuntimeParts<
+            PWM,
+            CURRENT,
+            BUS,
+            ROTOR,
+            OUTPUT,
+            TEMP,
+            MOD,
+            CurrentEst,
+            RotorEst,
+            OutputEst,
+        >,
         request: ActuatorCalibrationRequest,
         limits: ActuatorCalibrationLimits,
         dt_seconds: f32,
@@ -134,6 +159,7 @@ where
                 OUTPUT,
                 TEMP,
                 MOD,
+                CurrentEst,
                 RotorEst,
                 OutputEst,
             >,
@@ -156,8 +182,20 @@ where
     #[inline]
     pub fn try_into_parts(
         &self,
-    ) -> Option<MotorRuntimeParts<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, RotorEst, OutputEst>>
-    {
+    ) -> Option<
+        MotorRuntimeParts<
+            PWM,
+            CURRENT,
+            BUS,
+            ROTOR,
+            OUTPUT,
+            TEMP,
+            MOD,
+            CurrentEst,
+            RotorEst,
+            OutputEst,
+        >,
+    > {
         let inner = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())?;
         write_status(&self.shared, |status| status.active = false);
         inner.motor_system.try_into_parts()
