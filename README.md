@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/gmmyung/fluxkit/actions/workflows/ci.yml/badge.svg)](https://github.com/gmmyung/fluxkit/actions/workflows/ci.yml)
 [![Coverage](assets/coverage.svg)](https://github.com/gmmyung/fluxkit/actions/workflows/coverage.yml)
+[![crates.io](https://img.shields.io/crates/v/fluxkit.svg)](https://crates.io/crates/fluxkit)
+[![docs.rs](https://docs.rs/fluxkit/badge.svg)](https://docs.rs/fluxkit)
 
 `fluxkit` is a `no_std` Rust workspace for BLDC / PMSM projects that want:
 
