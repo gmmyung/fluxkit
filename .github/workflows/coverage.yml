@@ -1,0 +1,60 @@
+name: Coverage
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - assets/coverage.svg
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v17
+
+      - name: Enable Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Run Workspace Coverage
+        run: |
+          mkdir -p target/llvm-cov
+          XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c \
+            cargo llvm-cov --workspace --json --summary-only \
+            --output-path target/llvm-cov/summary.json
+
+      - name: Extract Coverage Percentage
+        id: coverage
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary = json.loads(Path("target/llvm-cov/summary.json").read_text())
+          totals = summary["data"][0]["totals"]["lines"]
+          percentage = round(float(totals["percent"]), 1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"percentage={percentage}\n")
+          PY
+
+      - name: Generate Coverage Badge
+        uses: ozankasikci/rust-test-coverage-badge@v1
+        with:
+          coverage: ${{ steps.coverage.outputs.percentage }}
+          output: assets/coverage.svg
+          commit: true
+          commit-message: "chore: update coverage badge"
