@@ -25,13 +25,13 @@
 //! compensated controller applies bounded friction feedforward and exposes the
 //! torque breakdown for tuning.
 #![doc = "\n"]
-#![doc = include_str!("../../../docs/plots/closed_loop_torque_command.svg")]
+#![doc = include_str!("../docs/plots/closed_loop_torque_command.svg")]
 #![doc = r#"
 Velocity-command example with output-side friction and attached inertia present
 in the actuator model.
 "#]
 #![doc = "\n"]
-#![doc = include_str!("../../../docs/plots/closed_loop_velocity_command.svg")]
+#![doc = include_str!("../docs/plots/closed_loop_velocity_command.svg")]
 
 use fluxkit_math::{
     ContinuousMechanicalAngle,

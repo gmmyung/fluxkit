@@ -8,7 +8,7 @@
 //! Phase-duty shape produced by SPWM and SVPWM under comparable operating
 //! points.
 #![doc = "\n"]
-#![doc = include_str!("../../../../docs/plots/modulation_comparison.svg")]
+#![doc = include_str!("../../docs/plots/modulation_comparison.svg")]
 
 pub mod sine_pwm;
 pub mod svpwm;

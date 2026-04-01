@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Ideal PMSM plant emulator for Fluxkit integration tests"
-repository = ""
+repository = "https://github.com/gmmyung/fluxkit"
 
 [features]
 default = []
@@ -13,9 +13,9 @@ serde = ["dep:serde", "fluxkit_math/serde"]
 
 [dependencies]
 defmt = { version = "0.3", optional = true }
-fluxkit_math = { path = "../fluxkit_math" }
+fluxkit_math = { path = "../fluxkit_math", version = "0.1.0" }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 
 [dev-dependencies]
-fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core" }
+fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core", version = "0.1.0" }
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }

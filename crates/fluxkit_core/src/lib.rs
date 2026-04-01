@@ -22,7 +22,7 @@
 //! Representative closed-loop current response of the controller against the
 //! ideal PMSM plant model used in integration tests.
 #![doc = "\n"]
-#![doc = include_str!("../../../docs/plots/closed_loop_current.svg")]
+#![doc = include_str!("../docs/plots/closed_loop_current.svg")]
 
 #[macro_use]
 mod logging;
