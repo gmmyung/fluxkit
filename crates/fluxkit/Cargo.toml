@@ -23,5 +23,5 @@ serde = { version = "1", default-features = false, features = ["derive"], option
 [dev-dependencies]
 critical-section = { version = "1", features = ["std"] }
 fluxkit-pmsm-sim = { path = "../fluxkit_pmsm_sim" }
-plotters = "0.3.7"
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 static_cell = "2"

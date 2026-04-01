@@ -18,4 +18,4 @@ serde = { version = "1", default-features = false, features = ["derive"], option
 
 [dev-dependencies]
 fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core" }
-plotters = "0.3.7"
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }

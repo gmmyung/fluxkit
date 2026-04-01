@@ -19,4 +19,4 @@ micromath = { version = "2.1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 
 [dev-dependencies]
-plotters = "0.3.7"
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
