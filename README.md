@@ -24,6 +24,15 @@ real motor projects that have:
 It is not trying to be a generic embedded framework, RTOS, or executor. The
 top-level crate is focused on the motor-control problem itself.
 
+## Published Crates
+
+- `fluxkit` [![crates.io](https://img.shields.io/crates/v/fluxkit.svg)](https://crates.io/crates/fluxkit) [![docs.rs](https://docs.rs/fluxkit/badge.svg)](https://docs.rs/fluxkit)
+- `fluxkit-core` [![crates.io](https://img.shields.io/crates/v/fluxkit-core.svg)](https://crates.io/crates/fluxkit-core) [![docs.rs](https://docs.rs/fluxkit-core/badge.svg)](https://docs.rs/fluxkit-core)
+- `fluxkit-hal` [![crates.io](https://img.shields.io/crates/v/fluxkit-hal.svg)](https://crates.io/crates/fluxkit-hal) [![docs.rs](https://docs.rs/fluxkit-hal/badge.svg)](https://docs.rs/fluxkit-hal)
+- `fluxkit_math` [![crates.io](https://img.shields.io/crates/v/fluxkit_math.svg)](https://crates.io/crates/fluxkit_math) [![docs.rs](https://docs.rs/fluxkit_math/badge.svg)](https://docs.rs/fluxkit_math)
+- `fluxkit-pmsm-sim` [![crates.io](https://img.shields.io/crates/v/fluxkit-pmsm-sim.svg)](https://crates.io/crates/fluxkit-pmsm-sim) [![docs.rs](https://docs.rs/fluxkit-pmsm-sim/badge.svg)](https://docs.rs/fluxkit-pmsm-sim)
+- `as5048a-spi` [![crates.io](https://img.shields.io/crates/v/as5048a-spi.svg)](https://crates.io/crates/as5048a-spi) [![docs.rs](https://docs.rs/as5048a-spi/badge.svg)](https://docs.rs/as5048a-spi)
+
 ## Architecture
 
 The workspace is split by responsibility:
@@ -77,7 +86,7 @@ The intended user flow is:
 If you want one concrete starting point, use:
 
 ```bash
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit --example threaded_bringup
+cargo run -p fluxkit --example threaded_bringup
 ```
 
 That example demonstrates the full intended bring-up path:
@@ -197,7 +206,7 @@ The normal bring-up order is:
 ### Full Bring-up
 
 ```bash
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit --example threaded_bringup
+cargo run -p fluxkit --example threaded_bringup
 ```
 
 This is the main project example. It shows:
@@ -216,10 +225,10 @@ It also writes:
 ### Simulator Response Examples
 
 ```bash
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_current
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_position
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_torque_command
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit-pmsm-sim --example closed_loop_velocity_command
+cargo run -p fluxkit-pmsm-sim --example closed_loop_current
+cargo run -p fluxkit-pmsm-sim --example closed_loop_position
+cargo run -p fluxkit-pmsm-sim --example closed_loop_torque_command
+cargo run -p fluxkit-pmsm-sim --example closed_loop_velocity_command
 ```
 
 These generate SVG plots in `target/plots/`.
@@ -237,7 +246,7 @@ Reference outputs:
 ### Modulation Plot
 
 ```bash
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo run -p fluxkit_math --example plot_modulation
+cargo run -p fluxkit_math --example plot_modulation
 ```
 
 Reference output:
@@ -286,27 +295,15 @@ switching simulation.
 
 ## Development
 
-This repo includes a Nix flake with a dev shell.
-
-Enter the shell:
-
-```bash
-nix develop
-```
-
-Recommended cache setting:
-
-```bash
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test
-```
+Use a normal Rust toolchain with `cargo`.
 
 Common commands:
 
 ```bash
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo fmt
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test -p fluxkit-core -p fluxkit-hal -p fluxkit -p fluxkit-pmsm-sim
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo test -p fluxkit
-XDG_CACHE_HOME=/tmp/fluxkit-nix-cache nix develop -c cargo doc -p fluxkit --no-deps
+cargo fmt
+cargo test -p fluxkit-core -p fluxkit-hal -p fluxkit -p fluxkit-pmsm-sim
+cargo test -p fluxkit
+cargo doc -p fluxkit --no-deps
 ```
 
 Coverage:

@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "as5048a-spi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "defmt 0.3.100",
  "embedded-hal",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "fluxkit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "critical-section",
  "defmt 0.3.100",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "fluxkit-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aquamarine",
  "defmt 0.3.100",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "fluxkit-hal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "defmt 0.3.100",
  "fluxkit_math",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "fluxkit-pmsm-sim"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "defmt 0.3.100",
  "fluxkit-core",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "fluxkit_math"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "defmt 0.3.100",
  "micromath",
