@@ -1,5 +1,7 @@
 # Fluxkit
 
+[![CI](https://github.com/gmmyung/fluxkit/actions/workflows/ci.yml/badge.svg)](https://github.com/gmmyung/fluxkit/actions/workflows/ci.yml)
+
 `fluxkit` is a `no_std` Rust workspace for BLDC / PMSM projects that want:
 
 - a pure deterministic control core
