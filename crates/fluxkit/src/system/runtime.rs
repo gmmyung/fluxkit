@@ -71,7 +71,7 @@ where
                     active: true,
                     controller: controller.status(),
                     output_velocity: RadPerSec::ZERO,
-                    last_fast_output: None,
+                    last_control_output: None,
                     armed: false,
                     fault_latched: false,
                 },

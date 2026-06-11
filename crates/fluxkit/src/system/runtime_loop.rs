@@ -107,11 +107,11 @@ where
         Ok(request)
     }
 
-    pub(crate) fn publish_runtime_status(&self, last_fast_output: Option<MotorRuntimeOutput>) {
+    pub(crate) fn publish_runtime_status(&self, last_control_output: Option<MotorRuntimeOutput>) {
         critical_section::with(|cs| {
             let mut shared = self.shared.borrow(cs).borrow_mut();
-            if let Some(output) = last_fast_output {
-                shared.status.last_fast_output = Some(output);
+            if let Some(output) = last_control_output {
+                shared.status.last_control_output = Some(output);
             }
             let controller_status = self.runtime.controller.status();
             shared.status.output_velocity = controller_status.last_output_mechanical_velocity;
@@ -172,7 +172,7 @@ where
             TEMP::Error,
         >,
     > {
-        let result = self.execute_fast_cycle(self.runtime.dt_seconds);
+        let result = self.execute_control_cycle(self.runtime.dt_seconds);
         self.finish_cycle_result(result)
     }
 
@@ -193,7 +193,7 @@ where
     > {
         let request = self.sync_runtime_requests()?;
         if !request.armed {
-            let output = MotorRuntimeOutput::from_fast_loop(ControlOutput {
+            let output = MotorRuntimeOutput::from_control_output(ControlOutput {
                 phase_duty: fluxkit_hal::centered_phase_duty(),
                 measured_idq: fluxkit_math::frame::Dq::new(Amps::ZERO, Amps::ZERO),
                 commanded_vdq: fluxkit_math::frame::Dq::new(Volts::ZERO, Volts::ZERO),
@@ -279,13 +279,13 @@ where
             .set_phase_duty(output.phase_duty)
             .map_err(MotorRuntimeError::Pwm)?;
 
-        let output = MotorRuntimeOutput::from_fast_loop(output);
+        let output = MotorRuntimeOutput::from_control_output(output);
         self.publish_runtime_status(Some(output));
         Ok(output)
     }
 
     #[inline]
-    pub(crate) fn execute_fast_cycle(
+    pub(crate) fn execute_control_cycle(
         &mut self,
         dt_seconds: f32,
     ) -> Result<

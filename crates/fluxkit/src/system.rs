@@ -303,7 +303,7 @@ pub struct MotorRuntimeOutput {
 
 impl MotorRuntimeOutput {
     #[inline]
-    fn from_fast_loop(output: ControlOutput) -> Self {
+    fn from_control_output(output: ControlOutput) -> Self {
         Self {
             phase_duty: output.phase_duty,
             measured_idq: output.measured_idq,
@@ -325,7 +325,7 @@ pub struct MotorRuntimeStatus {
     /// Latest output-axis mechanical velocity shared with non-IRQ code.
     pub output_velocity: RadPerSec,
     /// Latest runtime output, if the runtime has run at least one cycle.
-    pub last_fast_output: Option<MotorRuntimeOutput>,
+    pub last_control_output: Option<MotorRuntimeOutput>,
     /// `true` when runtime arming is requested.
     pub armed: bool,
     /// `true` when the wrapper latched a runtime fault.

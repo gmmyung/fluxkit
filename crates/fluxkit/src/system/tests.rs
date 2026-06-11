@@ -337,7 +337,7 @@ fn invalid_current_sample_returns_error_and_forces_neutral_pwm() {
 }
 
 #[test]
-fn supervisory_work_runs_inside_fast_cycle() {
+fn supervisory_work_runs_inside_control_cycle() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let system = MotorRuntime::new(
         hardware,
@@ -359,12 +359,12 @@ fn supervisory_work_runs_inside_fast_cycle() {
     ticker.tick().unwrap();
     let first = handle
         .status()
-        .last_fast_output
+        .last_control_output
         .expect("first runtime output should be published");
     ticker.tick().unwrap();
     let second = handle
         .status()
-        .last_fast_output
+        .last_control_output
         .expect("second runtime output should be published");
 
     assert_eq!(first.phase_duty, centered_phase_duty());
@@ -458,7 +458,7 @@ fn runtime_handle_updates_command_and_receives_status() {
     let status = handle.status();
 
     assert_eq!(status.controller.mode, ControlMode::Current);
-    assert!(status.last_fast_output.is_some());
+    assert!(status.last_control_output.is_some());
     assert_eq!(status.output_velocity, RadPerSec::ZERO);
     assert_eq!(
         handle.command(),
@@ -492,7 +492,7 @@ fn over_temperature_latches_runtime_fault_and_centers_output() {
 
     assert_eq!(
         status
-            .last_fast_output
+            .last_control_output
             .expect("faulted output should be published")
             .phase_duty,
         centered_phase_duty()
