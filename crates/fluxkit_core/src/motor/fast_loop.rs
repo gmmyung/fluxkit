@@ -6,7 +6,7 @@ where
     M: Modulator,
     CurrentEst: CurrentEstimator,
 {
-    pub(super) fn fast_tick(&mut self, input: FastLoopInput) -> FastLoopOutput {
+    pub(super) fn fast_tick(&mut self, input: ControlInput) -> ControlOutput {
         self.status.last_bus_voltage = input.bus_voltage;
         self.status.last_winding_temperature_c = input.winding_temperature_c;
         self.status.last_rotor_mechanical_angle = input.rotor.mechanical_angle;
@@ -68,7 +68,7 @@ where
 
         if self.state == MotorState::Disabled || self.mode == ControlMode::Disabled {
             self.refresh_status();
-            return FastLoopOutput {
+            return ControlOutput {
                 phase_duty: neutral_phase_duty(),
                 measured_idq,
                 commanded_vdq: zero_voltage_dq(),
@@ -103,7 +103,15 @@ where
     }
 
     /// Executes one deterministic controller cycle.
-    pub fn step(&mut self, input: FastLoopInput, dt_seconds: f32) -> FastLoopOutput {
+    pub fn step(&mut self, input: ControlInput) -> ControlOutput {
+        if input.clear_fault_requested {
+            self.clear_error();
+        }
+        self.set_armed(input.armed);
+        if input.command != self.command {
+            self.apply_command(input.command);
+        }
+        let dt_seconds = input.dt_seconds;
         let output = self.fast_tick(input);
         self.update_supervisory_references(dt_seconds);
         output
@@ -149,7 +157,7 @@ where
         mechanical_velocity: RadPerSec,
         dt_seconds: f32,
         voltage_limit: f32,
-    ) -> FastLoopOutput {
+    ) -> ControlOutput {
         let current_ref = CurrentReference {
             id: self.id_target,
             iq: self.iq_target,
@@ -195,7 +203,7 @@ where
         electrical_angle: f32,
         bus_voltage: Volts,
         voltage_limit: f32,
-    ) -> FastLoopOutput {
+    ) -> ControlOutput {
         self.finalize_voltage_output(
             self.open_loop_voltage_target.map(|voltage| voltage.get()),
             measured_idq,
@@ -212,7 +220,7 @@ where
         electrical_angle: f32,
         bus_voltage: Volts,
         voltage_limit: f32,
-    ) -> FastLoopOutput {
+    ) -> ControlOutput {
         if !dq_is_finite(requested_vdq.d, requested_vdq.q) {
             self.latch_error(Error::NonFiniteComputation);
             self.refresh_status();
@@ -241,7 +249,7 @@ where
 
         self.refresh_status();
 
-        FastLoopOutput {
+        ControlOutput {
             phase_duty,
             measured_idq,
             commanded_vdq,

@@ -121,12 +121,14 @@ use fluxkit::{
 # let actuator_params = todo!();
 # let current_loop_config = todo!();
 let runtime = MotorRuntime::new(
-    pwm,
-    current,
-    bus,
-    rotor,
-    output,
-    temp,
+    fluxkit::MotorHardware {
+        pwm,
+        current,
+        bus,
+        rotor,
+        output,
+        temp,
+    },
     MotorRuntimeParams::new(
         motor_params,
         inverter_params,
@@ -134,10 +136,12 @@ let runtime = MotorRuntime::new(
         current_loop_config,
         1.0 / 20_000.0,
     ),
-    Svpwm,
-    PassThroughCurrentEstimator::new(),
-    PassThroughEstimator::new(),
-    PassThroughEstimator::new(),
+    fluxkit::RuntimeAlgorithms {
+        modulator: Svpwm,
+        current_estimator: PassThroughCurrentEstimator::new(),
+        rotor_estimator: PassThroughEstimator::new(),
+        output_estimator: PassThroughEstimator::new(),
+    },
 )?;
 
 let (handle, ticker) = runtime.split()?;

@@ -61,20 +61,27 @@ where
     ) -> Result<Self, CalibrationError> {
         Self::from_parts(
             MotorRuntimeParts {
-                pwm,
-                current,
-                bus,
-                rotor,
-                output,
-                temp,
-                motor,
-                inverter,
-                actuator: placeholder_actuator_params(limits),
-                current_loop: config,
-                modulator,
-                current_estimator,
-                rotor_estimator,
-                output_estimator,
+                hardware: MotorHardware {
+                    pwm,
+                    current,
+                    bus,
+                    rotor,
+                    output,
+                    temp,
+                },
+                params: MotorRuntimeParams {
+                    motor,
+                    inverter,
+                    actuator: placeholder_actuator_params(limits),
+                    current_loop: config,
+                    dt_seconds,
+                },
+                algorithms: RuntimeAlgorithms {
+                    modulator,
+                    current_estimator,
+                    rotor_estimator,
+                    output_estimator,
+                },
             },
             request,
             limits,
@@ -104,8 +111,8 @@ where
             return Err(CalibrationError::InvalidConfiguration);
         }
 
-        let motor_system = MotorRuntime::from_parts(parts, dt_seconds)
-            .map_err(|_| CalibrationError::InvalidConfiguration)?;
+        let motor_system =
+            MotorRuntime::from_parts(parts).map_err(|_| CalibrationError::InvalidConfiguration)?;
         let current_phase = next_phase_for_request(request);
         let resolved_result = resolved_result_for_request(request);
 

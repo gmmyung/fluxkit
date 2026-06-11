@@ -1,9 +1,9 @@
 use std::{env, error::Error, fs};
 
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
-    CurrentLoopConfig, FastLoopInput, FrictionCompensation, InverterParams, MotorController,
-    MotorLimits, MotorParams, RotorEstimate, motor::ControllerCommand,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlInput,
+    CurrentLoopConfig, FrictionCompensation, InverterParams, MotorController, MotorLimits,
+    MotorParams, RotorEstimate, motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -64,26 +64,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let expected_output_inertia = total_output_inertia_kg_m2();
     let mut expected_output_velocity = 0.0_f32;
 
-    uncompensated.set_armed(true);
-    compensated.set_armed(true);
-
     for step in 0..SIMULATION_STEPS {
         let output_torque_target = output_torque_target_for_step(step);
-        uncompensated.apply_command(ControllerCommand::Torque(NewtonMeters::new(
-            output_torque_target,
-        )));
-        compensated.apply_command(ControllerCommand::Torque(NewtonMeters::new(
-            output_torque_target,
-        )));
+        let command = ControllerCommand::Torque(NewtonMeters::new(output_torque_target));
 
-        let uncompensated_output = uncompensated.step(
-            fast_loop_input(&uncompensated_plant, bus_voltage),
-            FAST_DT_SECONDS,
-        );
-        let compensated_output = compensated.step(
-            fast_loop_input(&compensated_plant, bus_voltage),
-            FAST_DT_SECONDS,
-        );
+        let uncompensated_output =
+            uncompensated.step(fast_loop_input(&uncompensated_plant, bus_voltage, command));
+        let compensated_output =
+            compensated.step(fast_loop_input(&compensated_plant, bus_voltage, command));
 
         uncompensated_plant.step_phase_duty(
             uncompensated_output.phase_duty,
@@ -126,7 +114,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
+fn fast_loop_input(
+    plant: &PmsmModel,
+    bus_voltage: Volts,
+    command: ControllerCommand,
+) -> ControlInput {
     let state = *plant.state();
     let wrapped_mechanical_angle = state.mechanical_angle.wrapped();
     let wrapped_output_angle = ContinuousMechanicalAngle::new(
@@ -143,7 +135,10 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
     ))
     .map(Amps::new);
 
-    FastLoopInput {
+    ControlInput {
+        command,
+        armed: true,
+        clear_fault_requested: false,
         phase_currents,
         bus_voltage,
         winding_temperature_c: state.winding_temperature_c,

@@ -11,9 +11,9 @@ use fluxkit::{
     ActuatorCalibrationLimits, ActuatorCalibrationPhase, ActuatorCalibrationRequest,
     ActuatorCalibrationRuntime, ActuatorLimits, ContinuousMechanicalAngle, ElectricalAngle,
     ElectricalDirection, MotorCalibrationConfig, MotorCalibrationLimits, MotorCalibrationPhase,
-    MotorCalibrationRequest, MotorCalibrationRuntime, MotorCommand, MotorLimits, MotorModel,
-    MotorParams, MotorRuntime, PassThroughEstimator, PolePairsAndOffsetRoutineConfig, RadPerSec,
-    Svpwm,
+    MotorCalibrationRequest, MotorCalibrationRuntime, MotorCommand, MotorHardware, MotorLimits,
+    MotorModel, MotorParams, MotorRuntime, PassThroughEstimator, PolePairsAndOffsetRoutineConfig,
+    RadPerSec, RuntimeAlgorithms, Svpwm,
     units::{Amps, Henries, NewtonMeters, Ohms, Volts, Webers},
 };
 use fluxkit_core::{
@@ -1272,12 +1272,14 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let runtime = MotorRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
+        MotorHardware {
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+        },
         fluxkit::MotorRuntimeParams::new(
             motor_params,
             inverter_params(),
@@ -1285,10 +1287,12 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
             current_loop_config(),
             FAST_DT_SECONDS,
         ),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        PassThroughEstimator::new(),
-        PassThroughEstimator::new(),
+        RuntimeAlgorithms {
+            modulator: Svpwm,
+            current_estimator: fluxkit::PassThroughCurrentEstimator::new(),
+            rotor_estimator: PassThroughEstimator::new(),
+            output_estimator: PassThroughEstimator::new(),
+        },
     )
     .expect("valid runtime config");
 

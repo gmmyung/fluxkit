@@ -5,7 +5,7 @@ use fluxkit_core::{
     ActuatorEstimate, ActuatorFrictionCalibrationConfig, ActuatorFrictionCalibrationInput,
     ActuatorFrictionCalibrator, ActuatorGearRatioCalibrationConfig,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrator, ActuatorLimits, ActuatorModel,
-    ActuatorParams, CurrentLoopConfig, FastLoopInput, FluxLinkageCalibrationConfig,
+    ActuatorParams, ControlInput, CurrentLoopConfig, FluxLinkageCalibrationConfig,
     FluxLinkageCalibrationInput, FluxLinkageCalibrator, InverterParams, MotorController,
     MotorLimits, MotorModel, PhaseInductanceCalibrationConfig, PhaseInductanceCalibrationInput,
     PhaseInductanceCalibrator, PhaseResistanceCalibrationConfig, PhaseResistanceCalibrationInput,
@@ -167,7 +167,11 @@ fn plant_params_with_breakaway() -> PmsmParams {
     }
 }
 
-fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
+fn fast_loop_input(
+    plant: &PmsmModel,
+    bus_voltage: Volts,
+    command: ControllerCommand,
+) -> ControlInput {
     let state = *plant.state();
     let wrapped_mechanical_angle = state.mechanical_angle.wrapped();
     let electrical_angle = mechanical_to_electrical(
@@ -180,7 +184,10 @@ fn fast_loop_input(plant: &PmsmModel, bus_voltage: Volts) -> FastLoopInput {
     ))
     .map(fluxkit_math::units::Amps::new);
 
-    FastLoopInput {
+    ControlInput {
+        command,
+        armed: true,
+        clear_fault_requested: false,
         phase_currents,
         bus_voltage,
         winding_temperature_c: state.winding_temperature_c,
@@ -471,8 +478,6 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
     )
     .unwrap();
 
-    controller.set_armed(true);
-
     for step in 0..200_000 {
         let status = controller.status();
         let command = calibrator.tick(ActuatorFrictionCalibrationInput {
@@ -482,10 +487,10 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
                 .total_output_torque_command,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.apply_command(ControllerCommand::Velocity(command.velocity_target));
+        let controller_command = ControllerCommand::Velocity(command.velocity_target);
 
         let _ = step;
-        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
+        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -542,8 +547,6 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
     )
     .unwrap();
 
-    controller.set_armed(true);
-
     for _ in 0..200_000 {
         let status = controller.status();
         let command = calibrator.tick(ActuatorGearRatioCalibrationInput {
@@ -552,9 +555,9 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
             output_velocity: status.last_output_mechanical_velocity,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.apply_command(ControllerCommand::Velocity(command.velocity_target));
+        let controller_command = ControllerCommand::Velocity(command.velocity_target);
 
-        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
+        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -604,8 +607,6 @@ fn torque_ramp_recovers_actuator_breakaway() {
     })
     .unwrap();
 
-    controller.set_armed(true);
-
     for _ in 0..200_000 {
         let status = controller.status();
         let command = calibrator.tick(ActuatorBreakawayCalibrationInput {
@@ -615,9 +616,9 @@ fn torque_ramp_recovers_actuator_breakaway() {
                 .total_output_torque_command,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.apply_command(ControllerCommand::Torque(command.torque_target));
+        let controller_command = ControllerCommand::Torque(command.torque_target);
 
-        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
+        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -664,8 +665,6 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
     )
     .unwrap();
 
-    controller.set_armed(true);
-
     for _ in 0..200_000 {
         let status = controller.status();
         let command = calibrator.tick(ActuatorBlendBandCalibrationInput {
@@ -675,9 +674,9 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
                 .total_output_torque_command,
             dt_seconds: FAST_DT_SECONDS,
         });
-        controller.apply_command(ControllerCommand::Torque(command.torque_target));
+        let controller_command = ControllerCommand::Torque(command.torque_target);
 
-        let output = controller.step(fast_loop_input(&plant, bus_voltage), FAST_DT_SECONDS);
+        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(

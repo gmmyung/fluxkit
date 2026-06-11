@@ -1,4 +1,4 @@
-use super::MotorController;
+use super::{ControllerCommand, MotorController};
 use crate::{
     actuator::{
         ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
@@ -7,7 +7,7 @@ use crate::{
     config::CurrentLoopConfig,
     control::current::CurrentEstimator,
     error::Error,
-    io::{FastLoopInput, RotorEstimate},
+    io::{ControlInput, RotorEstimate},
     mode::ControlMode,
     params::{InverterParams, MotorLimits, MotorModel, MotorParams},
     state::MotorState,
@@ -79,8 +79,11 @@ fn test_config() -> CurrentLoopConfig {
     }
 }
 
-fn test_input() -> FastLoopInput {
-    FastLoopInput {
+fn test_input() -> ControlInput {
+    ControlInput {
+        command: ControllerCommand::Disabled,
+        armed: false,
+        clear_fault_requested: false,
         phase_currents: Abc::new(Amps::ZERO, Amps::ZERO, Amps::ZERO),
         bus_voltage: Volts::new(24.0),
         winding_temperature_c: 25.0,

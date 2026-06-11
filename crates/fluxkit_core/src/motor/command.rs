@@ -37,6 +37,7 @@ where
             config,
             modulator,
             current_estimator,
+            command: ControllerCommand::Disabled,
             state: MotorState::Disabled,
             mode: ControlMode::Disabled,
             id_target: Amps::new(id_target),
@@ -121,7 +122,8 @@ where
     }
 
     /// Applies one controller command, replacing any previously active target.
-    pub fn apply_command(&mut self, command: ControllerCommand) {
+    pub(super) fn apply_command(&mut self, command: ControllerCommand) {
+        self.command = command;
         match command {
             ControllerCommand::Disabled => {
                 self.set_id_target(Amps::ZERO);
@@ -303,8 +305,8 @@ where
         self.status.last_actuator_compensation = ActuatorCompensationTelemetry::zero();
     }
 
-    pub(super) fn neutral_output(&self, _error: Error) -> FastLoopOutput {
-        FastLoopOutput {
+    pub(super) fn neutral_output(&self, _error: Error) -> ControlOutput {
+        ControlOutput {
             phase_duty: neutral_phase_duty(),
             measured_idq: self.status.last_measured_idq,
             commanded_vdq: zero_voltage_dq(),

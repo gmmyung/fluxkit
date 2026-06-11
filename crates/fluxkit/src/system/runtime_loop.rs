@@ -52,7 +52,7 @@ where
     pub(crate) fn sync_runtime_requests(
         &mut self,
     ) -> Result<
-        bool,
+        RuntimeRequest,
         MotorRuntimeError<
             PWM::Error,
             CURRENT::Error,
@@ -62,24 +62,18 @@ where
             TEMP::Error,
         >,
     > {
-        let (command, command_dirty, clear_fault_requested, armed_requested) =
-            critical_section::with(|cs| {
-                let mut shared = self.shared.borrow(cs).borrow_mut();
-                let command = shared.command;
-                let command_dirty = shared.command_dirty;
-                let clear_fault_requested = shared.clear_fault_requested;
-                let armed_requested = shared.status.armed;
-                shared.command_dirty = false;
-                shared.clear_fault_requested = false;
-                (
-                    command,
-                    command_dirty,
-                    clear_fault_requested,
-                    armed_requested,
-                )
-            });
+        let request = critical_section::with(|cs| {
+            let mut shared = self.shared.borrow(cs).borrow_mut();
+            let request = RuntimeRequest {
+                command: shared.command,
+                armed: shared.status.armed,
+                clear_fault_requested: shared.clear_fault_requested,
+            };
+            shared.clear_fault_requested = false;
+            request
+        });
 
-        if clear_fault_requested {
+        if request.clear_fault_requested {
             self.runtime.controller.clear_error();
             critical_section::with(|cs| {
                 self.shared.borrow(cs).borrow_mut().status.fault_latched =
@@ -87,14 +81,13 @@ where
             });
         }
 
-        if armed_requested != self.runtime.pwm_armed {
-            if armed_requested {
+        if request.armed != self.runtime.pwm_armed {
+            if request.armed {
                 self.runtime
                     .hardware
                     .pwm
                     .enable()
                     .map_err(MotorRuntimeError::Pwm)?;
-                self.runtime.controller.set_armed(true);
             } else {
                 self.runtime.controller.set_armed(false);
                 self.runtime
@@ -108,16 +101,10 @@ where
                     .disable()
                     .map_err(MotorRuntimeError::Pwm)?;
             }
-            self.runtime.pwm_armed = armed_requested;
+            self.runtime.pwm_armed = request.armed;
         }
 
-        if command_dirty {
-            self.runtime
-                .controller
-                .apply_command(core_command_from_runtime(command));
-        }
-
-        Ok(self.runtime.pwm_armed)
+        Ok(request)
     }
 
     pub(crate) fn publish_runtime_status(&self, last_fast_output: Option<MotorRuntimeOutput>) {
@@ -204,9 +191,9 @@ where
             TEMP::Error,
         >,
     > {
-        let armed = self.sync_runtime_requests()?;
-        if !armed {
-            let output = MotorRuntimeOutput::from_fast_loop(FastLoopOutput {
+        let request = self.sync_runtime_requests()?;
+        if !request.armed {
+            let output = MotorRuntimeOutput::from_fast_loop(ControlOutput {
                 phase_duty: fluxkit_hal::centered_phase_duty(),
                 measured_idq: fluxkit_math::frame::Dq::new(Amps::ZERO, Amps::ZERO),
                 commanded_vdq: fluxkit_math::frame::Dq::new(Volts::ZERO, Volts::ZERO),
@@ -268,23 +255,23 @@ where
             dt_seconds,
         );
 
-        let output = self.runtime.controller.step(
-            FastLoopInput {
-                phase_currents: current.currents,
-                bus_voltage,
-                winding_temperature_c,
-                rotor: RotorEstimate {
-                    mechanical_angle: rotor_motion.unwrapped(),
-                    mechanical_velocity: rotor_motion.velocity(),
-                },
-                actuator: ActuatorEstimate {
-                    output_angle: output_motion.unwrapped(),
-                    output_velocity: output_motion.velocity(),
-                },
-                dt_seconds,
+        let output = self.runtime.controller.step(ControlInput {
+            command: core_command_from_runtime(request.command),
+            armed: request.armed,
+            clear_fault_requested: false,
+            phase_currents: current.currents,
+            bus_voltage,
+            winding_temperature_c,
+            rotor: RotorEstimate {
+                mechanical_angle: rotor_motion.unwrapped(),
+                mechanical_velocity: rotor_motion.velocity(),
+            },
+            actuator: ActuatorEstimate {
+                output_angle: output_motion.unwrapped(),
+                output_velocity: output_motion.velocity(),
             },
             dt_seconds,
-        );
+        });
 
         self.runtime
             .hardware

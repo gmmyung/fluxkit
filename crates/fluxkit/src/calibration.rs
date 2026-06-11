@@ -145,12 +145,14 @@
 //!
 //! let (pwm, current, bus, rotor, output, temp) = take_runtime_handles();
 //! let runtime = MotorRuntime::new(
-//!     pwm,
-//!     current,
-//!     bus,
-//!     rotor,
-//!     output,
-//!     temp,
+//!     fluxkit::MotorHardware {
+//!         pwm,
+//!         current,
+//!         bus,
+//!         rotor,
+//!         output,
+//!         temp,
+//!     },
 //!     MotorRuntimeParams::new(
 //!         motor_params,
 //!         inverter_params(),
@@ -158,10 +160,12 @@
 //!         current_loop_config(),
 //!         DT,
 //!     ),
-//!     Svpwm,
-//!     PassThroughCurrentEstimator::new(),
-//!     PassThroughEstimator::new(),
-//!     PassThroughEstimator::new(),
+//!     fluxkit::RuntimeAlgorithms {
+//!         modulator: Svpwm,
+//!         current_estimator: PassThroughCurrentEstimator::new(),
+//!         rotor_estimator: PassThroughEstimator::new(),
+//!         output_estimator: PassThroughEstimator::new(),
+//!     },
 //! )?;
 //! let (handle, ticker) = runtime.split()?;
 //! handle.set_command(fluxkit::MotorCommand::Velocity(RadPerSec::new(2.0)));

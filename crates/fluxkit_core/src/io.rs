@@ -1,4 +1,4 @@
-//! Fast-loop input and output contracts.
+//! Control-loop input and output contracts.
 
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -7,7 +7,7 @@ use fluxkit_math::{
     units::{Amps, RadPerSec, Volts},
 };
 
-use crate::actuator::ActuatorEstimate;
+use crate::{actuator::ActuatorEstimate, motor::ControllerCommand};
 
 /// Rotor angle and speed estimate supplied by platform code.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,11 +27,17 @@ pub struct RotorEstimate {
     pub mechanical_velocity: RadPerSec,
 }
 
-/// Synchronous data required by the high-rate current-control loop.
+/// Synchronous data required by one controller step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct FastLoopInput {
+pub struct ControlInput {
+    /// Command target to apply for this step.
+    pub command: ControllerCommand,
+    /// `true` when the controller should run, `false` when it should remain disabled.
+    pub armed: bool,
+    /// Requests that a latched controller fault be cleared before this step.
+    pub clear_fault_requested: bool,
     /// Measured three-phase currents.
     pub phase_currents: Abc<Amps>,
     /// Measured DC bus voltage.
@@ -46,11 +52,11 @@ pub struct FastLoopInput {
     pub dt_seconds: f32,
 }
 
-/// Result of one synchronous fast-loop execution.
+/// Result of one synchronous controller step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct FastLoopOutput {
+pub struct ControlOutput {
     /// Commanded normalized phase duties.
     pub phase_duty: PhaseDuty,
     /// Measured current vector in the rotating frame.
