@@ -173,15 +173,6 @@ where
         self.refresh_status();
     }
 
-    /// Arms or disarms the controller state machine.
-    pub fn set_armed(&mut self, armed: bool) {
-        if armed {
-            self.enable();
-        } else {
-            self.disable();
-        }
-    }
-
     /// Applies actuator-side calibration data onto the live controller model.
     pub fn apply_actuator_calibration(&mut self, calibration: &ActuatorCalibration) {
         calibration.apply_to_actuator_params(&mut self.actuator);
@@ -257,7 +248,8 @@ where
         self.refresh_status();
     }
 
-    pub(super) fn disable(&mut self) {
+    /// Disarms the controller state machine without requiring a sampled control input.
+    pub fn disable(&mut self) {
         self.reset_control_state();
         self.state = MotorState::Disabled;
         self.refresh_status();

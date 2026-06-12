@@ -107,7 +107,11 @@ where
         if input.clear_fault_requested {
             self.clear_error();
         }
-        self.set_armed(input.armed);
+        if input.armed {
+            self.enable();
+        } else {
+            self.disable();
+        }
         if input.command != self.command {
             self.apply_command(input.command);
         }

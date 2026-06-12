@@ -89,7 +89,7 @@ where
                     .enable()
                     .map_err(MotorRuntimeError::Pwm)?;
             } else {
-                self.runtime.controller.set_armed(false);
+                self.runtime.controller.disable();
                 self.runtime
                     .hardware
                     .pwm
