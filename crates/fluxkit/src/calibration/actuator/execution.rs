@@ -97,10 +97,11 @@ where
             return Ok(Some(()));
         }
 
-        let mut routine = self
-            .active_routine
-            .take()
-            .expect("active routine must exist");
+        let Some(mut routine) = self.active_routine.take() else {
+            return Err(ActuatorCalibrationRuntimeError::Calibration(
+                CalibrationError::InvalidConfiguration,
+            ));
+        };
         let delta = self.tick_active_routine(&mut routine)?;
         self.finish_routine_step(routine, delta)
     }
@@ -266,10 +267,10 @@ where
                 fluxkit_core::ActuatorBreakawayCalibrationConfig::default_for_torque_ramp();
             cfg.positive_coulomb_torque = self
                 .positive_coulomb_torque
-                .expect("friction resolved before breakaway");
+                .ok_or(CalibrationError::InvalidConfiguration)?;
             cfg.negative_coulomb_torque = self
                 .negative_coulomb_torque
-                .expect("friction resolved before breakaway");
+                .ok_or(CalibrationError::InvalidConfiguration)?;
             cfg.max_torque = min_torque(cfg.max_torque, limits.max_torque_target);
             cfg.timeout_seconds = cfg.timeout_seconds.min(limits.timeout_seconds);
             return fluxkit_core::ActuatorBreakawayCalibrator::new(cfg)
