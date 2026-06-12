@@ -14,3 +14,6 @@ default-members = [
     "crates/fluxkit_pmsm_sim",
 ]
 resolver = "2"
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
