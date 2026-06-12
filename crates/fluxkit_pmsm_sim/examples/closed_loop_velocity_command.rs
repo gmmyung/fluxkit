@@ -438,7 +438,6 @@ fn plant_params() -> PmsmParams {
             positive_viscous_coefficient: 0.02,
             negative_viscous_coefficient: 0.02,
             zero_velocity_blend_band: RadPerSec::new(0.5),
-            ..ActuatorPlantParams::disabled()
         },
         max_voltage_mag: None,
     }

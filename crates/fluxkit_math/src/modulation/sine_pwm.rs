@@ -35,7 +35,8 @@ pub(crate) fn sine_pwm_result(v_ab: AlphaBeta<f32>, vbus: f32) -> ModulationOutp
         Duty::new(crate::scalar::clamp(dc, 0.0, 1.0)),
     );
 
-    let saturated = da < 0.0 || da > 1.0 || db < 0.0 || db > 1.0 || dc < 0.0 || dc > 1.0;
+    let saturated =
+        !(0.0..=1.0).contains(&da) || !(0.0..=1.0).contains(&db) || !(0.0..=1.0).contains(&dc);
 
     ModulationOutput { duty, saturated }
 }

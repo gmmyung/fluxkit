@@ -600,7 +600,10 @@ const fn read_command_frame(address: u16) -> u16 {
 
 #[inline]
 const fn add_even_parity(frame_without_parity: u16) -> u16 {
-    if (frame_without_parity & !PARITY_MASK).count_ones() % 2 == 0 {
+    if (frame_without_parity & !PARITY_MASK)
+        .count_ones()
+        .is_multiple_of(2)
+    {
         frame_without_parity & !PARITY_MASK
     } else {
         frame_without_parity | PARITY_MASK
@@ -617,7 +620,7 @@ fn parse_response<SpiError>(frame: u16, check_error_flag: bool) -> Result<u16, E
 
 #[inline]
 fn parse_protocol_response(frame: u16, check_error_flag: bool) -> Result<u16, ProtocolError> {
-    if frame.count_ones() % 2 != 0 {
+    if !frame.count_ones().is_multiple_of(2) {
         return Err(ProtocolError::ResponseParity);
     }
     if check_error_flag && (frame & EF_MASK) != 0 {

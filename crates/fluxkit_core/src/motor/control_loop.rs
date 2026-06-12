@@ -1,6 +1,17 @@
 use super::support::{dq_is_finite, duty_is_finite};
 use super::*;
 
+struct CurrentControlFrame {
+    estimated_idq_f32: fluxkit_math::frame::Dq<f32>,
+    measured_idq: fluxkit_math::frame::Dq<Amps>,
+    electrical_angle: f32,
+    bus_voltage: Volts,
+    winding_temperature_c: f32,
+    mechanical_velocity: RadPerSec,
+    dt_seconds: f32,
+    voltage_limit: f32,
+}
+
 impl<M, CurrentEst> MotorController<M, CurrentEst>
 where
     M: Modulator,
@@ -83,16 +94,16 @@ where
             | ControlMode::Torque
             | ControlMode::Mit
             | ControlMode::Velocity
-            | ControlMode::Position => self.run_current_control(
+            | ControlMode::Position => self.run_current_control(CurrentControlFrame {
                 estimated_idq_f32,
                 measured_idq,
-                electrical_angle.get(),
-                input.bus_voltage,
-                input.winding_temperature_c,
-                input.rotor.mechanical_velocity,
-                input.dt_seconds,
+                electrical_angle: electrical_angle.get(),
+                bus_voltage: input.bus_voltage,
+                winding_temperature_c: input.winding_temperature_c,
+                mechanical_velocity: input.rotor.mechanical_velocity,
+                dt_seconds: input.dt_seconds,
                 voltage_limit,
-            ),
+            }),
             ControlMode::OpenLoopVoltage => self.run_open_loop_voltage(
                 measured_idq,
                 electrical_angle.get(),
@@ -151,30 +162,21 @@ where
         self.q_pi.cfg.out_max = limit;
     }
 
-    fn run_current_control(
-        &mut self,
-        measured_idq_f32: fluxkit_math::frame::Dq<f32>,
-        measured_idq: fluxkit_math::frame::Dq<Amps>,
-        electrical_angle: f32,
-        bus_voltage: Volts,
-        winding_temperature_c: f32,
-        mechanical_velocity: RadPerSec,
-        dt_seconds: f32,
-        voltage_limit: f32,
-    ) -> ControlOutput {
+    fn run_current_control(&mut self, frame: CurrentControlFrame) -> ControlOutput {
         let current_ref = CurrentReference {
             id: self.id_target,
             iq: self.iq_target,
         };
-        self.set_pi_output_limits(voltage_limit);
+        self.set_pi_output_limits(frame.voltage_limit);
 
         let feedforward = if self.config.enable_current_feedforward {
-            let current_ref_derivative = self.current_reference_derivative(current_ref, dt_seconds);
+            let current_ref_derivative =
+                self.current_reference_derivative(current_ref, frame.dt_seconds);
             self.current_feedforward(
                 current_ref,
                 current_ref_derivative,
-                mechanical_velocity,
-                winding_temperature_c,
+                frame.mechanical_velocity,
+                frame.winding_temperature_c,
             )
         } else {
             fluxkit_math::frame::Dq::new(0.0, 0.0)
@@ -182,22 +184,22 @@ where
         self.last_current_ref = Some(fluxkit_math::frame::Dq::new(current_ref.id, current_ref.iq));
 
         let vd = self.d_pi.update_with_feedforward(
-            current_ref.id.get() - measured_idq_f32.d,
+            current_ref.id.get() - frame.estimated_idq_f32.d,
             feedforward.d,
-            dt_seconds,
+            frame.dt_seconds,
         );
         let vq = self.q_pi.update_with_feedforward(
-            current_ref.iq.get() - measured_idq_f32.q,
+            current_ref.iq.get() - frame.estimated_idq_f32.q,
             feedforward.q,
-            dt_seconds,
+            frame.dt_seconds,
         );
 
         self.finalize_voltage_output(
             fluxkit_math::frame::Dq::new(vd, vq),
-            measured_idq,
-            electrical_angle,
-            bus_voltage,
-            voltage_limit,
+            frame.measured_idq,
+            frame.electrical_angle,
+            frame.bus_voltage,
+            frame.voltage_limit,
         )
     }
 

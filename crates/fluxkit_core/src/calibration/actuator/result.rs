@@ -254,7 +254,6 @@ mod tests {
                 positive_coulomb_torque: Some(NewtonMeters::new(0.1)),
                 ..ActuatorFrictionCalibration::empty()
             },
-            ..ActuatorCalibration::empty()
         };
         let newer = ActuatorCalibration {
             gear_ratio: Some(2.0),
@@ -263,7 +262,6 @@ mod tests {
                 positive_viscous_coefficient: Some(0.02),
                 ..ActuatorFrictionCalibration::empty()
             },
-            ..ActuatorCalibration::empty()
         };
 
         let merged = older.merge(newer);
@@ -305,7 +303,6 @@ mod tests {
                 negative_viscous_coefficient: Some(0.02),
                 ..ActuatorFrictionCalibration::empty()
             },
-            ..ActuatorCalibration::empty()
         }
         .apply_to_actuator_params(&mut actuator);
 

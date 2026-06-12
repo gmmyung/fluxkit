@@ -231,11 +231,12 @@ where
 }
 
 /// Runtime command snapshot consumed by the wrapper-owned controller.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MotorCommand {
     /// Disabled command with all targets cleared.
+    #[default]
     Disabled,
     /// Direct current-mode command with explicit `d/q` current targets.
     Current(Dq<Amps>),
@@ -260,12 +261,6 @@ pub enum MotorCommand {
     Position(ContinuousMechanicalAngle),
     /// Open-loop `d/q` voltage command.
     OpenLoopVoltage(Dq<Volts>),
-}
-
-impl Default for MotorCommand {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 #[inline]

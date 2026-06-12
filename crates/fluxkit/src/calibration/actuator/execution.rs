@@ -291,46 +291,35 @@ where
     }
 
     fn merge_partial(&mut self, delta: PartialActuatorCalibration) {
-        if self.gear_ratio.is_none() {
-            if let Some(value) = delta.gear_ratio {
-                self.gear_ratio = Some(value);
-            }
-        }
-        if self.positive_breakaway_torque.is_none() {
-            if let Some(value) = delta.friction.positive_breakaway_torque {
-                self.positive_breakaway_torque = Some(value);
-            }
-        }
-        if self.negative_breakaway_torque.is_none() {
-            if let Some(value) = delta.friction.negative_breakaway_torque {
-                self.negative_breakaway_torque = Some(value);
-            }
-        }
-        if self.positive_coulomb_torque.is_none() {
-            if let Some(value) = delta.friction.positive_coulomb_torque {
-                self.positive_coulomb_torque = Some(value);
-            }
-        }
-        if self.negative_coulomb_torque.is_none() {
-            if let Some(value) = delta.friction.negative_coulomb_torque {
-                self.negative_coulomb_torque = Some(value);
-            }
-        }
-        if self.positive_viscous_coefficient.is_none() {
-            if let Some(value) = delta.friction.positive_viscous_coefficient {
-                self.positive_viscous_coefficient = Some(value);
-            }
-        }
-        if self.negative_viscous_coefficient.is_none() {
-            if let Some(value) = delta.friction.negative_viscous_coefficient {
-                self.negative_viscous_coefficient = Some(value);
-            }
-        }
-        if self.zero_velocity_blend_band.is_none() {
-            if let Some(value) = delta.friction.zero_velocity_blend_band {
-                self.zero_velocity_blend_band = Some(value);
-            }
-        }
+        fill_missing(&mut self.gear_ratio, delta.gear_ratio);
+        fill_missing(
+            &mut self.positive_breakaway_torque,
+            delta.friction.positive_breakaway_torque,
+        );
+        fill_missing(
+            &mut self.negative_breakaway_torque,
+            delta.friction.negative_breakaway_torque,
+        );
+        fill_missing(
+            &mut self.positive_coulomb_torque,
+            delta.friction.positive_coulomb_torque,
+        );
+        fill_missing(
+            &mut self.negative_coulomb_torque,
+            delta.friction.negative_coulomb_torque,
+        );
+        fill_missing(
+            &mut self.positive_viscous_coefficient,
+            delta.friction.positive_viscous_coefficient,
+        );
+        fill_missing(
+            &mut self.negative_viscous_coefficient,
+            delta.friction.negative_viscous_coefficient,
+        );
+        fill_missing(
+            &mut self.zero_velocity_blend_band,
+            delta.friction.zero_velocity_blend_band,
+        );
     }
 
     pub(crate) fn partial_calibration(&self) -> PartialActuatorCalibration {
@@ -562,8 +551,7 @@ where
         let status = self.motor_system.controller_status();
         let command = build_command(calibrator, status, self.dt_seconds);
         apply_command(&mut self.motor_system, command);
-        let _ = self
-            .motor_system
+        self.motor_system
             .ticker_internal()
             .tick()
             .map_err(ActuatorCalibrationRuntimeError::Motor)?;
@@ -640,6 +628,12 @@ where
     }
 }
 
+fn fill_missing<T>(slot: &mut Option<T>, value: Option<T>) {
+    if slot.is_none() {
+        *slot = value;
+    }
+}
+
 impl<'a, PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP, MOD, CurrentEst, RotorEst, OutputEst>
     ActuatorCalibrationTicker<
         'a,
@@ -681,9 +675,9 @@ where
         >,
     > {
         run_active_calibration_inner(
-            &self.inner,
-            &self.shared,
-            || read_status(&self.shared).active,
+            self.inner,
+            self.shared,
+            || read_status(self.shared).active,
             |active| {
                 if active {
                     ActuatorCalibrationRuntimeError::Busy
