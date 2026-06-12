@@ -136,12 +136,7 @@ let runtime = MotorRuntime::new(
         current_loop_config,
         1.0 / 20_000.0,
     ),
-    fluxkit::RuntimeAlgorithms {
-        modulator: Svpwm,
-        current_estimator: PassThroughCurrentEstimator::new(),
-        rotor_estimator: PassThroughEstimator::new(),
-        output_estimator: PassThroughEstimator::new(),
-    },
+    fluxkit::RuntimeAlgorithms::default_pass_through(),
 )?;
 
 let (handle, ticker) = runtime.split()?;

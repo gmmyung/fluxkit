@@ -14,7 +14,7 @@ where
         params: MotorRuntimeParams,
         algorithms: RuntimeAlgorithms<MOD, CurrentEst, RotorEst, OutputEst>,
     ) -> Result<Self, MotorRuntimeBuildError> {
-        Self::from_parts(MotorRuntimeParts {
+        Self::from_parts(MotorRuntimeBundle {
             hardware,
             params,
             algorithms,
@@ -23,7 +23,7 @@ where
 
     /// Creates a runtime from previously owned runtime parts.
     pub fn from_parts(
-        parts: MotorRuntimeParts<
+        parts: MotorRuntimeBundle<
             PWM,
             CURRENT,
             BUS,
@@ -141,7 +141,7 @@ where
     pub fn try_into_parts(
         &self,
     ) -> Option<
-        MotorRuntimeParts<
+        MotorRuntimeBundle<
             PWM,
             CURRENT,
             BUS,
@@ -176,7 +176,7 @@ where
             modulator,
             current_estimator,
         } = controller.into_parts();
-        Some(MotorRuntimeParts {
+        Some(MotorRuntimeBundle {
             hardware,
             params: MotorRuntimeParams {
                 motor,

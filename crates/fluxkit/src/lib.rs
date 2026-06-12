@@ -37,8 +37,10 @@ pub use fluxkit_math::{
     PllEstimatorConfig, RadPerSec, SinePwm, Svpwm, Volts, Webers, WrappedEstimator, angle, units,
 };
 pub use system::MotorRuntimeError;
+#[allow(deprecated)]
+pub use system::MotorRuntimeParts;
 pub use system::{
     MechanicalMotionEstimator, MotorCommand, MotorHandle, MotorHardware, MotorRuntime,
-    MotorRuntimeOutput, MotorRuntimeParams, MotorRuntimeParts, MotorRuntimeStatus, MotorTicker,
+    MotorRuntimeBundle, MotorRuntimeOutput, MotorRuntimeParams, MotorRuntimeStatus, MotorTicker,
     RuntimeAlgorithms,
 };

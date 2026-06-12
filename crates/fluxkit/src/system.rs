@@ -49,12 +49,7 @@
 //!         current_loop_config,
 //!         1.0 / 20_000.0,
 //!     ),
-//!     fluxkit::RuntimeAlgorithms {
-//!         modulator: fluxkit::Svpwm,
-//!         current_estimator: fluxkit::PassThroughCurrentEstimator::new(),
-//!         rotor_estimator: fluxkit::PassThroughEstimator::new(),
-//!         output_estimator: fluxkit::PassThroughEstimator::new(),
-//!     },
+//!     fluxkit::RuntimeAlgorithms::default_pass_through(),
 //! )?;
 //! let (handle, ticker) = runtime.split()?;
 //! handle.set_command(fluxkit::MotorCommand::Velocity(
@@ -76,7 +71,7 @@ use fluxkit_core::motor::{ControllerCommand, MotorControllerParts};
 use fluxkit_core::{
     ActuatorCalibration, ActuatorEstimate, ActuatorParams, ControlInput, ControlOutput,
     CurrentEstimator, CurrentLoopConfig, InverterParams, MotorController, MotorParams, MotorStatus,
-    RotorEstimate,
+    PassThroughCurrentEstimator, RotorEstimate,
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputSensor, PhasePwm, RotorSensor,
@@ -84,7 +79,7 @@ use fluxkit_hal::{
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle, MechanicalMotionEstimate, MechanicalMotionSample,
-    MechanicalMotionSeed, Modulator, WrappedEstimator,
+    MechanicalMotionSeed, Modulator, PassThroughEstimator, Svpwm, WrappedEstimator,
     frame::Dq,
     units::{Amps, NewtonMeters, RadPerSec, Volts},
 };
@@ -120,6 +115,26 @@ pub struct RuntimeAlgorithms<MOD, CurrentEst, RotorEst, OutputEst> {
     pub rotor_estimator: RotorEst,
     /// Output motion estimator state.
     pub output_estimator: OutputEst,
+}
+
+impl
+    RuntimeAlgorithms<
+        Svpwm,
+        PassThroughCurrentEstimator,
+        PassThroughEstimator,
+        PassThroughEstimator,
+    >
+{
+    /// Creates the common pass-through estimator stack with SVPWM modulation.
+    #[inline]
+    pub fn default_pass_through() -> Self {
+        Self {
+            modulator: Svpwm,
+            current_estimator: PassThroughCurrentEstimator::new(),
+            rotor_estimator: PassThroughEstimator::new(),
+            output_estimator: PassThroughEstimator::new(),
+        }
+    }
 }
 
 /// HAL and integration failures that can occur outside the pure controller.
@@ -349,9 +364,9 @@ pub struct MotorRuntimeParams {
     pub dt_seconds: f32,
 }
 
-/// Owned runtime parts that can be moved between project phases.
+/// Owned runtime bundle that can be moved between project phases.
 #[derive(Debug)]
-pub struct MotorRuntimeParts<
+pub struct MotorRuntimeBundle<
     PWM,
     CURRENT,
     BUS,
@@ -370,6 +385,32 @@ pub struct MotorRuntimeParts<
     /// Runtime algorithms and estimator state.
     pub algorithms: RuntimeAlgorithms<MOD, CurrentEst, RotorEst, OutputEst>,
 }
+
+/// Backwards-compatible name for [`MotorRuntimeBundle`].
+#[deprecated(note = "use MotorRuntimeBundle")]
+pub type MotorRuntimeParts<
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    CurrentEst,
+    RotorEst,
+    OutputEst,
+> = MotorRuntimeBundle<
+    PWM,
+    CURRENT,
+    BUS,
+    ROTOR,
+    OUTPUT,
+    TEMP,
+    MOD,
+    CurrentEst,
+    RotorEst,
+    OutputEst,
+>;
 
 impl MotorRuntimeParams {
     /// Bundles the fixed runtime parameters needed to construct a [`MotorRuntime`].

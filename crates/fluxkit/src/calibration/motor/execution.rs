@@ -643,8 +643,9 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = take_active_inner(
+        run_active_calibration_inner(
             self.inner,
+            self.shared,
             || read_status(self.shared).active,
             |active| {
                 if active {
@@ -653,11 +654,7 @@ where
                     MotorCalibrationRuntimeError::Inactive
                 }
             },
-        )?;
-        let result = inner.tick(self.shared);
-        critical_section::with(|cs| {
-            *self.inner.borrow(cs).borrow_mut() = Some(inner);
-        });
-        result
+            |inner, shared| inner.tick(shared),
+        )
     }
 }

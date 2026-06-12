@@ -47,7 +47,7 @@
 //! use fluxkit::{
 //!     ActuatorCalibrationLimits, ActuatorCalibrationRequest, ActuatorCalibrationRuntime,
 //!     MotorCalibrationLimits, MotorCalibrationRequest, MotorCalibrationRuntime, MotorLimits,
-//!     MotorRuntime, MotorRuntimeParams, PassThroughCurrentEstimator, PassThroughEstimator, Svpwm,
+//!     MotorRuntime, MotorRuntimeParams, PassThroughEstimator, Svpwm,
 //!     units::{Amps, NewtonMeters, RadPerSec, Volts},
 //! };
 //!
@@ -68,6 +68,7 @@
 //! # ) { todo!() }
 //! # fn inverter_params() -> fluxkit::InverterParams { todo!() }
 //! # fn current_loop_config() -> fluxkit::CurrentLoopConfig { todo!() }
+//! # fn actuator_params() -> fluxkit::ActuatorParams { todo!() }
 //! const DT: f32 = 1.0 / 20_000.0;
 //!
 //! let (pwm, current, bus, rotor, temp) = take_motor_calibration_handles();
@@ -105,26 +106,30 @@
 //!
 //! let (pwm, current, bus, rotor, output, temp) = take_runtime_handles();
 //! let actuator_calibration = ActuatorCalibrationRuntime::new(
-//!     pwm,
-//!     current,
-//!     bus,
-//!     rotor,
-//!     output,
-//!     temp,
-//!     motor_params,
-//!     inverter_params(),
-//!     current_loop_config(),
-//!     Svpwm,
-//!     PassThroughCurrentEstimator::new(),
-//!     PassThroughEstimator::new(),
-//!     PassThroughEstimator::new(),
+//!     fluxkit::MotorRuntimeBundle {
+//!         hardware: fluxkit::MotorHardware {
+//!             pwm,
+//!             current,
+//!             bus,
+//!             rotor,
+//!             output,
+//!             temp,
+//!         },
+//!         params: MotorRuntimeParams::new(
+//!             motor_params,
+//!             inverter_params(),
+//!             actuator_params(),
+//!             current_loop_config(),
+//!             DT,
+//!         ),
+//!         algorithms: fluxkit::RuntimeAlgorithms::default_pass_through(),
+//!     },
 //!     ActuatorCalibrationRequest::all(),
 //!     ActuatorCalibrationLimits {
 //!         max_velocity_target: RadPerSec::new(10.0),
 //!         max_torque_target: NewtonMeters::new(0.3),
 //!         timeout_seconds: 5.0,
 //!     },
-//!     DT,
 //! )?;
 //!
 //! let (actuator_handle, actuator_ticker) = actuator_calibration.split()?;
@@ -160,12 +165,7 @@
 //!         current_loop_config(),
 //!         DT,
 //!     ),
-//!     fluxkit::RuntimeAlgorithms {
-//!         modulator: Svpwm,
-//!         current_estimator: PassThroughCurrentEstimator::new(),
-//!         rotor_estimator: PassThroughEstimator::new(),
-//!         output_estimator: PassThroughEstimator::new(),
-//!     },
+//!     fluxkit::RuntimeAlgorithms::default_pass_through(),
 //! )?;
 //! let (handle, ticker) = runtime.split()?;
 //! handle.set_command(fluxkit::MotorCommand::Velocity(RadPerSec::new(2.0)));

@@ -267,12 +267,7 @@ fn default_algorithms() -> RuntimeAlgorithms<
     fluxkit_math::PassThroughEstimator,
     fluxkit_math::PassThroughEstimator,
 > {
-    RuntimeAlgorithms {
-        modulator: fluxkit_math::Svpwm,
-        current_estimator: crate::PassThroughCurrentEstimator::new(),
-        rotor_estimator: fluxkit_math::PassThroughEstimator::new(),
-        output_estimator: fluxkit_math::PassThroughEstimator::new(),
-    }
+    RuntimeAlgorithms::default_pass_through()
 }
 
 #[test]

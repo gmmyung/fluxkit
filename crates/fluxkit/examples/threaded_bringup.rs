@@ -591,7 +591,7 @@ fn main_context_loop(plot_path: &str) {
 
                 println!("phase 2: actuator calibration");
                 let actuator_calibration = ActuatorCalibrationRuntime::from_parts(
-                    fluxkit::MotorRuntimeParts {
+                    fluxkit::MotorRuntimeBundle {
                         hardware: fluxkit::MotorHardware {
                             pwm: parts.pwm,
                             current: parts.current,
@@ -627,7 +627,6 @@ fn main_context_loop(plot_path: &str) {
                         max_torque_target: NewtonMeters::new(0.3),
                         timeout_seconds: 20.0,
                     },
-                    FAST_DT_SECONDS,
                 )
                 .unwrap();
                 let actuator_calibration = ACTUATOR_CALIBRATION_RUNTIME.init(actuator_calibration);

@@ -24,11 +24,59 @@ use fluxkit_core::{
 use fluxkit_hal::centered_phase_duty;
 use fluxkit_pmsm_sim::{ActuatorPlantParams, PmsmModel, PmsmParams, PmsmState, ThermalPlantParams};
 use support::sim::{
-    FAST_DT_SECONDS, GEAR_RATIO, SimHarness, WINDING_TEMP_C, controller_motor_params,
-    current_loop_config, inverter_params, local_calibration_hardware as calibration_hardware,
-    local_output, local_output_inverted, local_runtime_hardware as runtime_handles,
+    FAST_DT_SECONDS, GEAR_RATIO, LocalSimBus, LocalSimCurrent, LocalSimPwm, LocalSimRotor,
+    LocalSimTemp, SimHarness, WINDING_TEMP_C, controller_motor_params, current_loop_config,
+    inverter_params, local_calibration_hardware as calibration_hardware, local_output,
+    local_output_inverted, local_runtime_hardware as runtime_handles,
     threaded_calibration_hardware,
 };
+
+fn actuator_runtime_bundle<OUTPUT>(
+    pwm: LocalSimPwm,
+    current: LocalSimCurrent,
+    bus: LocalSimBus,
+    rotor: LocalSimRotor,
+    output: OUTPUT,
+    temp: LocalSimTemp,
+    motor: MotorParams,
+) -> fluxkit::MotorRuntimeBundle<
+    LocalSimPwm,
+    LocalSimCurrent,
+    LocalSimBus,
+    LocalSimRotor,
+    OUTPUT,
+    LocalSimTemp,
+    Svpwm,
+    fluxkit::PassThroughCurrentEstimator,
+    PassThroughEstimator,
+    PassThroughEstimator,
+> {
+    fluxkit::MotorRuntimeBundle {
+        hardware: MotorHardware {
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+        },
+        params: fluxkit::MotorRuntimeParams::new(
+            motor,
+            inverter_params(),
+            fluxkit::ActuatorParams::from_model_limits_and_compensation(
+                fluxkit::ActuatorModel { gear_ratio: 1.0 },
+                ActuatorLimits {
+                    max_output_torque: None,
+                    max_output_velocity: Some(RadPerSec::new(10.0)),
+                },
+                fluxkit::ActuatorCompensationConfig::disabled(),
+            ),
+            current_loop_config(),
+            FAST_DT_SECONDS,
+        ),
+        algorithms: RuntimeAlgorithms::default_pass_through(),
+    }
+}
 
 fn plant_params() -> PmsmParams {
     PmsmParams {
@@ -407,19 +455,15 @@ fn calibration_runtimes_report_current_or_next_phase() {
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let actuator = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        controller_motor_params(),
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        PassThroughEstimator::new(),
-        PassThroughEstimator::new(),
+        actuator_runtime_bundle(
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+            controller_motor_params(),
+        ),
         ActuatorCalibrationRequest {
             gear_ratio: Some(GEAR_RATIO),
             positive_coulomb_torque: None,
@@ -435,7 +479,6 @@ fn calibration_runtimes_report_current_or_next_phase() {
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 5.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
     let (actuator_handle, _actuator_ticker) =
@@ -500,26 +543,13 @@ fn calibration_handles_publish_completion() {
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let actuator = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        motor_params,
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        PassThroughEstimator::new(),
-        PassThroughEstimator::new(),
+        actuator_runtime_bundle(pwm, current, bus, rotor, output, temp, motor_params),
         ActuatorCalibrationRequest::all(),
         ActuatorCalibrationLimits {
             max_velocity_target: RadPerSec::new(10.0),
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 20.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -607,19 +637,15 @@ fn actuator_calibration_runtime_recovers_gear_ratio_through_public_wrapper() {
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let system = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        controller_motor_params(),
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        actuator_runtime_bundle(
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+            controller_motor_params(),
+        ),
         ActuatorCalibrationRequest {
             gear_ratio: None,
             positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
@@ -635,7 +661,6 @@ fn actuator_calibration_runtime_recovers_gear_ratio_through_public_wrapper() {
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 5.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -663,19 +688,15 @@ fn actuator_calibration_runtime_faults_on_opposite_output_sensor_direction() {
     let (pwm, current, bus, rotor, temp) = calibration_hardware(&shared);
     let output = local_output_inverted(&shared);
     let system = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        controller_motor_params(),
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        actuator_runtime_bundle(
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+            controller_motor_params(),
+        ),
         ActuatorCalibrationRequest {
             gear_ratio: None,
             positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
@@ -691,7 +712,6 @@ fn actuator_calibration_runtime_faults_on_opposite_output_sensor_direction() {
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 5.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -725,26 +745,21 @@ fn extracted_actuator_calibration_marks_handles_and_tickers_inactive() {
     let output = local_output(&shared);
 
     let system = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        controller_motor_params(),
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        PassThroughEstimator::new(),
-        PassThroughEstimator::new(),
+        actuator_runtime_bundle(
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+            controller_motor_params(),
+        ),
         ActuatorCalibrationRequest::all(),
         ActuatorCalibrationLimits {
             max_velocity_target: RadPerSec::new(10.0),
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 5.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -773,19 +788,15 @@ fn actuator_calibration_runtime_recovers_breakaway_through_public_wrapper() {
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let system = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        controller_motor_params(),
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        actuator_runtime_bundle(
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+            controller_motor_params(),
+        ),
         ActuatorCalibrationRequest {
             gear_ratio: Some(GEAR_RATIO),
             positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
@@ -801,7 +812,6 @@ fn actuator_calibration_runtime_recovers_breakaway_through_public_wrapper() {
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 5.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -828,19 +838,15 @@ fn actuator_calibration_runtime_recovers_zero_velocity_blend_band_through_public
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let system = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        controller_motor_params(),
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        actuator_runtime_bundle(
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+            controller_motor_params(),
+        ),
         ActuatorCalibrationRequest {
             gear_ratio: Some(GEAR_RATIO),
             positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
@@ -856,7 +862,6 @@ fn actuator_calibration_runtime_recovers_zero_velocity_blend_band_through_public
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 5.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -1017,19 +1022,15 @@ fn actuator_calibration_runtime_applies_provided_and_measured_values_through_liv
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let system = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        controller_motor_params(),
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        actuator_runtime_bundle(
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+            controller_motor_params(),
+        ),
         ActuatorCalibrationRequest {
             gear_ratio: Some(GEAR_RATIO),
             positive_coulomb_torque: Some(NewtonMeters::new(0.04)),
@@ -1045,7 +1046,6 @@ fn actuator_calibration_runtime_applies_provided_and_measured_values_through_liv
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 5.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -1220,26 +1220,13 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
 
     let (pwm, current, bus, rotor, output, temp) = runtime_handles(&shared);
     let actuator_calibration = ActuatorCalibrationRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
-        motor_params,
-        inverter_params(),
-        current_loop_config(),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        PassThroughEstimator::new(),
-        PassThroughEstimator::new(),
+        actuator_runtime_bundle(pwm, current, bus, rotor, output, temp, motor_params),
         ActuatorCalibrationRequest::all(),
         ActuatorCalibrationLimits {
             max_velocity_target: RadPerSec::new(10.0),
             max_torque_target: NewtonMeters::new(0.3),
             timeout_seconds: 20.0,
         },
-        FAST_DT_SECONDS,
     )
     .unwrap();
 
@@ -1287,12 +1274,7 @@ fn full_request_driven_bringup_recovers_calibration_and_reaches_runtime_velocity
             current_loop_config(),
             FAST_DT_SECONDS,
         ),
-        RuntimeAlgorithms {
-            modulator: Svpwm,
-            current_estimator: fluxkit::PassThroughCurrentEstimator::new(),
-            rotor_estimator: PassThroughEstimator::new(),
-            output_estimator: PassThroughEstimator::new(),
-        },
+        RuntimeAlgorithms::default_pass_through(),
     )
     .expect("valid runtime config");
 
