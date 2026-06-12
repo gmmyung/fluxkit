@@ -386,32 +386,6 @@ pub struct MotorRuntimeBundle<
     pub algorithms: RuntimeAlgorithms<MOD, CurrentEst, RotorEst, OutputEst>,
 }
 
-/// Backwards-compatible name for [`MotorRuntimeBundle`].
-#[deprecated(note = "use MotorRuntimeBundle")]
-pub type MotorRuntimeParts<
-    PWM,
-    CURRENT,
-    BUS,
-    ROTOR,
-    OUTPUT,
-    TEMP,
-    MOD,
-    CurrentEst,
-    RotorEst,
-    OutputEst,
-> = MotorRuntimeBundle<
-    PWM,
-    CURRENT,
-    BUS,
-    ROTOR,
-    OUTPUT,
-    TEMP,
-    MOD,
-    CurrentEst,
-    RotorEst,
-    OutputEst,
->;
-
 impl MotorRuntimeParams {
     /// Bundles the fixed runtime parameters needed to construct a [`MotorRuntime`].
     #[inline]
