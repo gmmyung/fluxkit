@@ -45,7 +45,7 @@ pub use calibration::{
     PolePairsAndOffsetCalibrationConfig, PolePairsAndOffsetCalibrationInput,
     PolePairsAndOffsetCalibrationResult, PolePairsAndOffsetCalibrator,
 };
-pub use config::{CurrentLoopConfig, CurrentLoopConfigBuilder};
+pub use config::{CurrentLoopConfig, CurrentLoopConfigBuilder, FluxWeakeningConfig};
 pub use control::current::{
     CurrentEstimator, CurrentReference, LpfCurrentEstimator, LpfCurrentEstimatorConfig,
     PassThroughCurrentEstimator,

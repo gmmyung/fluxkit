@@ -225,6 +225,7 @@ fn current_loop_config() -> CurrentLoopConfig {
         max_velocity_target: RadPerSec::new(50.0),
         max_current_ref_derivative_amps_per_sec: 10_000.0,
         enable_current_feedforward: true,
+        flux_weakening: fluxkit_core::FluxWeakeningConfig::disabled(),
     }
 }
 

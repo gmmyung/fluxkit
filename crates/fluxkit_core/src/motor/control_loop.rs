@@ -1,4 +1,4 @@
-use super::support::{dq_is_finite, duty_is_finite};
+use super::support::{current_limit, dq_is_finite, duty_is_finite};
 use super::*;
 
 struct CurrentControlFrame {
@@ -163,10 +163,12 @@ where
     }
 
     fn run_current_control(&mut self, frame: CurrentControlFrame) -> ControlOutput {
-        let current_ref = CurrentReference {
+        let base_current_ref = CurrentReference {
             id: self.id_target,
             iq: self.iq_target,
         };
+        let current_ref =
+            self.current_reference_with_flux_weakening(base_current_ref, frame.dt_seconds);
         self.set_pi_output_limits(frame.voltage_limit);
 
         let feedforward = if self.config.enable_current_feedforward {
@@ -235,6 +237,7 @@ where
 
         let limited_vdq = limit_norm_dq(requested_vdq, voltage_limit);
         let controller_saturated = limited_vdq != requested_vdq;
+        self.status.last_voltage_utilization = voltage_utilization(requested_vdq, voltage_limit);
         let voltage_alpha_beta = inverse_park(limited_vdq, electrical_angle);
         let modulation = self.modulator.modulate(voltage_alpha_beta, bus_voltage);
 
@@ -287,6 +290,82 @@ where
             resistance * id + ld * current_ref_derivative.d - omega_e * lq * iq,
             resistance * iq + lq * current_ref_derivative.q + omega_e * (ld * id + flux_linkage),
         )
+    }
+
+    fn current_reference_with_flux_weakening(
+        &mut self,
+        base_current_ref: CurrentReference,
+        dt_seconds: f32,
+    ) -> CurrentReference {
+        let config = self.config.flux_weakening;
+        if !config.enabled
+            || !matches!(
+                self.mode,
+                ControlMode::Torque
+                    | ControlMode::Mit
+                    | ControlMode::Velocity
+                    | ControlMode::Position
+            )
+            || !dt_seconds.is_finite()
+            || dt_seconds <= 0.0
+        {
+            self.flux_weakening_id = Amps::ZERO;
+            self.status.last_flux_weakening_id = Amps::ZERO;
+            self.status.last_flux_weakening_active = false;
+            return base_current_ref;
+        }
+
+        let utilization_error =
+            self.status.last_voltage_utilization - config.voltage_utilization_target;
+        let id_step = utilization_error * config.bandwidth.get() * dt_seconds;
+        let max_negative_id =
+            current_limit(config.max_negative_id, self.motor.limits.max_phase_current).min(
+                current_limit(
+                    self.config.max_id_target,
+                    self.motor.limits.max_phase_current,
+                ),
+            );
+        let flux_weakening_id = clamp(
+            self.flux_weakening_id.get() - id_step,
+            -max_negative_id,
+            0.0,
+        );
+        self.flux_weakening_id = Amps::new(flux_weakening_id);
+
+        let id_limit = current_limit(
+            self.config.max_id_target,
+            self.motor.limits.max_phase_current,
+        );
+        let id = clamp(
+            base_current_ref.id.get() + flux_weakening_id,
+            -id_limit,
+            id_limit,
+        );
+        let iq_limit = self.iq_limit_for_id(id);
+        let iq = clamp(base_current_ref.iq.get(), -iq_limit, iq_limit);
+
+        self.status.last_flux_weakening_id = self.flux_weakening_id;
+        self.status.last_flux_weakening_active = flux_weakening_id < 0.0;
+
+        CurrentReference {
+            id: Amps::new(id),
+            iq: Amps::new(iq),
+        }
+    }
+
+    fn iq_limit_for_id(&self, id: f32) -> f32 {
+        let configured_limit = current_limit(
+            self.config.max_iq_target,
+            self.motor.limits.max_phase_current,
+        );
+        let phase_limit = self.motor.limits.max_phase_current.get();
+        let id_abs = id.abs();
+        if id_abs >= phase_limit {
+            return 0.0;
+        }
+
+        let remaining_phase_current = sqrt(phase_limit * phase_limit - id_abs * id_abs).max(0.0);
+        configured_limit.min(remaining_phase_current)
     }
 
     fn temperature_compensated_phase_resistance_ohm(&self, winding_temperature_c: f32) -> f32 {
@@ -376,4 +455,18 @@ where
             ))
         })
     }
+}
+
+#[inline]
+fn voltage_utilization(requested_vdq: fluxkit_math::frame::Dq<f32>, voltage_limit: f32) -> f32 {
+    if !voltage_limit.is_finite() || voltage_limit <= 0.0 {
+        return 0.0;
+    }
+
+    let mag2 = requested_vdq.d * requested_vdq.d + requested_vdq.q * requested_vdq.q;
+    if !mag2.is_finite() || mag2 <= 0.0 {
+        return 0.0;
+    }
+
+    sqrt(mag2) / voltage_limit
 }

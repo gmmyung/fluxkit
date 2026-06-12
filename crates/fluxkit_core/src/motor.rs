@@ -7,6 +7,7 @@ use fluxkit_math::angle::{
 use fluxkit_math::{
     ContinuousMechanicalAngle, Modulator, PiConfig, PiController, Svpwm, clamp, clarke,
     inverse_park, limit_norm_dq, park,
+    scalar::sqrt,
     units::{Amps, NewtonMeters, RadPerSec, Volts},
 };
 
@@ -123,6 +124,7 @@ pub struct MotorController<M = Svpwm, CurrentEst = PassThroughCurrentEstimator> 
     last_wrapped_mechanical_angle: Option<ContinuousMechanicalAngle>,
     last_wrapped_output_angle: Option<ContinuousMechanicalAngle>,
     last_current_ref: Option<fluxkit_math::frame::Dq<Amps>>,
+    flux_weakening_id: Amps,
     status: MotorStatus,
 }
 

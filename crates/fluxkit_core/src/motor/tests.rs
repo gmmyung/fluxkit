@@ -4,7 +4,7 @@ use crate::{
         ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
         FrictionCompensation,
     },
-    config::CurrentLoopConfig,
+    config::{CurrentLoopConfig, FluxWeakeningConfig},
     control::current::CurrentEstimator,
     error::Error,
     io::{ControlInput, RotorEstimate},
@@ -76,6 +76,7 @@ fn test_config() -> CurrentLoopConfig {
         max_velocity_target: RadPerSec::new(100.0),
         max_current_ref_derivative_amps_per_sec: 10_000.0,
         enable_current_feedforward: true,
+        flux_weakening: FluxWeakeningConfig::disabled(),
     }
 }
 
@@ -236,6 +237,61 @@ fn positive_iq_target_produces_positive_vq() {
 
     assert!(output.commanded_vdq.q.get() > 0.0);
     assert_eq!(controller.status().active_error, None);
+}
+
+#[test]
+fn direct_current_mode_bypasses_flux_weakening() {
+    let mut config = test_config();
+    config.flux_weakening =
+        FluxWeakeningConfig::enabled(0.5, RadPerSec::new(20_000.0), Amps::new(5.0));
+
+    let mut controller = MotorController::new(
+        test_motor(),
+        test_inverter(),
+        test_actuator(),
+        config,
+        Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
+    );
+    controller.set_mode(ControlMode::Current);
+    controller.set_iq_target(Amps::new(10.0));
+    controller.enable();
+
+    controller.run_control_cycle(test_input());
+    controller.run_control_cycle(test_input());
+
+    assert_eq!(controller.status().last_flux_weakening_id, Amps::ZERO);
+    assert!(!controller.status().last_flux_weakening_active);
+}
+
+#[test]
+fn torque_mode_flux_weakening_injects_negative_id_after_overutilization() {
+    let mut config = test_config();
+    config.flux_weakening =
+        FluxWeakeningConfig::enabled(0.5, RadPerSec::new(20_000.0), Amps::new(5.0));
+
+    let mut controller = MotorController::new(
+        test_motor(),
+        test_inverter(),
+        test_actuator(),
+        config,
+        Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
+    );
+    controller.set_mode(ControlMode::Torque);
+    controller.set_iq_target(Amps::new(10.0));
+    controller.enable();
+
+    let first = controller.run_control_cycle(test_input());
+    assert!(first.commanded_vdq.q.get() > 0.0);
+    assert!(controller.status().last_voltage_utilization > 0.5);
+    assert_eq!(controller.status().last_flux_weakening_id, Amps::ZERO);
+
+    let second = controller.run_control_cycle(test_input());
+
+    assert!(controller.status().last_flux_weakening_id.get() < 0.0);
+    assert!(controller.status().last_flux_weakening_active);
+    assert!(second.commanded_vdq.d.get() < 0.0);
 }
 
 #[test]

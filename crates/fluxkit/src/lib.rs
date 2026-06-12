@@ -22,9 +22,10 @@ pub use capability::CapabilitySplitError;
 pub use fluxkit_core::{
     ActuatorCompensationConfig, ActuatorCompensationTelemetry, ActuatorEstimate, ActuatorLimits,
     ActuatorModel, ActuatorParams, CalibrationError, ControlInput, ControlMode, ControlOutput,
-    CurrentEstimator, CurrentLoopConfig, CurrentLoopConfigBuilder, Error, FrictionCompensation,
-    InverterParams, LpfCurrentEstimator, LpfCurrentEstimatorConfig, MotorLimits, MotorModel,
-    MotorParams, MotorState, MotorStatus, PassThroughCurrentEstimator, RotorEstimate,
+    CurrentEstimator, CurrentLoopConfig, CurrentLoopConfigBuilder, Error, FluxWeakeningConfig,
+    FrictionCompensation, InverterParams, LpfCurrentEstimator, LpfCurrentEstimatorConfig,
+    MotorLimits, MotorModel, MotorParams, MotorState, MotorStatus, PassThroughCurrentEstimator,
+    RotorEstimate,
 };
 pub use fluxkit_hal::{
     BusVoltageSensor, CurrentSampleValidity, CurrentSampler, OutputReading, OutputSensor,
