@@ -9,7 +9,6 @@ publish_order=(
   "fluxkit_math"
   "fluxkit-hal"
   "fluxkit-core"
-  "as5048a-spi"
   "fluxkit-pmsm-sim"
   "fluxkit"
 )

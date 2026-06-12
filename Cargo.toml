@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/hardware/as5048a_spi",
     "crates/fluxkit",
     "crates/fluxkit_core",
     "crates/fluxkit_hal",
@@ -8,7 +7,6 @@ members = [
     "crates/fluxkit_pmsm_sim",
 ]
 default-members = [
-    "crates/hardware/as5048a_spi",
     "crates/fluxkit",
     "crates/fluxkit_core",
     "crates/fluxkit_hal",

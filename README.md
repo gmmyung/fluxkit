@@ -31,7 +31,6 @@ top-level crate is focused on the motor-control problem itself.
 - `fluxkit-hal` [![crates.io](https://img.shields.io/crates/v/fluxkit-hal.svg)](https://crates.io/crates/fluxkit-hal) [![docs.rs](https://docs.rs/fluxkit-hal/badge.svg)](https://docs.rs/fluxkit-hal)
 - `fluxkit_math` [![crates.io](https://img.shields.io/crates/v/fluxkit_math.svg)](https://crates.io/crates/fluxkit_math) [![docs.rs](https://docs.rs/fluxkit_math/badge.svg)](https://docs.rs/fluxkit_math)
 - `fluxkit-pmsm-sim` [![crates.io](https://img.shields.io/crates/v/fluxkit-pmsm-sim.svg)](https://crates.io/crates/fluxkit-pmsm-sim) [![docs.rs](https://docs.rs/fluxkit-pmsm-sim/badge.svg)](https://docs.rs/fluxkit-pmsm-sim)
-- `as5048a-spi` [![crates.io](https://img.shields.io/crates/v/as5048a-spi.svg)](https://crates.io/crates/as5048a-spi) [![docs.rs](https://docs.rs/as5048a-spi/badge.svg)](https://docs.rs/as5048a-spi)
 
 ## Architecture
 
