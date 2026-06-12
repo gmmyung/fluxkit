@@ -1,7 +1,7 @@
 use fluxkit_core::{
-    ActuatorEstimate, ActuatorLimits, ActuatorModel, ActuatorParams, CurrentLoopConfig,
-    FastLoopInput, InverterParams, MotorController, MotorLimits, MotorModel, MotorParams,
-    RotorEstimate,
+    ActuatorEstimate, ActuatorLimits, ActuatorModel, ActuatorParams, ControlInput,
+    CurrentLoopConfig, InverterParams, MotorController, MotorLimits, MotorModel, MotorParams,
+    RotorEstimate, motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -69,12 +69,6 @@ fn main() {
         fluxkit_math::Svpwm,
         fluxkit_core::PassThroughCurrentEstimator::new(),
     );
-    controller.apply_command(fluxkit_core::motor::ControllerCommand::Current(Dq::new(
-        Amps::ZERO,
-        Amps::ZERO,
-    )));
-    controller.set_armed(true);
-
     let dt = 1.0 / 20_000.0;
     let electrical_speed = 200.0;
     let mut measured_iq = 0.0;
@@ -84,10 +78,6 @@ fn main() {
     for step in 0..400 {
         let time = step as f32 * dt;
         let iq_target = if step < 80 { 0.0 } else { 4.0 };
-        controller.apply_command(fluxkit_core::motor::ControllerCommand::Current(Dq::new(
-            Amps::ZERO,
-            Amps::new(iq_target),
-        )));
 
         measured_iq += (iq_target - measured_iq) * 0.04;
 
@@ -96,31 +86,31 @@ fn main() {
         let current_ab = inverse_park(current_dq, angle);
         let phase_currents = inverse_clarke(current_ab).map(Amps::new);
 
-        let output = controller.step(
-            FastLoopInput {
-                phase_currents,
-                bus_voltage: Volts::new(24.0),
-                winding_temperature_c: 25.0,
-                rotor: RotorEstimate {
-                    mechanical_angle: ContinuousMechanicalAngle::new(
-                        angle / motor.model().pole_pairs as f32,
-                    ),
-                    mechanical_velocity: RadPerSec::new(
-                        electrical_speed / motor.model().pole_pairs as f32,
-                    ),
-                },
-                actuator: ActuatorEstimate {
-                    output_angle: ContinuousMechanicalAngle::new(
-                        angle / motor.model().pole_pairs as f32 / 5.0,
-                    ),
-                    output_velocity: RadPerSec::new(
-                        electrical_speed / motor.model().pole_pairs as f32 / 5.0,
-                    ),
-                },
-                dt_seconds: dt,
+        let output = controller.step(ControlInput {
+            command: ControllerCommand::Current(Dq::new(Amps::ZERO, Amps::new(iq_target))),
+            armed: true,
+            clear_fault_requested: false,
+            phase_currents,
+            bus_voltage: Volts::new(24.0),
+            winding_temperature_c: 25.0,
+            rotor: RotorEstimate {
+                mechanical_angle: ContinuousMechanicalAngle::new(
+                    angle / motor.model().pole_pairs as f32,
+                ),
+                mechanical_velocity: RadPerSec::new(
+                    electrical_speed / motor.model().pole_pairs as f32,
+                ),
             },
-            dt,
-        );
+            actuator: ActuatorEstimate {
+                output_angle: ContinuousMechanicalAngle::new(
+                    angle / motor.model().pole_pairs as f32 / 5.0,
+                ),
+                output_velocity: RadPerSec::new(
+                    electrical_speed / motor.model().pole_pairs as f32 / 5.0,
+                ),
+            },
+            dt_seconds: dt,
+        });
 
         println!(
             "{step},{iq_target:.3},{:.3},{:.3},{:.3},{:.5},{:.5},{:.5},{}",

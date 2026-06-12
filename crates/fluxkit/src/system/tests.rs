@@ -19,7 +19,9 @@ use fluxkit_math::{
     units::{Amps, Duty, Henries, Hertz, NewtonMeters, Ohms, RadPerSec, Volts},
 };
 
-use super::{Hardware, MotorRuntime, MotorRuntimeBuildError, MotorRuntimeError};
+use super::{
+    MotorHardware, MotorRuntime, MotorRuntimeBuildError, MotorRuntimeError, RuntimeAlgorithms,
+};
 
 #[derive(Debug)]
 struct FakePwm {
@@ -228,8 +230,9 @@ fn current_loop_config() -> CurrentLoopConfig {
 
 fn hardware(
     validity: CurrentSampleValidity,
-) -> Hardware<FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor, FakeOutput, FakeTempSensor> {
-    Hardware {
+) -> MotorHardware<FakePwm, FakeCurrentSensor, FakeBusSensor, FakeRotor, FakeOutput, FakeTempSensor>
+{
+    MotorHardware {
         pwm: FakePwm::default(),
         current: FakeCurrentSensor {
             sample: PhaseCurrentSample {
@@ -258,16 +261,20 @@ fn hardware(
     }
 }
 
+fn default_algorithms() -> RuntimeAlgorithms<
+    fluxkit_math::Svpwm,
+    crate::PassThroughCurrentEstimator,
+    fluxkit_math::PassThroughEstimator,
+    fluxkit_math::PassThroughEstimator,
+> {
+    RuntimeAlgorithms::default_pass_through()
+}
+
 #[test]
-fn fast_tick_reads_hal_and_applies_phase_duty() {
+fn run_control_cycle_reads_hal_and_applies_phase_duty() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let system = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -275,10 +282,7 @@ fn fast_tick_reads_hal_and_applies_phase_duty() {
             current_loop_config(),
             0.000_05,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
+        default_algorithms(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
@@ -293,11 +297,11 @@ fn fast_tick_reads_hal_and_applies_phase_duty() {
         .try_into_parts()
         .expect("runtime parts should be available");
     assert_eq!(handle.status().controller.active_error, None);
-    assert!(parts.pwm.enabled);
+    assert!(parts.hardware.pwm.enabled);
     assert_eq!(handle.status().controller.state, MotorState::Running);
-    assert!(parts.pwm.duty.a.get() >= 0.0);
-    assert!(parts.pwm.duty.a.get() <= 1.0);
-    assert_ne!(parts.pwm.duty, centered_phase_duty());
+    assert!(parts.hardware.pwm.duty.a.get() >= 0.0);
+    assert!(parts.hardware.pwm.duty.a.get() <= 1.0);
+    assert_ne!(parts.hardware.pwm.duty, centered_phase_duty());
 }
 
 #[test]
@@ -305,12 +309,7 @@ fn invalid_current_sample_returns_error_and_forces_neutral_pwm() {
     let mut hardware = hardware(CurrentSampleValidity::Invalid);
     hardware.pwm.duty = Abc::new(Duty::new(0.2), Duty::new(0.7), Duty::new(0.6));
     let system = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -318,10 +317,7 @@ fn invalid_current_sample_returns_error_and_forces_neutral_pwm() {
             current_loop_config(),
             0.000_05,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
+        default_algorithms(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
@@ -332,19 +328,14 @@ fn invalid_current_sample_returns_error_and_forces_neutral_pwm() {
         .expect("runtime parts should be available");
 
     assert!(matches!(error, MotorRuntimeError::InvalidCurrentSample));
-    assert_eq!(parts.pwm.duty, centered_phase_duty());
+    assert_eq!(parts.hardware.pwm.duty, centered_phase_duty());
 }
 
 #[test]
-fn supervisory_work_runs_inside_fast_cycle() {
+fn supervisory_work_runs_inside_control_cycle() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let system = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -352,10 +343,7 @@ fn supervisory_work_runs_inside_fast_cycle() {
             current_loop_config(),
             0.000_05,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
+        default_algorithms(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
@@ -366,12 +354,12 @@ fn supervisory_work_runs_inside_fast_cycle() {
     ticker.tick().unwrap();
     let first = handle
         .status()
-        .last_fast_output
+        .last_control_output
         .expect("first runtime output should be published");
     ticker.tick().unwrap();
     let second = handle
         .status()
-        .last_fast_output
+        .last_control_output
         .expect("second runtime output should be published");
 
     assert_eq!(first.phase_duty, centered_phase_duty());
@@ -391,12 +379,7 @@ fn supervisory_work_runs_inside_fast_cycle() {
 fn explicit_estimators_drive_controller_side_motion_estimates() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let system = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -404,21 +387,23 @@ fn explicit_estimators_drive_controller_side_motion_estimates() {
             current_loop_config(),
             0.000_05,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        FixedEstimator {
-            output: AngularEstimate::new(
-                MechanicalAngle::new(0.3),
-                ContinuousMechanicalAngle::new(1.3),
-                RadPerSec::new(4.0),
-            ),
-        },
-        FixedEstimator {
-            output: AngularEstimate::new(
-                MechanicalAngle::new(0.6),
-                ContinuousMechanicalAngle::new(2.6),
-                RadPerSec::new(1.5),
-            ),
+        RuntimeAlgorithms {
+            modulator: fluxkit_math::Svpwm,
+            current_estimator: crate::PassThroughCurrentEstimator::new(),
+            rotor_estimator: FixedEstimator {
+                output: AngularEstimate::new(
+                    MechanicalAngle::new(0.3),
+                    ContinuousMechanicalAngle::new(1.3),
+                    RadPerSec::new(4.0),
+                ),
+            },
+            output_estimator: FixedEstimator {
+                output: AngularEstimate::new(
+                    MechanicalAngle::new(0.6),
+                    ContinuousMechanicalAngle::new(2.6),
+                    RadPerSec::new(1.5),
+                ),
+            },
         },
     )
     .expect("valid runtime config");
@@ -447,12 +432,7 @@ fn explicit_estimators_drive_controller_side_motion_estimates() {
 fn runtime_handle_updates_command_and_receives_status() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let system = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -460,10 +440,7 @@ fn runtime_handle_updates_command_and_receives_status() {
             current_loop_config(),
             0.000_05,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
+        default_algorithms(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
@@ -476,7 +453,7 @@ fn runtime_handle_updates_command_and_receives_status() {
     let status = handle.status();
 
     assert_eq!(status.controller.mode, ControlMode::Current);
-    assert!(status.last_fast_output.is_some());
+    assert!(status.last_control_output.is_some());
     assert_eq!(status.output_velocity, RadPerSec::ZERO);
     assert_eq!(
         handle.command(),
@@ -492,12 +469,7 @@ fn over_temperature_latches_runtime_fault_and_centers_output() {
     let mut hardware = hardware(CurrentSampleValidity::Valid);
     hardware.temp.winding_temperature_c = 95.0;
     let system = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor,
             inverter_params(),
@@ -505,10 +477,7 @@ fn over_temperature_latches_runtime_fault_and_centers_output() {
             current_loop_config(),
             0.000_05,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
+        default_algorithms(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
@@ -518,7 +487,7 @@ fn over_temperature_latches_runtime_fault_and_centers_output() {
 
     assert_eq!(
         status
-            .last_fast_output
+            .last_control_output
             .expect("faulted output should be published")
             .phase_duty,
         centered_phase_duty()
@@ -535,12 +504,7 @@ fn over_temperature_latches_runtime_fault_and_centers_output() {
 fn extracted_runtime_marks_handles_and_tickers_inactive() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let system = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -548,10 +512,7 @@ fn extracted_runtime_marks_handles_and_tickers_inactive() {
             current_loop_config(),
             0.000_05,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
+        default_algorithms(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = system.split().expect("runtime should split once");
@@ -570,12 +531,7 @@ fn extracted_runtime_marks_handles_and_tickers_inactive() {
 fn runtime_builder_rejects_non_positive_dt_seconds() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let error = MotorRuntime::new(
-        hardware.pwm,
-        hardware.current,
-        hardware.bus,
-        hardware.rotor,
-        hardware.output,
-        hardware.temp,
+        hardware,
         super::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -583,10 +539,7 @@ fn runtime_builder_rejects_non_positive_dt_seconds() {
             current_loop_config(),
             0.0,
         ),
-        fluxkit_math::Svpwm,
-        crate::PassThroughCurrentEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
-        fluxkit_math::PassThroughEstimator::new(),
+        default_algorithms(),
     )
     .expect_err("non-positive dt should be rejected");
 

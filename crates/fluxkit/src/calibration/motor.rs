@@ -19,9 +19,13 @@ use fluxkit_math::{
     units::{Henries, Ohms, RadPerSec, Webers},
 };
 
-use super::shared::{RoutineState, SharedStatus, read_status, write_status};
+use super::shared::{
+    RoutineState, SharedStatus, read_status, run_active_calibration_inner, write_status,
+};
 use crate::CapabilitySplitError;
-use crate::capability::{split_once, take_active_inner};
+use crate::capability::split_once;
+#[cfg(test)]
+use crate::capability::take_active_inner;
 use crate::system::MechanicalMotionEstimator;
 
 /// HAL and integration failures that can occur outside the pure calibration procedures.

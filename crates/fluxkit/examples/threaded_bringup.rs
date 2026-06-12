@@ -591,28 +591,35 @@ fn main_context_loop(plot_path: &str) {
 
                 println!("phase 2: actuator calibration");
                 let actuator_calibration = ActuatorCalibrationRuntime::from_parts(
-                    fluxkit::MotorRuntimeParts {
-                        pwm: parts.pwm,
-                        current: parts.current,
-                        bus: parts.bus,
-                        rotor: parts.rotor,
-                        output: SimOutput { shared },
-                        temp: parts.temp,
-                        motor: motor_params.unwrap(),
-                        inverter: inverter_params(),
-                        actuator: ActuatorParams::from_model_limits_and_compensation(
-                            fluxkit::ActuatorModel { gear_ratio: 1.0 },
-                            ActuatorLimits {
-                                max_output_velocity: Some(RadPerSec::new(10.0)),
-                                max_output_torque: None,
-                            },
-                            fluxkit::ActuatorCompensationConfig::disabled(),
+                    fluxkit::MotorRuntimeBundle {
+                        hardware: fluxkit::MotorHardware {
+                            pwm: parts.pwm,
+                            current: parts.current,
+                            bus: parts.bus,
+                            rotor: parts.rotor,
+                            output: SimOutput { shared },
+                            temp: parts.temp,
+                        },
+                        params: fluxkit::MotorRuntimeParams::new(
+                            motor_params.unwrap(),
+                            inverter_params(),
+                            ActuatorParams::from_model_limits_and_compensation(
+                                fluxkit::ActuatorModel { gear_ratio: 1.0 },
+                                ActuatorLimits {
+                                    max_output_velocity: Some(RadPerSec::new(10.0)),
+                                    max_output_torque: None,
+                                },
+                                fluxkit::ActuatorCompensationConfig::disabled(),
+                            ),
+                            current_loop_config(result),
+                            FAST_DT_SECONDS,
                         ),
-                        current_loop: current_loop_config(result),
-                        modulator: parts.modulator,
-                        current_estimator: PassThroughCurrentEstimator::new(),
-                        rotor_estimator: parts.rotor_estimator,
-                        output_estimator: PassThroughEstimator::new(),
+                        algorithms: fluxkit::RuntimeAlgorithms {
+                            modulator: parts.modulator,
+                            current_estimator: PassThroughCurrentEstimator::new(),
+                            rotor_estimator: parts.rotor_estimator,
+                            output_estimator: PassThroughEstimator::new(),
+                        },
                     },
                     ActuatorCalibrationRequest::all(),
                     ActuatorCalibrationLimits {
@@ -620,7 +627,6 @@ fn main_context_loop(plot_path: &str) {
                         max_torque_target: NewtonMeters::new(0.3),
                         timeout_seconds: 20.0,
                     },
-                    FAST_DT_SECONDS,
                 )
                 .unwrap();
                 let actuator_calibration = ACTUATOR_CALIBRATION_RUNTIME.init(actuator_calibration);
@@ -680,14 +686,9 @@ fn main_context_loop(plot_path: &str) {
                 );
 
                 println!("phase 3: runtime control");
-                let runtime_system = MotorRuntime::from_parts(
-                    fluxkit::MotorRuntimeParts {
-                        actuator: actuator_params,
-                        ..parts
-                    },
-                    FAST_DT_SECONDS,
-                )
-                .expect("valid runtime config");
+                let mut parts = parts;
+                parts.params.actuator = actuator_params;
+                let runtime_system = MotorRuntime::from_parts(parts).expect("valid runtime config");
                 let runtime_system = MOTOR_RUNTIME.init(runtime_system);
                 let (handle, ticker) = runtime_system.split().unwrap();
                 handle.set_command(MotorCommand::Velocity(RadPerSec::new(2.0)));

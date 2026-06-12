@@ -16,7 +16,7 @@ use crate::{
     config::CurrentLoopConfig,
     control::current::{CurrentEstimator, CurrentReference, PassThroughCurrentEstimator},
     error::Error,
-    io::{FastLoopInput, FastLoopOutput, RotorEstimate},
+    io::{ControlInput, ControlOutput, RotorEstimate},
     mode::ControlMode,
     params::{
         InverterParams, MotorParams, PHASE_RESISTANCE_REFERENCE_TEMP_C,
@@ -25,11 +25,11 @@ use crate::{
     state::MotorState,
     status::MotorStatus,
     util::{neutral_phase_duty, zero_current_dq, zero_voltage_dq},
-    validation::{validate_controller_config, validate_fast_loop_input},
+    validation::{validate_control_input, validate_controller_config},
 };
 
 mod command;
-mod fast_loop;
+mod control_loop;
 mod supervisory;
 mod support;
 #[cfg(test)]
@@ -46,8 +46,6 @@ mod tests;
 /// Public interaction is intentionally narrow:
 ///
 /// - `new(...)` builds the controller with explicit model and tuning data
-/// - `apply_command(...)` replaces the active command target
-/// - `set_armed(...)` transitions between disabled and running states
 /// - `step(...)` executes one deterministic control cycle
 /// - `status()` returns the latest compact snapshot
 ///
@@ -105,6 +103,7 @@ pub struct MotorController<M = Svpwm, CurrentEst = PassThroughCurrentEstimator> 
     config: CurrentLoopConfig,
     modulator: M,
     current_estimator: CurrentEst,
+    command: ControllerCommand,
     state: MotorState,
     mode: ControlMode,
     id_target: Amps,

@@ -8,6 +8,8 @@ use fluxkit_core::{
     PolePairsAndOffsetCalibrator,
 };
 
+use crate::capability::take_active_inner;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SharedStatus<S> {
     pub status: S,
@@ -27,6 +29,24 @@ pub(crate) fn write_status<S: Copy>(
         let mut shared = shared.borrow(cs).borrow_mut();
         update(&mut shared.status);
     });
+}
+
+pub(crate) fn run_active_calibration_inner<T, S, E>(
+    inner: &Mutex<RefCell<Option<T>>>,
+    shared: &Mutex<RefCell<SharedStatus<S>>>,
+    is_active: impl FnOnce() -> bool,
+    error_from_active: impl FnOnce(bool) -> E,
+    run: impl FnOnce(&mut T, &Mutex<RefCell<SharedStatus<S>>>) -> Result<(), E>,
+) -> Result<(), E>
+where
+    S: Copy,
+{
+    let mut active_inner = take_active_inner(inner, is_active, error_from_active)?;
+    let result = run(&mut active_inner, shared);
+    critical_section::with(|cs| {
+        *inner.borrow(cs).borrow_mut() = Some(active_inner);
+    });
+    result
 }
 
 pub(crate) trait RoutineState<R> {

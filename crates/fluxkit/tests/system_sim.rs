@@ -6,7 +6,8 @@ use std::{
 };
 
 use fluxkit::{
-    ContinuousMechanicalAngle, ElectricalDirection, MotorCommand, MotorRuntime, Svpwm,
+    ContinuousMechanicalAngle, ElectricalDirection, MotorCommand, MotorHardware, MotorRuntime,
+    RuntimeAlgorithms,
     units::{Amps, Henries, NewtonMeters, Ohms, RadPerSec, Volts, Webers},
 };
 use fluxkit_hal::centered_phase_duty;
@@ -49,12 +50,14 @@ fn motor_runtime_closes_current_loop_against_simulator() {
 
     let (pwm, current, bus, rotor, output, temp) = runtime_hardware(&shared);
     let runtime = MotorRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
+        MotorHardware {
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+        },
         fluxkit::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -62,10 +65,7 @@ fn motor_runtime_closes_current_loop_against_simulator() {
             current_loop_config(),
             FAST_DT_SECONDS,
         ),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        RuntimeAlgorithms::default_pass_through(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");
@@ -105,12 +105,14 @@ fn motor_runtime_supports_scoped_irq_thread_usage() {
 
     let (pwm, current, bus, rotor, output, temp) = runtime_hardware(&shared);
     let runtime = MotorRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
+        MotorHardware {
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+        },
         fluxkit::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -118,10 +120,7 @@ fn motor_runtime_supports_scoped_irq_thread_usage() {
             current_loop_config(),
             FAST_DT_SECONDS,
         ),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        RuntimeAlgorithms::default_pass_through(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");
@@ -178,12 +177,14 @@ fn motor_runtime_supports_mit_command() {
 
     let (pwm, current, bus, rotor, output, temp) = runtime_hardware(&shared);
     let runtime = MotorRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
+        MotorHardware {
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+        },
         fluxkit::MotorRuntimeParams::new(
             motor_params(),
             inverter_params(),
@@ -191,10 +192,7 @@ fn motor_runtime_supports_mit_command() {
             current_loop_config(),
             FAST_DT_SECONDS,
         ),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        RuntimeAlgorithms::default_pass_through(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");
@@ -232,12 +230,14 @@ fn motor_runtime_velocity_mode_tracks_positive_output_speed_with_negative_direct
     motor.electrical_direction = ElectricalDirection::Negative;
     let (pwm, current, bus, rotor, output, temp) = runtime_hardware(&shared);
     let runtime = MotorRuntime::new(
-        pwm,
-        current,
-        bus,
-        rotor,
-        output,
-        temp,
+        MotorHardware {
+            pwm,
+            current,
+            bus,
+            rotor,
+            output,
+            temp,
+        },
         fluxkit::MotorRuntimeParams::new(
             motor,
             inverter_params(),
@@ -245,10 +245,7 @@ fn motor_runtime_velocity_mode_tracks_positive_output_speed_with_negative_direct
             current_loop_config(),
             FAST_DT_SECONDS,
         ),
-        Svpwm,
-        fluxkit::PassThroughCurrentEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
-        fluxkit::PassThroughEstimator::new(),
+        RuntimeAlgorithms::default_pass_through(),
     )
     .expect("valid runtime config");
     let (handle, ticker) = runtime.split().expect("runtime should split once");

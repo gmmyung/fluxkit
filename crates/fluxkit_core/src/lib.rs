@@ -51,7 +51,7 @@ pub use control::current::{
     PassThroughCurrentEstimator,
 };
 pub use error::Error;
-pub use io::{FastLoopInput, FastLoopOutput, RotorEstimate};
+pub use io::{ControlInput, ControlOutput, RotorEstimate};
 pub use mode::ControlMode;
 pub use motor::MotorController;
 pub use params::{InverterParams, MotorLimits, MotorModel, MotorParams};

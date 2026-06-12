@@ -8,45 +8,22 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
-    /// Creates a new runtime with an explicit loop period, controller params,
-    /// modulator, and rotor/output estimators.
+    /// Creates a new runtime from grouped hardware, params, and algorithms.
     pub fn new(
-        pwm: PWM,
-        current: CURRENT,
-        bus: BUS,
-        rotor: ROTOR,
-        output: OUTPUT,
-        temp: TEMP,
+        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
         params: MotorRuntimeParams,
-        modulator: MOD,
-        current_estimator: CurrentEst,
-        rotor_estimator: RotorEst,
-        output_estimator: OutputEst,
+        algorithms: RuntimeAlgorithms<MOD, CurrentEst, RotorEst, OutputEst>,
     ) -> Result<Self, MotorRuntimeBuildError> {
-        Self::from_parts(
-            MotorRuntimeParts {
-                pwm,
-                current,
-                bus,
-                rotor,
-                output,
-                temp,
-                motor: params.motor,
-                inverter: params.inverter,
-                actuator: params.actuator,
-                current_loop: params.current_loop,
-                modulator,
-                current_estimator,
-                rotor_estimator,
-                output_estimator,
-            },
-            params.dt_seconds,
-        )
+        Self::from_parts(MotorRuntimeBundle {
+            hardware,
+            params,
+            algorithms,
+        })
     }
 
-    /// Creates a runtime from previously owned runtime parts and a loop period.
+    /// Creates a runtime from previously owned runtime parts.
     pub fn from_parts(
-        parts: MotorRuntimeParts<
+        parts: MotorRuntimeBundle<
             PWM,
             CURRENT,
             BUS,
@@ -58,38 +35,30 @@ where
             RotorEst,
             OutputEst,
         >,
-        dt_seconds: f32,
     ) -> Result<Self, MotorRuntimeBuildError> {
-        if !validate_dt_seconds(dt_seconds) {
+        if !validate_dt_seconds(parts.params.dt_seconds) {
             return Err(MotorRuntimeBuildError::InvalidDtSeconds);
         }
 
         let controller = MotorController::new(
-            parts.motor,
-            parts.inverter,
-            parts.actuator,
-            parts.current_loop,
-            parts.modulator,
-            parts.current_estimator,
+            parts.params.motor,
+            parts.params.inverter,
+            parts.params.actuator,
+            parts.params.current_loop,
+            parts.algorithms.modulator,
+            parts.algorithms.current_estimator,
         );
         Self::from_controller_parts(
-            Hardware {
-                pwm: parts.pwm,
-                current: parts.current,
-                bus: parts.bus,
-                rotor: parts.rotor,
-                output: parts.output,
-                temp: parts.temp,
-            },
+            parts.hardware,
             controller,
-            parts.rotor_estimator,
-            parts.output_estimator,
-            dt_seconds,
+            parts.algorithms.rotor_estimator,
+            parts.algorithms.output_estimator,
+            parts.params.dt_seconds,
         )
     }
 
     fn from_controller_parts(
-        hardware: Hardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
+        hardware: MotorHardware<PWM, CURRENT, BUS, ROTOR, OUTPUT, TEMP>,
         controller: MotorController<MOD, CurrentEst>,
         rotor_estimator: RotorEst,
         output_estimator: OutputEst,
@@ -98,12 +67,11 @@ where
         Ok(Self {
             shared: Mutex::new(RefCell::new(SharedRuntimeState {
                 command: MotorCommand::default(),
-                command_dirty: false,
                 status: MotorRuntimeStatus {
                     active: true,
                     controller: controller.status(),
                     output_velocity: RadPerSec::ZERO,
-                    last_fast_output: None,
+                    last_control_output: None,
                     armed: false,
                     fault_latched: false,
                 },
@@ -173,7 +141,7 @@ where
     pub fn try_into_parts(
         &self,
     ) -> Option<
-        MotorRuntimeParts<
+        MotorRuntimeBundle<
             PWM,
             CURRENT,
             BUS,
@@ -191,6 +159,7 @@ where
             controller,
             rotor_estimator,
             output_estimator,
+            dt_seconds,
             ..
         } = critical_section::with(|cs| self.inner.borrow(cs).borrow_mut().take())?;
         critical_section::with(|cs| {
@@ -207,21 +176,21 @@ where
             modulator,
             current_estimator,
         } = controller.into_parts();
-        Some(MotorRuntimeParts {
-            pwm: hardware.pwm,
-            current: hardware.current,
-            bus: hardware.bus,
-            rotor: hardware.rotor,
-            output: hardware.output,
-            temp: hardware.temp,
-            motor,
-            inverter,
-            actuator,
-            current_loop: config,
-            modulator,
-            current_estimator,
-            rotor_estimator,
-            output_estimator,
+        Some(MotorRuntimeBundle {
+            hardware,
+            params: MotorRuntimeParams {
+                motor,
+                inverter,
+                actuator,
+                current_loop: config,
+                dt_seconds,
+            },
+            algorithms: RuntimeAlgorithms {
+                modulator,
+                current_estimator,
+                rotor_estimator,
+                output_estimator,
+            },
         })
     }
 }
@@ -293,7 +262,6 @@ where
             let mut shared = self.shared.borrow(cs).borrow_mut();
             if shared.status.active {
                 shared.command = command;
-                shared.command_dirty = true;
             }
         });
     }

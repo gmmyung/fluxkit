@@ -80,10 +80,11 @@ where
             return Ok(Some(()));
         }
 
-        let mut routine = self
-            .active_routine
-            .take()
-            .expect("active routine must exist");
+        let Some(mut routine) = self.active_routine.take() else {
+            return Err(MotorCalibrationRuntimeError::Calibration(
+                CalibrationError::InvalidConfiguration,
+            ));
+        };
         let delta = self.tick_active_routine(&mut routine, self.dt_seconds)?;
         self.finish_routine_step(routine, delta)
     }
@@ -236,7 +237,7 @@ where
             let cfg = self.config.phase_inductance.to_core(
                 limits,
                 self.phase_resistance_ohm_ref
-                    .expect("phase resistance resolved before inductance"),
+                    .ok_or(CalibrationError::InvalidConfiguration)?,
             );
             return PhaseInductanceCalibrator::new(cfg)
                 .map(MotorCalibrationRoutine::PhaseInductance)
@@ -247,15 +248,15 @@ where
             let cfg = self.config.flux_linkage.to_core(
                 limits,
                 self.phase_resistance_ohm_ref
-                    .expect("phase resistance resolved before flux linkage"),
+                    .ok_or(CalibrationError::InvalidConfiguration)?,
                 self.phase_inductance_h
-                    .expect("phase inductance resolved before flux linkage"),
+                    .ok_or(CalibrationError::InvalidConfiguration)?,
                 self.pole_pairs
-                    .expect("electrical mapping resolved before flux linkage"),
+                    .ok_or(CalibrationError::InvalidConfiguration)?,
                 self.electrical_direction
-                    .expect("electrical mapping resolved before flux linkage"),
+                    .ok_or(CalibrationError::InvalidConfiguration)?,
                 self.electrical_angle_offset
-                    .expect("electrical mapping resolved before flux linkage"),
+                    .ok_or(CalibrationError::InvalidConfiguration)?,
             );
             return FluxLinkageCalibrator::new(cfg)
                 .map(MotorCalibrationRoutine::FluxLinkage)
@@ -370,11 +371,11 @@ where
         >,
     > {
         self.tick_alpha_beta_routine(calibrator, dt_seconds, false, |calibrator, rotor, _, dt| {
-            calibrator.tick(PolePairsAndOffsetCalibrationInput {
+            Ok(calibrator.tick(PolePairsAndOffsetCalibrationInput {
                 mechanical_angle: rotor.wrapped(),
                 mechanical_velocity: rotor.velocity(),
                 dt_seconds: dt,
-            })
+            }))
         })
     }
 
@@ -401,12 +402,15 @@ where
             dt_seconds,
             true,
             |calibrator, rotor, current, dt| {
-                calibrator.tick(PhaseResistanceCalibrationInput {
-                    phase_currents: current.expect("phase current required").currents,
+                let current = current.ok_or(MotorCalibrationRuntimeError::Calibration(
+                    CalibrationError::InvalidConfiguration,
+                ))?;
+                Ok(calibrator.tick(PhaseResistanceCalibrationInput {
+                    phase_currents: current.currents,
                     mechanical_velocity: rotor.velocity(),
                     winding_temperature_c,
                     dt_seconds: dt,
-                })
+                }))
             },
         )
     }
@@ -425,20 +429,29 @@ where
             TEMP::Error,
         >,
     > {
-        let pole_pairs =
-            self.pole_pairs
-                .expect("electrical mapping resolved before inductance") as u32;
-        let electrical_direction = self
-            .electrical_direction
-            .expect("electrical mapping resolved before inductance");
-        let electrical_angle_offset = self
-            .electrical_angle_offset
-            .expect("electrical mapping resolved before inductance");
+        let pole_pairs = self
+            .pole_pairs
+            .ok_or(MotorCalibrationRuntimeError::Calibration(
+                CalibrationError::InvalidConfiguration,
+            ))? as u32;
+        let electrical_direction =
+            self.electrical_direction
+                .ok_or(MotorCalibrationRuntimeError::Calibration(
+                    CalibrationError::InvalidConfiguration,
+                ))?;
+        let electrical_angle_offset =
+            self.electrical_angle_offset
+                .ok_or(MotorCalibrationRuntimeError::Calibration(
+                    CalibrationError::InvalidConfiguration,
+                ))?;
         self.tick_alpha_beta_routine(
             calibrator,
             dt_seconds,
             true,
             |calibrator, rotor, current, dt| {
+                let current = current.ok_or(MotorCalibrationRuntimeError::Calibration(
+                    CalibrationError::InvalidConfiguration,
+                ))?;
                 let electrical_angle = fluxkit_math::ElectricalAngle::new(
                     fluxkit_math::angle::mechanical_to_electrical_with_direction(
                         rotor.unwrapped(),
@@ -448,12 +461,12 @@ where
                     .get()
                         + electrical_angle_offset.get(),
                 );
-                calibrator.tick(PhaseInductanceCalibrationInput {
-                    phase_currents: current.expect("phase current required").currents,
+                Ok(calibrator.tick(PhaseInductanceCalibrationInput {
+                    phase_currents: current.currents,
                     electrical_angle,
                     mechanical_velocity: rotor.velocity(),
                     dt_seconds: dt,
-                })
+                }))
             },
         )
     }
@@ -477,12 +490,15 @@ where
             dt_seconds,
             true,
             |calibrator, rotor, current, dt| {
-                calibrator.tick(FluxLinkageCalibrationInput {
-                    phase_currents: current.expect("phase current required").currents,
+                let current = current.ok_or(MotorCalibrationRuntimeError::Calibration(
+                    CalibrationError::InvalidConfiguration,
+                ))?;
+                Ok(calibrator.tick(FluxLinkageCalibrationInput {
+                    phase_currents: current.currents,
                     mechanical_angle: rotor.unwrapped(),
                     mechanical_velocity: rotor.velocity(),
                     dt_seconds: dt,
-                })
+                }))
             },
         )
     }
@@ -510,7 +526,16 @@ where
             MechanicalMotionEstimate,
             Option<PhaseCurrentSample>,
             f32,
-        ) -> AlphaBeta<Volts>,
+        ) -> Result<
+            AlphaBeta<Volts>,
+            MotorCalibrationRuntimeError<
+                PWM::Error,
+                CURRENT::Error,
+                BUS::Error,
+                ROTOR::Error,
+                TEMP::Error,
+            >,
+        >,
     {
         if let Some(result) = self.finish_routine_state(calibrator)? {
             return Ok(Some(result));
@@ -537,7 +562,7 @@ where
             None
         };
 
-        let command = build_command(calibrator, rotor_motion, current, dt_seconds);
+        let command = build_command(calibrator, rotor_motion, current, dt_seconds)?;
         self.apply_alpha_beta_command(command, bus_voltage)?;
         self.finish_routine_state(calibrator)
     }
@@ -643,8 +668,9 @@ where
             TEMP::Error,
         >,
     > {
-        let mut inner = take_active_inner(
+        run_active_calibration_inner(
             self.inner,
+            self.shared,
             || read_status(self.shared).active,
             |active| {
                 if active {
@@ -653,11 +679,7 @@ where
                     MotorCalibrationRuntimeError::Inactive
                 }
             },
-        )?;
-        let result = inner.tick(self.shared);
-        critical_section::with(|cs| {
-            *self.inner.borrow(cs).borrow_mut() = Some(inner);
-        });
-        result
+            |inner, shared| inner.tick(shared),
+        )
     }
 }

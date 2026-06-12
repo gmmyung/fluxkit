@@ -1,9 +1,9 @@
 use std::{env, error::Error, fs};
 
 use fluxkit_core::{
-    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams,
-    CurrentLoopConfig, FastLoopInput, InverterParams, MotorController, MotorLimits, MotorParams,
-    RotorEstimate, motor::ControllerCommand,
+    ActuatorCompensationConfig, ActuatorEstimate, ActuatorLimits, ActuatorParams, ControlInput,
+    CurrentLoopConfig, InverterParams, MotorController, MotorLimits, MotorParams, RotorEstimate,
+    motor::ControllerCommand,
 };
 use fluxkit_math::{
     ContinuousMechanicalAngle,
@@ -48,14 +48,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut plant = PmsmModel::new_zeroed(plant_params())?;
     let mut samples = Vec::with_capacity(20_000);
 
-    controller.set_armed(true);
-
     for step in 0..20_000 {
         let iq_target = if step < 1_000 { 0.0 } else { 3.0 };
-        controller.apply_command(ControllerCommand::Current(fluxkit_math::Dq::new(
-            Amps::ZERO,
-            Amps::new(iq_target),
-        )));
+        let command =
+            ControllerCommand::Current(fluxkit_math::Dq::new(Amps::ZERO, Amps::new(iq_target)));
 
         let state = *plant.state();
         let mechanical_angle = state.mechanical_angle.wrapped();
@@ -69,23 +65,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .map(Amps::new);
 
-        let output = controller.step(
-            FastLoopInput {
-                phase_currents,
-                bus_voltage,
-                winding_temperature_c: state.winding_temperature_c,
-                rotor: RotorEstimate {
-                    mechanical_angle: mechanical_angle.into(),
-                    mechanical_velocity: state.mechanical_velocity,
-                },
-                actuator: ActuatorEstimate {
-                    output_angle: output_angle.into(),
-                    output_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
-                },
-                dt_seconds: FAST_DT_SECONDS,
+        let output = controller.step(ControlInput {
+            command,
+            armed: true,
+            clear_fault_requested: false,
+            phase_currents,
+            bus_voltage,
+            winding_temperature_c: state.winding_temperature_c,
+            rotor: RotorEstimate {
+                mechanical_angle: mechanical_angle.into(),
+                mechanical_velocity: state.mechanical_velocity,
             },
-            FAST_DT_SECONDS,
-        );
+            actuator: ActuatorEstimate {
+                output_angle: output_angle.into(),
+                output_velocity: RadPerSec::new(state.mechanical_velocity.get() / GEAR_RATIO),
+            },
+            dt_seconds: FAST_DT_SECONDS,
+        });
 
         let snapshot = plant.step_phase_duty(
             output.phase_duty,

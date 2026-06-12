@@ -1,6 +1,6 @@
 [package]
 name = "fluxkit"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Multi-crate no_std motor-control library workspace entry point"
@@ -16,13 +16,13 @@ serde = ["dep:serde", "fluxkit_core/serde", "fluxkit_hal/serde", "fluxkit_math/s
 [dependencies]
 critical-section = "1"
 defmt = { version = "0.3", optional = true }
-fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core", version = "0.1.1" }
-fluxkit_hal = { path = "../fluxkit_hal", package = "fluxkit-hal", version = "0.1.1" }
-fluxkit_math = { path = "../fluxkit_math", version = "0.1.1" }
+fluxkit_core = { path = "../fluxkit_core", package = "fluxkit-core", version = "0.2.0" }
+fluxkit_hal = { path = "../fluxkit_hal", package = "fluxkit-hal", version = "0.2.0" }
+fluxkit_math = { path = "../fluxkit_math", version = "0.2.0" }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 
 [dev-dependencies]
 critical-section = { version = "1", features = ["std"] }
-fluxkit-pmsm-sim = { path = "../fluxkit_pmsm_sim", version = "0.1.1" }
+fluxkit-pmsm-sim = { path = "../fluxkit_pmsm_sim", version = "0.2.0" }
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 static_cell = "2"

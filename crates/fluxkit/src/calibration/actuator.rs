@@ -8,8 +8,7 @@ use fluxkit_core::{
     ActuatorCalibration as PartialActuatorCalibration, ActuatorCalibrationRoutine,
     ActuatorCompensationConfig, ActuatorFrictionCalibrationInput, ActuatorFrictionCalibrator,
     ActuatorGearRatioCalibrationInput, ActuatorGearRatioCalibrator, ActuatorLimits, ActuatorModel,
-    ActuatorParams, CalibrationError, CurrentEstimator, CurrentLoopConfig, InverterParams,
-    MotorParams, MotorStatus,
+    ActuatorParams, CalibrationError, CurrentEstimator, MotorStatus,
 };
 use fluxkit_hal::{
     BusVoltageSensor, CurrentSampler, OutputSensor, PhasePwm, RotorSensor, TemperatureSensor,
@@ -19,11 +18,13 @@ use fluxkit_math::{
     units::{NewtonMeters, RadPerSec},
 };
 
-use super::shared::{RoutineState, SharedStatus, read_status, write_status};
+use super::shared::{
+    RoutineState, SharedStatus, read_status, run_active_calibration_inner, write_status,
+};
 use crate::{
     CapabilitySplitError, MotorRuntime, MotorRuntimeError,
-    capability::{split_once, take_active_inner},
-    system::{MechanicalMotionEstimator, MotorRuntimeParts},
+    capability::split_once,
+    system::{MechanicalMotionEstimator, MotorRuntimeBundle},
 };
 
 /// HAL and integration failures that can occur while running actuator-side

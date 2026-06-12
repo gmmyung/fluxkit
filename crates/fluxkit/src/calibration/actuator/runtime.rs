@@ -25,11 +25,10 @@ where
     RotorEst: MechanicalMotionEstimator,
     OutputEst: MechanicalMotionEstimator,
 {
-    /// Creates a new actuator-calibration runtime without requiring predefined
-    /// actuator parameters.
+    /// Creates a new actuator-calibration runtime from an owned runtime bundle.
     ///
-    /// Internally this builds a `MotorController` with a neutral actuator
-    /// placeholder:
+    /// The bundle's actuator parameters are replaced with a neutral actuator
+    /// placeholder before calibration starts:
     ///
     /// - `gear_ratio = 1.0`
     /// - output-axis velocity limit copied from calibration limits
@@ -42,49 +41,7 @@ where
     /// then let subsequent completed actuator-calibration deltas patch the live
     /// controller parameters automatically.
     pub fn new(
-        pwm: PWM,
-        current: CURRENT,
-        bus: BUS,
-        rotor: ROTOR,
-        output: OUTPUT,
-        temp: TEMP,
-        motor: MotorParams,
-        inverter: InverterParams,
-        config: CurrentLoopConfig,
-        modulator: MOD,
-        current_estimator: CurrentEst,
-        rotor_estimator: RotorEst,
-        output_estimator: OutputEst,
-        request: ActuatorCalibrationRequest,
-        limits: ActuatorCalibrationLimits,
-        dt_seconds: f32,
-    ) -> Result<Self, CalibrationError> {
-        Self::from_parts(
-            MotorRuntimeParts {
-                pwm,
-                current,
-                bus,
-                rotor,
-                output,
-                temp,
-                motor,
-                inverter,
-                actuator: placeholder_actuator_params(limits),
-                current_loop: config,
-                modulator,
-                current_estimator,
-                rotor_estimator,
-                output_estimator,
-            },
-            request,
-            limits,
-            dt_seconds,
-        )
-    }
-
-    /// Creates a new actuator-calibration runtime from owned runtime parts.
-    pub fn from_parts(
-        parts: MotorRuntimeParts<
+        mut bundle: MotorRuntimeBundle<
             PWM,
             CURRENT,
             BUS,
@@ -98,14 +55,35 @@ where
         >,
         request: ActuatorCalibrationRequest,
         limits: ActuatorCalibrationLimits,
-        dt_seconds: f32,
     ) -> Result<Self, CalibrationError> {
+        bundle.params.actuator = placeholder_actuator_params(limits);
+        Self::from_parts(bundle, request, limits)
+    }
+
+    /// Creates a new actuator-calibration runtime from owned runtime parts.
+    pub fn from_parts(
+        parts: MotorRuntimeBundle<
+            PWM,
+            CURRENT,
+            BUS,
+            ROTOR,
+            OUTPUT,
+            TEMP,
+            MOD,
+            CurrentEst,
+            RotorEst,
+            OutputEst,
+        >,
+        request: ActuatorCalibrationRequest,
+        limits: ActuatorCalibrationLimits,
+    ) -> Result<Self, CalibrationError> {
+        let dt_seconds = parts.params.dt_seconds;
         if !validate_limits(limits) || !validate_dt_seconds(dt_seconds) {
             return Err(CalibrationError::InvalidConfiguration);
         }
 
-        let motor_system = MotorRuntime::from_parts(parts, dt_seconds)
-            .map_err(|_| CalibrationError::InvalidConfiguration)?;
+        let motor_system =
+            MotorRuntime::from_parts(parts).map_err(|_| CalibrationError::InvalidConfiguration)?;
         let current_phase = next_phase_for_request(request);
         let resolved_result = resolved_result_for_request(request);
 
@@ -183,7 +161,7 @@ where
     pub fn try_into_parts(
         &self,
     ) -> Option<
-        MotorRuntimeParts<
+        MotorRuntimeBundle<
             PWM,
             CURRENT,
             BUS,

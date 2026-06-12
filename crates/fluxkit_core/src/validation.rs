@@ -6,7 +6,7 @@ use crate::{
     actuator::ActuatorParams,
     config::CurrentLoopConfig,
     error::Error,
-    io::FastLoopInput,
+    io::ControlInput,
     params::{InverterParams, MotorParams},
 };
 
@@ -105,9 +105,9 @@ pub fn validate_controller_config(
         && finite_non_negative(config.max_current_ref_derivative_amps_per_sec)
 }
 
-/// Validates one fast-loop input frame.
-pub fn validate_fast_loop_input(
-    input: &FastLoopInput,
+/// Validates one control input frame.
+pub fn validate_control_input(
+    input: &ControlInput,
     inverter: &InverterParams,
 ) -> Result<(), Error> {
     if !abc_is_finite(input.phase_currents.map(|x| x.get())) {
