@@ -271,7 +271,7 @@ fn default_algorithms() -> RuntimeAlgorithms<
 }
 
 #[test]
-fn fast_tick_reads_hal_and_applies_phase_duty() {
+fn run_control_cycle_reads_hal_and_applies_phase_duty() {
     let hardware = hardware(CurrentSampleValidity::Valid);
     let system = MotorRuntime::new(
         hardware,

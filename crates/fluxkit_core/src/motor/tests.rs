@@ -129,7 +129,7 @@ fn zero_input_zero_target_returns_neutral_output() {
     controller.set_mode(ControlMode::Current);
     controller.enable();
 
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     assert_eq!(output.phase_duty.a.get(), 0.5);
     assert_eq!(output.phase_duty.b.get(), 0.5);
@@ -156,7 +156,7 @@ fn invalid_bus_voltage_latches_fault_and_centers_output() {
 
     let mut input = test_input();
     input.bus_voltage = Volts::new(0.0);
-    let output = controller.fast_tick(input);
+    let output = controller.run_control_cycle(input);
 
     assert_eq!(output.phase_duty.a.get(), 0.5);
     assert_eq!(controller.status().state, MotorState::Faulted);
@@ -181,7 +181,7 @@ fn invalid_angle_latches_fault() {
 
     let mut input = test_input();
     input.rotor.mechanical_angle = ContinuousMechanicalAngle::new(f32::NAN);
-    let _output = controller.fast_tick(input);
+    let _output = controller.run_control_cycle(input);
 
     assert_eq!(controller.status().state, MotorState::Faulted);
     assert_eq!(
@@ -206,7 +206,7 @@ fn over_temperature_latches_fault_and_centers_output() {
 
     let mut input = test_input();
     input.winding_temperature_c = 95.0;
-    let output = controller.fast_tick(input);
+    let output = controller.run_control_cycle(input);
 
     assert_eq!(output.phase_duty.a.get(), 0.5);
     assert_eq!(output.phase_duty.b.get(), 0.5);
@@ -232,7 +232,7 @@ fn positive_iq_target_produces_positive_vq() {
     controller.set_iq_target(Amps::new(3.0));
     controller.enable();
 
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     assert!(output.commanded_vdq.q.get() > 0.0);
     assert_eq!(controller.status().active_error, None);
@@ -261,7 +261,7 @@ fn current_estimator_output_drives_current_loop_error() {
     controller.set_iq_target(Amps::new(3.0));
     controller.enable();
 
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     assert_eq!(output.measured_idq, Dq::new(Amps::ZERO, Amps::ZERO));
     assert!((output.commanded_vdq.q.get() - 1.0).abs() < 1.0e-6);
@@ -286,7 +286,7 @@ fn saturation_is_reported_for_aggressive_current_request() {
     controller.set_iq_target(Amps::new(10.0));
     controller.enable();
 
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     assert!(output.saturated);
     assert!(output.phase_duty.a.get() >= 0.0 && output.phase_duty.a.get() <= 1.0);
@@ -312,7 +312,7 @@ fn duty_stays_within_configured_duty_window() {
     controller.set_iq_target(Amps::new(10.0));
     controller.enable();
 
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     for duty in [
         output.phase_duty.a,
@@ -340,12 +340,12 @@ fn state_transitions_are_explicit() {
     assert_eq!(controller.status().state, MotorState::Ready);
 
     controller.set_mode(ControlMode::Current);
-    controller.fast_tick(test_input());
+    controller.run_control_cycle(test_input());
     assert_eq!(controller.status().state, MotorState::Running);
 
     let mut bad_input = test_input();
     bad_input.bus_voltage = Volts::new(100.0);
-    controller.fast_tick(bad_input);
+    controller.run_control_cycle(bad_input);
     assert_eq!(controller.status().state, MotorState::Faulted);
 
     controller.clear_error();
@@ -369,7 +369,7 @@ fn controller_can_use_alternate_modulator() {
     controller.set_iq_target(Amps::new(3.0));
     controller.enable();
 
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     assert_eq!(controller.status().active_error, None);
     for duty in [
@@ -564,7 +564,7 @@ fn velocity_mode_generates_positive_q_current_target() {
     controller.set_mode(ControlMode::Velocity);
     controller.set_velocity_target(RadPerSec::new(20.0));
     controller.enable();
-    controller.fast_tick(test_input());
+    controller.run_control_cycle(test_input());
 
     controller.update_supervisory_references(0.001);
 
@@ -590,7 +590,7 @@ fn mit_mode_generates_positive_q_current_target() {
         NewtonMeters::ZERO,
     );
     controller.enable();
-    controller.fast_tick(test_input());
+    controller.run_control_cycle(test_input());
 
     controller.update_supervisory_references(0.01);
 
@@ -611,7 +611,7 @@ fn position_mode_runs_position_and_velocity_loops_in_supervisory_update() {
     controller.set_mode(ControlMode::Position);
     controller.set_position_target(ContinuousMechanicalAngle::new(1.0));
     controller.enable();
-    controller.fast_tick(test_input());
+    controller.run_control_cycle(test_input());
 
     controller.update_supervisory_references(0.01);
 
@@ -634,11 +634,11 @@ fn wrapped_encoder_angle_is_unwrapped_for_multi_turn_positioning() {
 
     let mut input = test_input();
     input.actuator.output_angle = ContinuousMechanicalAngle::new(6.0);
-    controller.fast_tick(input);
+    controller.run_control_cycle(input);
 
     let mut wrapped_input = test_input();
     wrapped_input.actuator.output_angle = ContinuousMechanicalAngle::new(0.2);
-    controller.fast_tick(wrapped_input);
+    controller.run_control_cycle(wrapped_input);
 
     assert!(
         controller
@@ -663,7 +663,7 @@ fn open_loop_voltage_mode_bypasses_current_pi() {
     controller.set_open_loop_voltage_target(Dq::new(Volts::new(0.0), Volts::new(3.0)));
     controller.enable();
 
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     assert!(output.commanded_vdq.q.get() > 0.0);
     assert!(
@@ -688,7 +688,7 @@ fn current_feedforward_adds_back_emf_compensation() {
 
     let mut input = test_input();
     input.rotor.mechanical_velocity = RadPerSec::new(25.0);
-    let output = controller.fast_tick(input);
+    let output = controller.run_control_cycle(input);
 
     assert!(output.commanded_vdq.q.get() > 0.0);
 }
@@ -712,12 +712,12 @@ fn current_feedforward_adds_reference_derivative_term_on_step() {
     controller.set_mode(ControlMode::Current);
     controller.enable();
 
-    let baseline = controller.fast_tick(test_input());
+    let baseline = controller.run_control_cycle(test_input());
     assert_eq!(baseline.commanded_vdq.q, Volts::ZERO);
 
     controller.set_iq_target(Amps::new(3.0));
-    let step_response = controller.fast_tick(test_input());
-    let steady_response = controller.fast_tick(test_input());
+    let step_response = controller.run_control_cycle(test_input());
+    let steady_response = controller.run_control_cycle(test_input());
 
     assert!(step_response.commanded_vdq.q.get() > steady_response.commanded_vdq.q.get());
 }
@@ -742,10 +742,10 @@ fn current_reference_derivative_feedforward_is_clamped() {
     );
     controller.set_mode(ControlMode::Current);
     controller.enable();
-    controller.fast_tick(test_input());
+    controller.run_control_cycle(test_input());
 
     controller.set_iq_target(Amps::new(10.0));
-    let output = controller.fast_tick(test_input());
+    let output = controller.run_control_cycle(test_input());
 
     let expected_q = motor.phase_resistance_ohm_ref.get() * 10.0
         + motor.q_inductance_h.get() * config.max_current_ref_derivative_amps_per_sec;
@@ -781,8 +781,8 @@ fn modulation_limit_tracks_selected_modulator() {
     svpwm_controller.set_open_loop_voltage_target(Dq::new(Volts::ZERO, Volts::new(13.0)));
     svpwm_controller.enable();
 
-    let sine_output = sine_controller.fast_tick(test_input());
-    let svpwm_output = svpwm_controller.fast_tick(test_input());
+    let sine_output = sine_controller.run_control_cycle(test_input());
+    let svpwm_output = svpwm_controller.run_control_cycle(test_input());
 
     assert!(sine_output.commanded_vdq.q.get() <= 12.0);
     assert!(svpwm_output.commanded_vdq.q.get() > sine_output.commanded_vdq.q.get());
@@ -806,7 +806,7 @@ fn feedforward_can_be_disabled() {
 
     let mut input = test_input();
     input.rotor.mechanical_velocity = RadPerSec::new(25.0);
-    let output = controller.fast_tick(input);
+    let output = controller.run_control_cycle(input);
 
     assert_eq!(output.commanded_vdq.q, Volts::ZERO);
 }

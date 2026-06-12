@@ -69,9 +69,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let command = ControllerCommand::Torque(NewtonMeters::new(output_torque_target));
 
         let uncompensated_output =
-            uncompensated.step(fast_loop_input(&uncompensated_plant, bus_voltage, command));
+            uncompensated.step(control_input(&uncompensated_plant, bus_voltage, command));
         let compensated_output =
-            compensated.step(fast_loop_input(&compensated_plant, bus_voltage, command));
+            compensated.step(control_input(&compensated_plant, bus_voltage, command));
 
         uncompensated_plant.step_phase_duty(
             uncompensated_output.phase_duty,
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn fast_loop_input(
+fn control_input(
     plant: &PmsmModel,
     bus_voltage: Volts,
     command: ControllerCommand,

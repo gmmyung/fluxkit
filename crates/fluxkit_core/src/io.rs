@@ -48,7 +48,7 @@ pub struct ControlInput {
     pub rotor: RotorEstimate,
     /// Output-axis estimate used by actuator-side supervisory loops.
     pub actuator: ActuatorEstimate,
-    /// Time since the previous fast-loop invocation.
+    /// Time since the previous control-loop invocation.
     pub dt_seconds: f32,
 }
 

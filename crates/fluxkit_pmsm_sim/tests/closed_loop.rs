@@ -131,7 +131,7 @@ fn actuator_params_with_friction_compensation() -> ActuatorParams {
     }
 }
 
-fn fast_loop_input(
+fn control_input(
     plant: &PmsmModel,
     bus_voltage: Volts,
     command: ControllerCommand,
@@ -180,7 +180,7 @@ fn run_fast_step(
     load_torque: NewtonMeters,
     command: ControllerCommand,
 ) {
-    let output = controller.step(fast_loop_input(plant, bus_voltage, command));
+    let output = controller.step(control_input(plant, bus_voltage, command));
     assert_eq!(controller.status().active_error, None);
     plant
         .step_phase_duty(output.phase_duty, bus_voltage, load_torque, FAST_DT_SECONDS)
@@ -258,7 +258,7 @@ fn position_mode_tracks_output_axis_feedback() {
         ControllerCommand::Position(ContinuousMechanicalAngle::new(POSITION_TARGET_RADIANS));
 
     for _step in 0..200_000 {
-        let output = controller.step(fast_loop_input(&plant, bus_voltage, command));
+        let output = controller.step(control_input(&plant, bus_voltage, command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -319,9 +319,9 @@ fn friction_compensation_improves_velocity_command_with_output_inertia() {
         let command = ControllerCommand::Velocity(RadPerSec::new(target_velocity));
 
         let uncompensated_output =
-            uncompensated.step(fast_loop_input(&uncompensated_plant, bus_voltage, command));
+            uncompensated.step(control_input(&uncompensated_plant, bus_voltage, command));
         let compensated_output =
-            compensated.step(fast_loop_input(&compensated_plant, bus_voltage, command));
+            compensated.step(control_input(&compensated_plant, bus_voltage, command));
 
         assert_eq!(uncompensated.status().active_error, None);
         assert_eq!(compensated.status().active_error, None);

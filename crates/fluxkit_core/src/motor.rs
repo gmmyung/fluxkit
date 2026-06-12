@@ -25,11 +25,11 @@ use crate::{
     state::MotorState,
     status::MotorStatus,
     util::{neutral_phase_duty, zero_current_dq, zero_voltage_dq},
-    validation::{validate_controller_config, validate_fast_loop_input},
+    validation::{validate_control_input, validate_controller_config},
 };
 
 mod command;
-mod fast_loop;
+mod control_loop;
 mod supervisory;
 mod support;
 #[cfg(test)]

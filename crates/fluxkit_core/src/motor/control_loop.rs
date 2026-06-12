@@ -6,7 +6,7 @@ where
     M: Modulator,
     CurrentEst: CurrentEstimator,
 {
-    pub(super) fn fast_tick(&mut self, input: ControlInput) -> ControlOutput {
+    pub(super) fn run_control_cycle(&mut self, input: ControlInput) -> ControlOutput {
         self.status.last_bus_voltage = input.bus_voltage;
         self.status.last_winding_temperature_c = input.winding_temperature_c;
         self.status.last_rotor_mechanical_angle = input.rotor.mechanical_angle;
@@ -24,7 +24,7 @@ where
             return self.neutral_output(error);
         }
 
-        if let Err(error) = validate_fast_loop_input(&input, &self.inverter) {
+        if let Err(error) = validate_control_input(&input, &self.inverter) {
             self.latch_error(error);
             self.refresh_status();
             return self.neutral_output(error);
@@ -112,7 +112,7 @@ where
             self.apply_command(input.command);
         }
         let dt_seconds = input.dt_seconds;
-        let output = self.fast_tick(input);
+        let output = self.run_control_cycle(input);
         self.update_supervisory_references(dt_seconds);
         output
     }

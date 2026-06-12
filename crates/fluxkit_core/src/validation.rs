@@ -106,7 +106,7 @@ pub fn validate_controller_config(
 }
 
 /// Validates one control input frame.
-pub fn validate_fast_loop_input(
+pub fn validate_control_input(
     input: &ControlInput,
     inverter: &InverterParams,
 ) -> Result<(), Error> {

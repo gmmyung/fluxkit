@@ -167,7 +167,7 @@ fn plant_params_with_breakaway() -> PmsmParams {
     }
 }
 
-fn fast_loop_input(
+fn control_input(
     plant: &PmsmModel,
     bus_voltage: Volts,
     command: ControllerCommand,
@@ -490,7 +490,7 @@ fn steady_velocity_sweep_recovers_actuator_friction() {
         let controller_command = ControllerCommand::Velocity(command.velocity_target);
 
         let _ = step;
-        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
+        let output = controller.step(control_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -557,7 +557,7 @@ fn steady_velocity_travel_recovers_actuator_gear_ratio() {
         });
         let controller_command = ControllerCommand::Velocity(command.velocity_target);
 
-        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
+        let output = controller.step(control_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -618,7 +618,7 @@ fn torque_ramp_recovers_actuator_breakaway() {
         });
         let controller_command = ControllerCommand::Torque(command.torque_target);
 
-        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
+        let output = controller.step(control_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
@@ -676,7 +676,7 @@ fn low_speed_sweep_recovers_zero_velocity_blend_band() {
         });
         let controller_command = ControllerCommand::Torque(command.torque_target);
 
-        let output = controller.step(fast_loop_input(&plant, bus_voltage, controller_command));
+        let output = controller.step(control_input(&plant, bus_voltage, controller_command));
         assert_eq!(controller.status().active_error, None);
         plant
             .step_phase_duty(
