@@ -15,14 +15,16 @@ In the full workspace layering:
 
 Most application code should start at `fluxkit`, not at `fluxkit_core`.
 
-## Reference Plot
+## Reference Plots
 
 Representative closed-loop current response of the controller against the
 ideal PMSM plant model used in integration tests.
 
-![Closed-loop current response](docs/plots/closed_loop_current.svg)
+- [Closed-loop current response](docs/plots/closed_loop_current.svg)
 
 Flux weakening comparison showing high-speed velocity control with and without
 negative `d`-axis current injection.
 
-![Flux weakening comparison](docs/plots/flux_weakening_comparison.svg)
+- [Flux weakening comparison](docs/plots/flux_weakening_comparison.svg)
+
+The crate docs embed these SVGs directly so they remain visible in rustdoc.

@@ -3,6 +3,10 @@
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs, missing_debug_implementations)]
 #![doc = include_str!("../README.md")]
+#![doc = "\n## Embedded Reference Plots\n\n### Closed-loop current response\n\n"]
+#![doc = include_str!("../docs/plots/closed_loop_current.svg")]
+#![doc = "\n\n### Flux weakening comparison\n\n"]
+#![doc = include_str!("../docs/plots/flux_weakening_comparison.svg")]
 
 #[macro_use]
 mod logging;
