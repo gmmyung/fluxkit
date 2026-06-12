@@ -228,6 +228,7 @@ cargo run -p fluxkit-pmsm-sim --example closed_loop_current
 cargo run -p fluxkit-pmsm-sim --example closed_loop_position
 cargo run -p fluxkit-pmsm-sim --example closed_loop_torque_command
 cargo run -p fluxkit-pmsm-sim --example closed_loop_velocity_command
+cargo run -p fluxkit-pmsm-sim --example flux_weakening_comparison
 ```
 
 These generate SVG plots in `target/plots/`.
@@ -241,6 +242,8 @@ Reference outputs:
 ![Torque command response](docs/plots/closed_loop_torque_command.svg)
 
 ![Velocity command response](docs/plots/closed_loop_velocity_command.svg)
+
+![Flux weakening comparison](docs/plots/flux_weakening_comparison.svg)
 
 ### Modulation Plot
 
