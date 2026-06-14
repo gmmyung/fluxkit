@@ -66,10 +66,8 @@ pub struct CurrentLoopConfig {
 pub struct FluxWeakeningConfig {
     /// Enables flux weakening when `true`.
     pub enabled: bool,
-    /// Requested voltage-vector utilization as a fraction of the active voltage limit.
+    /// Requested voltage utilization as a fraction of the active voltage limit.
     pub voltage_utilization_target: f32,
-    /// Integral bandwidth used to adapt negative `d`-axis current.
-    pub bandwidth: RadPerSec,
     /// Maximum negative `d`-axis current that flux weakening may add.
     pub max_negative_id: Amps,
     /// Minimum absolute electrical speed required before flux weakening may engage.
@@ -83,7 +81,6 @@ impl FluxWeakeningConfig {
         Self {
             enabled: false,
             voltage_utilization_target: 0.95,
-            bandwidth: RadPerSec::ZERO,
             max_negative_id: Amps::ZERO,
             min_electrical_speed: RadPerSec::ZERO,
         }
@@ -93,14 +90,12 @@ impl FluxWeakeningConfig {
     #[inline]
     pub const fn enabled(
         voltage_utilization_target: f32,
-        bandwidth: RadPerSec,
         max_negative_id: Amps,
         min_electrical_speed: RadPerSec,
     ) -> Self {
         Self {
             enabled: true,
             voltage_utilization_target,
-            bandwidth,
             max_negative_id,
             min_electrical_speed,
         }
@@ -286,7 +281,6 @@ mod tests {
         .current_feedforward(true)
         .flux_weakening(FluxWeakeningConfig::enabled(
             0.9,
-            RadPerSec::new(500.0),
             Amps::new(3.0),
             RadPerSec::new(1_000.0),
         ))

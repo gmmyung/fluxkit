@@ -77,7 +77,6 @@ where
             last_wrapped_mechanical_angle: None,
             last_wrapped_output_angle: None,
             last_current_ref: None,
-            flux_weakening_id: Amps::ZERO,
             status: MotorStatus {
                 state: MotorState::Disabled,
                 mode: ControlMode::Disabled,
@@ -295,7 +294,6 @@ where
         self.position_pi.reset();
         self.current_estimator.reset();
         self.last_current_ref = None;
-        self.flux_weakening_id = Amps::ZERO;
         self.output_torque_target = NewtonMeters::ZERO;
         self.mit_kp = 0.0;
         self.mit_kd = 0.0;

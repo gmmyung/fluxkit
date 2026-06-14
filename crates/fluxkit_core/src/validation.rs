@@ -171,12 +171,10 @@ fn finite_in_range(value: f32, min: f32, max: f32) -> bool {
 fn validate_flux_weakening_config(config: &CurrentLoopConfig) -> bool {
     let flux_weakening = config.flux_weakening;
     finite_in_range(flux_weakening.voltage_utilization_target, 0.0, 1.0)
-        && finite_non_negative(flux_weakening.bandwidth.get())
         && finite_non_negative(flux_weakening.max_negative_id.get())
         && finite_non_negative(flux_weakening.min_electrical_speed.get())
         && (!flux_weakening.enabled
             || (flux_weakening.voltage_utilization_target > 0.0
-                && flux_weakening.bandwidth.get() > 0.0
                 && flux_weakening.max_negative_id.get() > 0.0
                 && flux_weakening.min_electrical_speed.get() > 0.0))
 }

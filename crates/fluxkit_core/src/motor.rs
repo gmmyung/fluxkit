@@ -124,7 +124,6 @@ pub struct MotorController<M = Svpwm, CurrentEst = PassThroughCurrentEstimator> 
     last_wrapped_mechanical_angle: Option<ContinuousMechanicalAngle>,
     last_wrapped_output_angle: Option<ContinuousMechanicalAngle>,
     last_current_ref: Option<fluxkit_math::frame::Dq<Amps>>,
-    flux_weakening_id: Amps,
     status: MotorStatus,
 }
 

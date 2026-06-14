@@ -53,7 +53,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         actuator_params(),
         config(FluxWeakeningConfig::enabled(
             0.86,
-            RadPerSec::new(220.0),
             Amps::new(8.0),
             RadPerSec::new(900.0),
         )),

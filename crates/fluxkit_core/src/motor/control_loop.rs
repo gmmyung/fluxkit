@@ -170,6 +170,8 @@ where
         let current_ref = self.current_reference_with_flux_weakening(
             base_current_ref,
             frame.mechanical_velocity,
+            frame.winding_temperature_c,
+            frame.voltage_limit,
             frame.dt_seconds,
         );
         self.set_pi_output_limits(frame.voltage_limit);
@@ -299,16 +301,18 @@ where
         &mut self,
         base_current_ref: CurrentReference,
         mechanical_velocity: RadPerSec,
+        winding_temperature_c: f32,
+        voltage_limit: f32,
         dt_seconds: f32,
     ) -> CurrentReference {
         let config = self.config.flux_weakening;
-        let electrical_speed = mechanical_velocity_to_electrical(
+        let electrical_velocity = mechanical_velocity_to_electrical(
             mechanical_velocity,
             self.motor.pole_pairs as u32,
             self.motor.electrical_direction,
         )
-        .get()
-        .abs();
+        .get();
+        let electrical_speed = electrical_velocity.abs();
         if !config.enabled
             || !matches!(
                 self.mode,
@@ -321,15 +325,11 @@ where
             || !dt_seconds.is_finite()
             || dt_seconds <= 0.0
         {
-            self.flux_weakening_id = Amps::ZERO;
             self.status.last_flux_weakening_id = Amps::ZERO;
             self.status.last_flux_weakening_active = false;
             return base_current_ref;
         }
 
-        let utilization_error =
-            self.status.last_voltage_utilization - config.voltage_utilization_target;
-        let id_step = utilization_error * config.bandwidth.get() * dt_seconds;
         let max_negative_id =
             current_limit(config.max_negative_id, self.motor.limits.max_phase_current).min(
                 current_limit(
@@ -337,12 +337,13 @@ where
                     self.motor.limits.max_phase_current,
                 ),
             );
-        let flux_weakening_id = clamp(
-            self.flux_weakening_id.get() - id_step,
-            -max_negative_id,
-            0.0,
+        let flux_weakening_id = self.feedforward_flux_weakening_id(
+            base_current_ref,
+            electrical_velocity,
+            winding_temperature_c,
+            voltage_limit * config.voltage_utilization_target,
+            max_negative_id,
         );
-        self.flux_weakening_id = Amps::new(flux_weakening_id);
 
         let id_limit = current_limit(
             self.config.max_id_target,
@@ -356,13 +357,52 @@ where
         let iq_limit = self.iq_limit_for_id(id);
         let iq = clamp(base_current_ref.iq.get(), -iq_limit, iq_limit);
 
-        self.status.last_flux_weakening_id = self.flux_weakening_id;
+        self.status.last_flux_weakening_id = Amps::new(flux_weakening_id);
         self.status.last_flux_weakening_active = flux_weakening_id < 0.0;
 
         CurrentReference {
             id: Amps::new(id),
             iq: Amps::new(iq),
         }
+    }
+
+    fn feedforward_flux_weakening_id(
+        &self,
+        base_current_ref: CurrentReference,
+        electrical_velocity: f32,
+        winding_temperature_c: f32,
+        voltage_target: f32,
+        max_negative_id: f32,
+    ) -> f32 {
+        if !voltage_target.is_finite()
+            || voltage_target <= 0.0
+            || !electrical_velocity.is_finite()
+            || electrical_velocity == 0.0
+        {
+            return 0.0;
+        }
+
+        let ld = self.motor.d_inductance_h.get();
+        if !ld.is_finite() || ld <= 0.0 {
+            return 0.0;
+        }
+
+        let resistance = self.temperature_compensated_phase_resistance_ohm(winding_temperature_c);
+        let id = base_current_ref.id.get();
+        let iq = base_current_ref.iq.get();
+        let q_voltage_without_fw =
+            resistance * iq + electrical_velocity * (ld * id + self.motor.flux_linkage_weber.get());
+        let denominator = electrical_velocity * ld;
+
+        let required_id = if q_voltage_without_fw > voltage_target && denominator > 0.0 {
+            (voltage_target - q_voltage_without_fw) / denominator
+        } else if q_voltage_without_fw < -voltage_target && denominator < 0.0 {
+            (-voltage_target - q_voltage_without_fw) / denominator
+        } else {
+            0.0
+        };
+
+        clamp(required_id, -max_negative_id, 0.0)
     }
 
     fn iq_limit_for_id(&self, id: f32) -> f32 {

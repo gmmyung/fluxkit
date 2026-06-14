@@ -242,12 +242,7 @@ fn positive_iq_target_produces_positive_vq() {
 #[test]
 fn direct_current_mode_bypasses_flux_weakening() {
     let mut config = test_config();
-    config.flux_weakening = FluxWeakeningConfig::enabled(
-        0.5,
-        RadPerSec::new(20_000.0),
-        Amps::new(5.0),
-        RadPerSec::new(1.0),
-    );
+    config.flux_weakening = FluxWeakeningConfig::enabled(0.5, Amps::new(5.0), RadPerSec::new(1.0));
 
     let mut controller = MotorController::new(
         test_motor(),
@@ -269,14 +264,9 @@ fn direct_current_mode_bypasses_flux_weakening() {
 }
 
 #[test]
-fn torque_mode_flux_weakening_injects_negative_id_after_overutilization() {
+fn torque_mode_flux_weakening_injects_negative_id_at_high_speed() {
     let mut config = test_config();
-    config.flux_weakening = FluxWeakeningConfig::enabled(
-        0.5,
-        RadPerSec::new(20_000.0),
-        Amps::new(5.0),
-        RadPerSec::new(1.0),
-    );
+    config.flux_weakening = FluxWeakeningConfig::enabled(0.5, Amps::new(5.0), RadPerSec::new(1.0));
 
     let mut controller = MotorController::new(
         test_motor(),
@@ -291,29 +281,19 @@ fn torque_mode_flux_weakening_injects_negative_id_after_overutilization() {
     controller.enable();
 
     let mut input = test_input();
-    input.rotor.mechanical_velocity = RadPerSec::new(25.0);
+    input.rotor.mechanical_velocity = RadPerSec::new(150.0);
 
-    let first = controller.run_control_cycle(input);
-    assert!(first.commanded_vdq.q.get() > 0.0);
-    assert!(controller.status().last_voltage_utilization > 0.5);
-    assert_eq!(controller.status().last_flux_weakening_id, Amps::ZERO);
-
-    let second = controller.run_control_cycle(input);
+    let output = controller.run_control_cycle(input);
 
     assert!(controller.status().last_flux_weakening_id.get() < 0.0);
     assert!(controller.status().last_flux_weakening_active);
-    assert!(second.commanded_vdq.d.get() < 0.0);
+    assert!(output.commanded_vdq.d.get() < 0.0);
 }
 
 #[test]
 fn flux_weakening_does_not_engage_while_stalled() {
     let mut config = test_config();
-    config.flux_weakening = FluxWeakeningConfig::enabled(
-        0.5,
-        RadPerSec::new(20_000.0),
-        Amps::new(5.0),
-        RadPerSec::new(1.0),
-    );
+    config.flux_weakening = FluxWeakeningConfig::enabled(0.5, Amps::new(5.0), RadPerSec::new(1.0));
 
     let mut controller = MotorController::new(
         test_motor(),
