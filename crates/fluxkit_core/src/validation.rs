@@ -103,7 +103,7 @@ pub fn validate_controller_config(
         && finite_non_negative(config.max_iq_target.get())
         && finite_non_negative(config.max_velocity_target.get())
         && finite_non_negative(config.max_current_ref_derivative_amps_per_sec)
-        && validate_flux_weakening_config(config)
+        && validate_flux_weakening_config(motor, config)
 }
 
 /// Validates one control input frame.
@@ -168,7 +168,7 @@ fn finite_in_range(value: f32, min: f32, max: f32) -> bool {
 }
 
 #[inline]
-fn validate_flux_weakening_config(config: &CurrentLoopConfig) -> bool {
+fn validate_flux_weakening_config(motor: &MotorParams, config: &CurrentLoopConfig) -> bool {
     let flux_weakening = config.flux_weakening;
     finite_in_range(flux_weakening.voltage_utilization_target, 0.0, 1.0)
         && finite_non_negative(flux_weakening.max_negative_id.get())
@@ -176,5 +176,10 @@ fn validate_flux_weakening_config(config: &CurrentLoopConfig) -> bool {
         && (!flux_weakening.enabled
             || (flux_weakening.voltage_utilization_target > 0.0
                 && flux_weakening.max_negative_id.get() > 0.0
+                && config
+                    .max_id_target
+                    .get()
+                    .min(motor.limits.max_phase_current.get())
+                    > 0.0
                 && flux_weakening.min_electrical_speed.get() > 0.0))
 }

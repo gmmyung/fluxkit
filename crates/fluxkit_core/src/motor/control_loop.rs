@@ -355,7 +355,8 @@ where
             id_limit,
         );
         let iq_limit = self.iq_limit_for_id(id);
-        let iq = clamp(base_current_ref.iq.get(), -iq_limit, iq_limit);
+        let torque_preserving_iq = self.iq_preserving_torque_for_id(base_current_ref, id);
+        let iq = clamp(torque_preserving_iq, -iq_limit, iq_limit);
 
         self.status.last_flux_weakening_id = Amps::new(flux_weakening_id);
         self.status.last_flux_weakening_active = flux_weakening_id < 0.0;
@@ -403,6 +404,21 @@ where
         };
 
         clamp(required_id, -max_negative_id, 0.0)
+    }
+
+    fn iq_preserving_torque_for_id(&self, base_current_ref: CurrentReference, id: f32) -> f32 {
+        let flux = self.motor.flux_linkage_weber.get();
+        let saliency = self.motor.d_inductance_h.get() - self.motor.q_inductance_h.get();
+        let base_torque_factor = flux + saliency * base_current_ref.id.get();
+        let adjusted_torque_factor = flux + saliency * id;
+        if !base_torque_factor.is_finite()
+            || !adjusted_torque_factor.is_finite()
+            || adjusted_torque_factor.abs() <= f32::EPSILON
+        {
+            return base_current_ref.iq.get();
+        }
+
+        base_current_ref.iq.get() * base_torque_factor / adjusted_torque_factor
     }
 
     fn iq_limit_for_id(&self, id: f32) -> f32 {

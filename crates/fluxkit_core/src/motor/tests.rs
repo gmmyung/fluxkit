@@ -100,6 +100,11 @@ fn test_input() -> ControlInput {
     }
 }
 
+fn torque_for_current(motor: &MotorParams, id: f32, iq: f32) -> f32 {
+    let saliency = motor.d_inductance_h.get() - motor.q_inductance_h.get();
+    1.5 * motor.pole_pairs as f32 * (motor.flux_linkage_weber.get() + saliency * id) * iq
+}
+
 #[derive(Clone, Copy, Debug)]
 struct FixedCurrentEstimator {
     estimated_idq: Dq<Amps>,
@@ -264,6 +269,27 @@ fn direct_current_mode_bypasses_flux_weakening() {
 }
 
 #[test]
+fn enabled_flux_weakening_requires_d_axis_headroom() {
+    let mut config = test_config();
+    config.max_id_target = Amps::ZERO;
+    config.flux_weakening = FluxWeakeningConfig::enabled(0.5, Amps::new(5.0), RadPerSec::new(1.0));
+
+    let controller = MotorController::new(
+        test_motor(),
+        test_inverter(),
+        test_actuator(),
+        config,
+        Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
+    );
+
+    assert_eq!(
+        controller.status().active_error,
+        Some(Error::ConfigurationInvalid)
+    );
+}
+
+#[test]
 fn torque_mode_flux_weakening_injects_negative_id_at_high_speed() {
     let mut config = test_config();
     config.flux_weakening = FluxWeakeningConfig::enabled(0.5, Amps::new(5.0), RadPerSec::new(1.0));
@@ -288,6 +314,46 @@ fn torque_mode_flux_weakening_injects_negative_id_at_high_speed() {
     assert!(controller.status().last_flux_weakening_id.get() < 0.0);
     assert!(controller.status().last_flux_weakening_active);
     assert!(output.commanded_vdq.d.get() < 0.0);
+}
+
+#[test]
+fn flux_weakening_preserves_salient_motor_torque_by_adjusting_iq() {
+    let mut motor = test_motor();
+    motor.d_inductance_h = Henries::new(0.000_30);
+    motor.q_inductance_h = Henries::new(0.000_60);
+
+    let mut config = test_config();
+    config.flux_weakening = FluxWeakeningConfig::enabled(0.5, Amps::new(5.0), RadPerSec::new(1.0));
+
+    let mut controller = MotorController::new(
+        motor,
+        test_inverter(),
+        test_actuator(),
+        config,
+        Svpwm,
+        crate::PassThroughCurrentEstimator::new(),
+    );
+    controller.set_mode(ControlMode::Torque);
+    controller.set_iq_target(Amps::new(5.0));
+    controller.enable();
+
+    let mut input = test_input();
+    input.rotor.mechanical_velocity = RadPerSec::new(200.0);
+
+    controller.run_control_cycle(input);
+
+    let adjusted_ref = controller.last_current_ref.expect("current reference");
+    assert!(adjusted_ref.d.get() < 0.0);
+    assert!(adjusted_ref.q.get() < 5.0);
+
+    let requested_torque = torque_for_current(&controller.motor, 0.0, 5.0);
+    let adjusted_torque = torque_for_current(
+        &controller.motor,
+        adjusted_ref.d.get(),
+        adjusted_ref.q.get(),
+    );
+
+    assert!((adjusted_torque - requested_torque).abs() < 1.0e-5);
 }
 
 #[test]
