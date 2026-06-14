@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             0.86,
             RadPerSec::new(220.0),
             Amps::new(8.0),
+            RadPerSec::new(900.0),
         )),
         fluxkit_math::Svpwm,
         fluxkit_core::PassThroughCurrentEstimator::new(),

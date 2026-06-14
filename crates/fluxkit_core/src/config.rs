@@ -72,6 +72,8 @@ pub struct FluxWeakeningConfig {
     pub bandwidth: RadPerSec,
     /// Maximum negative `d`-axis current that flux weakening may add.
     pub max_negative_id: Amps,
+    /// Minimum absolute electrical speed required before flux weakening may engage.
+    pub min_electrical_speed: RadPerSec,
 }
 
 impl FluxWeakeningConfig {
@@ -83,6 +85,7 @@ impl FluxWeakeningConfig {
             voltage_utilization_target: 0.95,
             bandwidth: RadPerSec::ZERO,
             max_negative_id: Amps::ZERO,
+            min_electrical_speed: RadPerSec::ZERO,
         }
     }
 
@@ -92,12 +95,14 @@ impl FluxWeakeningConfig {
         voltage_utilization_target: f32,
         bandwidth: RadPerSec,
         max_negative_id: Amps,
+        min_electrical_speed: RadPerSec,
     ) -> Self {
         Self {
             enabled: true,
             voltage_utilization_target,
             bandwidth,
             max_negative_id,
+            min_electrical_speed,
         }
     }
 }
@@ -283,6 +288,7 @@ mod tests {
             0.9,
             RadPerSec::new(500.0),
             Amps::new(3.0),
+            RadPerSec::new(1_000.0),
         ))
         .build();
 
@@ -293,6 +299,10 @@ mod tests {
         assert_eq!(config.max_iq_target, Amps::new(8.0));
         assert!(config.enable_current_feedforward);
         assert_eq!(config.flux_weakening.max_negative_id, Amps::new(3.0));
+        assert_eq!(
+            config.flux_weakening.min_electrical_speed,
+            RadPerSec::new(1_000.0)
+        );
     }
 
     #[test]

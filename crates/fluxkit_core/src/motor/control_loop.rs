@@ -167,8 +167,11 @@ where
             id: self.id_target,
             iq: self.iq_target,
         };
-        let current_ref =
-            self.current_reference_with_flux_weakening(base_current_ref, frame.dt_seconds);
+        let current_ref = self.current_reference_with_flux_weakening(
+            base_current_ref,
+            frame.mechanical_velocity,
+            frame.dt_seconds,
+        );
         self.set_pi_output_limits(frame.voltage_limit);
 
         let feedforward = if self.config.enable_current_feedforward {
@@ -295,9 +298,17 @@ where
     fn current_reference_with_flux_weakening(
         &mut self,
         base_current_ref: CurrentReference,
+        mechanical_velocity: RadPerSec,
         dt_seconds: f32,
     ) -> CurrentReference {
         let config = self.config.flux_weakening;
+        let electrical_speed = mechanical_velocity_to_electrical(
+            mechanical_velocity,
+            self.motor.pole_pairs as u32,
+            self.motor.electrical_direction,
+        )
+        .get()
+        .abs();
         if !config.enabled
             || !matches!(
                 self.mode,
@@ -306,6 +317,7 @@ where
                     | ControlMode::Velocity
                     | ControlMode::Position
             )
+            || electrical_speed < config.min_electrical_speed.get()
             || !dt_seconds.is_finite()
             || dt_seconds <= 0.0
         {
