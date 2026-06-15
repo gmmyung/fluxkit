@@ -51,6 +51,7 @@ fn main() {
         max_velocity_target: RadPerSec::new(500.0),
         max_current_ref_derivative_amps_per_sec: 10_000.0,
         enable_current_feedforward: true,
+        flux_weakening: fluxkit_core::FluxWeakeningConfig::disabled(),
     };
     let actuator = ActuatorParams::from_model_limits_and_compensation(
         ActuatorModel { gear_ratio: 5.0 },

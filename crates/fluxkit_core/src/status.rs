@@ -29,6 +29,12 @@ pub struct MotorStatus {
     pub last_measured_idq: Dq<Amps>,
     /// Most recent limited `d/q` voltage command.
     pub last_commanded_vdq: Dq<Volts>,
+    /// Most recent requested voltage-vector utilization before limiting.
+    pub last_voltage_utilization: f32,
+    /// Most recent flux-weakening `d`-axis current contribution.
+    pub last_flux_weakening_id: Amps,
+    /// Whether flux weakening contributed negative `d`-axis current in the latest cycle.
+    pub last_flux_weakening_active: bool,
     /// Most recent wrapped mechanical rotor angle from the motor encoder in `[-pi, pi)`.
     pub last_rotor_mechanical_angle: ContinuousMechanicalAngle,
     /// Most recent unwrapped mechanical rotor angle accumulated across encoder wraps.

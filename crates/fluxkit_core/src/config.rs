@@ -51,6 +51,55 @@ pub struct CurrentLoopConfig {
     /// The feedforward term uses motor resistance, inductances, pole pairs,
     /// current-reference derivative, mechanical velocity, and optional flux linkage.
     pub enable_current_feedforward: bool,
+    /// Optional flux-weakening policy for generated current targets.
+    ///
+    /// Flux weakening is applied to `Torque`, `Mit`, `Velocity`, and
+    /// `Position` modes. Direct `Current` mode remains explicit and bypasses
+    /// this policy.
+    pub flux_weakening: FluxWeakeningConfig,
+}
+
+/// Flux-weakening policy for high-speed voltage headroom management.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FluxWeakeningConfig {
+    /// Enables flux weakening when `true`.
+    pub enabled: bool,
+    /// Requested voltage utilization as a fraction of the active voltage limit.
+    pub voltage_utilization_target: f32,
+    /// Maximum negative `d`-axis current that flux weakening may add.
+    pub max_negative_id: Amps,
+    /// Minimum absolute electrical speed required before flux weakening may engage.
+    pub min_electrical_speed: RadPerSec,
+}
+
+impl FluxWeakeningConfig {
+    /// Returns a disabled flux-weakening policy.
+    #[inline]
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            voltage_utilization_target: 0.95,
+            max_negative_id: Amps::ZERO,
+            min_electrical_speed: RadPerSec::ZERO,
+        }
+    }
+
+    /// Returns an enabled flux-weakening policy.
+    #[inline]
+    pub const fn enabled(
+        voltage_utilization_target: f32,
+        max_negative_id: Amps,
+        min_electrical_speed: RadPerSec,
+    ) -> Self {
+        Self {
+            enabled: true,
+            voltage_utilization_target,
+            max_negative_id,
+            min_electrical_speed,
+        }
+    }
 }
 
 impl CurrentLoopConfig {
@@ -121,6 +170,7 @@ impl CurrentLoopConfigBuilder {
                 max_velocity_target: RadPerSec::ZERO,
                 max_current_ref_derivative_amps_per_sec: 0.0,
                 enable_current_feedforward: false,
+                flux_weakening: FluxWeakeningConfig::disabled(),
             },
         }
     }
@@ -194,6 +244,13 @@ impl CurrentLoopConfigBuilder {
         self
     }
 
+    /// Sets the flux-weakening policy.
+    #[inline]
+    pub fn flux_weakening(mut self, flux_weakening: FluxWeakeningConfig) -> Self {
+        self.config.flux_weakening = flux_weakening;
+        self
+    }
+
     /// Returns the fully built config.
     #[inline]
     pub const fn build(self) -> CurrentLoopConfig {
@@ -203,7 +260,7 @@ impl CurrentLoopConfigBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::{CurrentLoopConfig, CurrentLoopConfigBuilder};
+    use super::{CurrentLoopConfig, CurrentLoopConfigBuilder, FluxWeakeningConfig};
     use fluxkit_math::units::{Amps, Henries, Ohms, RadPerSec, Volts};
 
     #[test]
@@ -222,6 +279,11 @@ mod tests {
         .max_velocity_target(RadPerSec::new(120.0))
         .max_current_ref_derivative_amps_per_sec(10_000.0)
         .current_feedforward(true)
+        .flux_weakening(FluxWeakeningConfig::enabled(
+            0.9,
+            Amps::new(3.0),
+            RadPerSec::new(1_000.0),
+        ))
         .build();
 
         assert!((config.kp_d - 0.06).abs() < 1.0e-6);
@@ -230,6 +292,11 @@ mod tests {
         assert_eq!(config.ki_q, config.ki_d);
         assert_eq!(config.max_iq_target, Amps::new(8.0));
         assert!(config.enable_current_feedforward);
+        assert_eq!(config.flux_weakening.max_negative_id, Amps::new(3.0));
+        assert_eq!(
+            config.flux_weakening.min_electrical_speed,
+            RadPerSec::new(1_000.0)
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use fluxkit_math::angle::{
 use fluxkit_math::{
     ContinuousMechanicalAngle, Modulator, PiConfig, PiController, Svpwm, clamp, clarke,
     inverse_park, limit_norm_dq, park,
+    scalar::sqrt,
     units::{Amps, NewtonMeters, RadPerSec, Volts},
 };
 

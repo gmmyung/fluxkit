@@ -1,4 +1,4 @@
-use super::support::{dq_is_finite, duty_is_finite};
+use super::support::{current_limit, dq_is_finite, duty_is_finite};
 use super::*;
 
 struct CurrentControlFrame {
@@ -163,10 +163,17 @@ where
     }
 
     fn run_current_control(&mut self, frame: CurrentControlFrame) -> ControlOutput {
-        let current_ref = CurrentReference {
+        let base_current_ref = CurrentReference {
             id: self.id_target,
             iq: self.iq_target,
         };
+        let current_ref = self.current_reference_with_flux_weakening(
+            base_current_ref,
+            frame.mechanical_velocity,
+            frame.winding_temperature_c,
+            frame.voltage_limit,
+            frame.dt_seconds,
+        );
         self.set_pi_output_limits(frame.voltage_limit);
 
         let feedforward = if self.config.enable_current_feedforward {
@@ -235,6 +242,7 @@ where
 
         let limited_vdq = limit_norm_dq(requested_vdq, voltage_limit);
         let controller_saturated = limited_vdq != requested_vdq;
+        self.status.last_voltage_utilization = voltage_utilization(requested_vdq, voltage_limit);
         let voltage_alpha_beta = inverse_park(limited_vdq, electrical_angle);
         let modulation = self.modulator.modulate(voltage_alpha_beta, bus_voltage);
 
@@ -287,6 +295,145 @@ where
             resistance * id + ld * current_ref_derivative.d - omega_e * lq * iq,
             resistance * iq + lq * current_ref_derivative.q + omega_e * (ld * id + flux_linkage),
         )
+    }
+
+    fn current_reference_with_flux_weakening(
+        &mut self,
+        base_current_ref: CurrentReference,
+        mechanical_velocity: RadPerSec,
+        winding_temperature_c: f32,
+        voltage_limit: f32,
+        dt_seconds: f32,
+    ) -> CurrentReference {
+        let config = self.config.flux_weakening;
+        let electrical_velocity = mechanical_velocity_to_electrical(
+            mechanical_velocity,
+            self.motor.pole_pairs as u32,
+            self.motor.electrical_direction,
+        )
+        .get();
+        let electrical_speed = electrical_velocity.abs();
+        if !config.enabled
+            || !matches!(
+                self.mode,
+                ControlMode::Torque
+                    | ControlMode::Mit
+                    | ControlMode::Velocity
+                    | ControlMode::Position
+            )
+            || electrical_speed < config.min_electrical_speed.get()
+            || !dt_seconds.is_finite()
+            || dt_seconds <= 0.0
+        {
+            self.status.last_flux_weakening_id = Amps::ZERO;
+            self.status.last_flux_weakening_active = false;
+            return base_current_ref;
+        }
+
+        let max_negative_id =
+            current_limit(config.max_negative_id, self.motor.limits.max_phase_current).min(
+                current_limit(
+                    self.config.max_id_target,
+                    self.motor.limits.max_phase_current,
+                ),
+            );
+        let flux_weakening_id = self.feedforward_flux_weakening_id(
+            base_current_ref,
+            electrical_velocity,
+            winding_temperature_c,
+            voltage_limit * config.voltage_utilization_target,
+            max_negative_id,
+        );
+
+        let id_limit = current_limit(
+            self.config.max_id_target,
+            self.motor.limits.max_phase_current,
+        );
+        let id = clamp(
+            base_current_ref.id.get() + flux_weakening_id,
+            -id_limit,
+            id_limit,
+        );
+        let iq_limit = self.iq_limit_for_id(id);
+        let torque_preserving_iq = self.iq_preserving_torque_for_id(base_current_ref, id);
+        let iq = clamp(torque_preserving_iq, -iq_limit, iq_limit);
+
+        self.status.last_flux_weakening_id = Amps::new(flux_weakening_id);
+        self.status.last_flux_weakening_active = flux_weakening_id < 0.0;
+
+        CurrentReference {
+            id: Amps::new(id),
+            iq: Amps::new(iq),
+        }
+    }
+
+    fn feedforward_flux_weakening_id(
+        &self,
+        base_current_ref: CurrentReference,
+        electrical_velocity: f32,
+        winding_temperature_c: f32,
+        voltage_target: f32,
+        max_negative_id: f32,
+    ) -> f32 {
+        if !voltage_target.is_finite()
+            || voltage_target <= 0.0
+            || !electrical_velocity.is_finite()
+            || electrical_velocity == 0.0
+        {
+            return 0.0;
+        }
+
+        let ld = self.motor.d_inductance_h.get();
+        if !ld.is_finite() || ld <= 0.0 {
+            return 0.0;
+        }
+
+        let resistance = self.temperature_compensated_phase_resistance_ohm(winding_temperature_c);
+        let id = base_current_ref.id.get();
+        let iq = base_current_ref.iq.get();
+        let q_voltage_without_fw =
+            resistance * iq + electrical_velocity * (ld * id + self.motor.flux_linkage_weber.get());
+        let denominator = electrical_velocity * ld;
+
+        let required_id = if q_voltage_without_fw > voltage_target && denominator > 0.0 {
+            (voltage_target - q_voltage_without_fw) / denominator
+        } else if q_voltage_without_fw < -voltage_target && denominator < 0.0 {
+            (-voltage_target - q_voltage_without_fw) / denominator
+        } else {
+            0.0
+        };
+
+        clamp(required_id, -max_negative_id, 0.0)
+    }
+
+    fn iq_preserving_torque_for_id(&self, base_current_ref: CurrentReference, id: f32) -> f32 {
+        let flux = self.motor.flux_linkage_weber.get();
+        let saliency = self.motor.d_inductance_h.get() - self.motor.q_inductance_h.get();
+        let base_torque_factor = flux + saliency * base_current_ref.id.get();
+        let adjusted_torque_factor = flux + saliency * id;
+        if !base_torque_factor.is_finite()
+            || !adjusted_torque_factor.is_finite()
+            || adjusted_torque_factor.abs() <= f32::EPSILON
+        {
+            return base_current_ref.iq.get();
+        }
+
+        base_current_ref.iq.get() * base_torque_factor / adjusted_torque_factor
+    }
+
+    fn iq_limit_for_id(&self, id: f32) -> f32 {
+        let configured_limit = current_limit(
+            self.config.max_iq_target,
+            self.motor.limits.max_phase_current,
+        );
+        let phase_limit = self.motor.limits.max_phase_current.get();
+        let id_abs = id.abs();
+        if id_abs >= phase_limit {
+            return 0.0;
+        }
+
+        let remaining_phase_current = sqrt(phase_limit * phase_limit - id_abs * id_abs).max(0.0);
+        configured_limit.min(remaining_phase_current)
     }
 
     fn temperature_compensated_phase_resistance_ohm(&self, winding_temperature_c: f32) -> f32 {
@@ -376,4 +523,18 @@ where
             ))
         })
     }
+}
+
+#[inline]
+fn voltage_utilization(requested_vdq: fluxkit_math::frame::Dq<f32>, voltage_limit: f32) -> f32 {
+    if !voltage_limit.is_finite() || voltage_limit <= 0.0 {
+        return 0.0;
+    }
+
+    let mag2 = requested_vdq.d * requested_vdq.d + requested_vdq.q * requested_vdq.q;
+    if !mag2.is_finite() || mag2 <= 0.0 {
+        return 0.0;
+    }
+
+    sqrt(mag2) / voltage_limit
 }

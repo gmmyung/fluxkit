@@ -21,11 +21,13 @@ XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --exam
 XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_position -- "$plots_dir/closed_loop_position.svg"
 XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_torque_command -- "$plots_dir/closed_loop_torque_command.svg"
 XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example closed_loop_velocity_command -- "$plots_dir/closed_loop_velocity_command.svg"
+XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit-pmsm-sim --example flux_weakening_comparison -- "$plots_dir/flux_weakening_comparison.svg"
 XDG_CACHE_HOME="$cache_home" "${runner[@]}" cargo run -p fluxkit_math --example plot_modulation -- "$plots_dir"
 
 cp "$plots_dir/closed_loop_current.svg" "$core_plots_dir/closed_loop_current.svg"
 cp "$plots_dir/closed_loop_torque_command.svg" "$core_plots_dir/closed_loop_torque_command.svg"
 cp "$plots_dir/closed_loop_velocity_command.svg" "$core_plots_dir/closed_loop_velocity_command.svg"
+cp "$plots_dir/flux_weakening_comparison.svg" "$core_plots_dir/flux_weakening_comparison.svg"
 cp "$plots_dir/modulation_comparison.svg" "$math_plots_dir/modulation_comparison.svg"
 
 echo "Done."

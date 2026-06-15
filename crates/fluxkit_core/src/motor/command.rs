@@ -85,6 +85,9 @@ where
                 last_winding_temperature_c: PHASE_RESISTANCE_REFERENCE_TEMP_C,
                 last_measured_idq: zero_current_dq(),
                 last_commanded_vdq: zero_voltage_dq(),
+                last_voltage_utilization: 0.0,
+                last_flux_weakening_id: Amps::ZERO,
+                last_flux_weakening_active: false,
                 last_rotor_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 last_unwrapped_rotor_mechanical_angle: ContinuousMechanicalAngle::new(0.0),
                 last_rotor_mechanical_velocity: RadPerSec::ZERO,
@@ -295,6 +298,9 @@ where
         self.mit_kp = 0.0;
         self.mit_kd = 0.0;
         self.status.last_actuator_compensation = ActuatorCompensationTelemetry::zero();
+        self.status.last_flux_weakening_id = Amps::ZERO;
+        self.status.last_flux_weakening_active = false;
+        self.status.last_voltage_utilization = 0.0;
     }
 
     pub(super) fn neutral_output(&self, _error: Error) -> ControlOutput {
